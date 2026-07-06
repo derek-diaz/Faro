@@ -1,0 +1,5 @@
+# Faro sample blocklist
+0.0.0.0 ads.example.com
+127.0.0.1 tracker.example.net
+badtelemetry.example.org
+! comments starting with bang are ignored

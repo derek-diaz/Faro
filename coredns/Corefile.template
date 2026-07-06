@@ -1,0 +1,10 @@
+.:53 {
+    errors
+    log
+    reload 2s
+    hosts /etc/coredns/faro.hosts {
+        ttl 60
+        fallthrough
+    }
+    forward . 1.1.1.1 9.9.9.9
+}

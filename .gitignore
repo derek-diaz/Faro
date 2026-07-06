@@ -1,0 +1,12 @@
+.env.local
+.DS_Store
+node_modules/
+dist/
+backend/tmp/
+.tmp/
+frontend/dist/
+*.db
+*.db-shm
+*.db-wal
+coverage/
+.idea

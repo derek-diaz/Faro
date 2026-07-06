@@ -1,0 +1,11 @@
+FROM coredns/coredns:1.11.3 AS coredns
+
+FROM alpine:3.20
+
+RUN adduser -D -H coredns
+COPY --from=coredns /coredns /usr/local/bin/coredns
+RUN mkdir -p /etc/coredns /var/log/coredns && chown -R coredns:coredns /etc/coredns /var/log/coredns
+USER coredns
+EXPOSE 53 53/udp
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["touch /var/log/coredns/query.log && coredns -conf /etc/coredns/Corefile 2>&1 | tee -a /var/log/coredns/query.log"]

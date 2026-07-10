@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, type DomainEntry } from "../api/client";
+import { EmptyState } from "../components/EmptyState";
 
 type ListsProps = {
   allowlist: DomainEntry[];
@@ -45,7 +46,13 @@ function DomainEditor({ title, entries, actionLabel, add, remove, refresh }: Dom
         <button type="submit">{actionLabel}</button>
       </form>
       <div className="domain-list">
-        {entries.map((entry) => (
+        {entries.length === 0 ? (
+          <EmptyState
+            title={title.includes("allow") ? "No allowed domains yet" : "No manually blocked domains yet"}
+            body={title.includes("allow") ? "Allowed domains you add will override blocking rules." : "Manual blocks you add will appear here."}
+          />
+        ) : (
+        entries.map((entry) => (
           <div className="domain-entry" key={entry.id}>
             <span>{entry.domain}</span>
             <button
@@ -59,7 +66,8 @@ function DomainEditor({ title, entries, actionLabel, add, remove, refresh }: Dom
               Remove
             </button>
           </div>
-        ))}
+        ))
+        )}
       </div>
     </section>
   );

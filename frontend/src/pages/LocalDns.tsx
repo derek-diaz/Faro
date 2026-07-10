@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api, type DNSRecord } from "../api/client";
+import { EmptyState } from "../components/EmptyState";
 
 type LocalDnsProps = {
   records: DNSRecord[];
@@ -40,6 +41,9 @@ export function LocalDns({ records, refresh }: LocalDnsProps) {
         <div className="panel-title">
           <h2>Local DNS records</h2>
         </div>
+        {records.length === 0 ? (
+          <EmptyState title="No local records yet" body="Add names for devices or services you want Faro to resolve on your network." />
+        ) : (
         <div className="table-wrap">
           <table>
             <thead>
@@ -78,6 +82,7 @@ export function LocalDns({ records, refresh }: LocalDnsProps) {
             </tbody>
           </table>
         </div>
+        )}
       </section>
 
       <section className="panel form-panel">

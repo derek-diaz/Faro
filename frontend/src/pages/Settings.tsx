@@ -5,9 +5,10 @@ import { api, type Setting } from "../api/client";
 type SettingsProps = {
   settings: Setting[];
   refresh: () => Promise<void>;
+  onManageUpstreams: () => void;
 };
 
-export function Settings({ settings, refresh }: SettingsProps) {
+export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps) {
   const [form, setForm] = useState<Record<string, string>>({});
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [reloadState, setReloadState] = useState<"idle" | "reloading" | "reloaded" | "error">("idle");
@@ -73,15 +74,11 @@ export function Settings({ settings, refresh }: SettingsProps) {
             <div className="settings-card-icon">
               <Server size={22} />
             </div>
-            <label>
-              Upstream DNS servers
-              <input
-                value={form.upstream_dns ?? ""}
-                onChange={(event) => setForm({ ...form, upstream_dns: event.target.value })}
-                placeholder="1.1.1.1,9.9.9.9"
-              />
-              <span>Comma-separated resolvers used when Faro forwards non-local queries.</span>
-            </label>
+            <div className="setting-copy">
+              <strong>Upstream DNS servers</strong>
+              <span>{upstreams.length} servers configured: {upstreams.join(", ") || "none"}</span>
+              <button type="button" className="secondary settings-link-button" onClick={onManageUpstreams}>Manage upstream providers</button>
+            </div>
           </div>
 
           <div className="settings-card">

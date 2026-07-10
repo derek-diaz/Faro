@@ -91,11 +91,40 @@ func (s *Store) migrate(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_timestamp ON dns_queries(timestamp);`,
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_domain ON dns_queries(domain);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_client_ip ON dns_queries(client_ip);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_action ON dns_queries(action);`,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS device_aliases (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			client_ip TEXT NOT NULL UNIQUE,
+			name TEXT NOT NULL,
+			location TEXT,
+			notes TEXT,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			timestamp TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			type TEXT NOT NULL,
+			severity TEXT NOT NULL DEFAULT 'info',
+			title TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			client_ip TEXT,
+			domain TEXT,
+			metadata TEXT NOT NULL DEFAULT '{}',
+			source TEXT NOT NULL DEFAULT 'faro',
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);`,
+		`CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);`,
+		`CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);`,
+		`CREATE INDEX IF NOT EXISTS idx_events_domain ON events(domain);`,
+		`CREATE INDEX IF NOT EXISTS idx_events_client_ip ON events(client_ip);`,
 		`CREATE TABLE IF NOT EXISTS domain_favicons (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			domain TEXT NOT NULL UNIQUE,

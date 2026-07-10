@@ -68,7 +68,7 @@ FARO_SEED_DEMO_QUERIES=true
 - Generated `local.hosts` and `blocklist.hosts`
 - Safe file replacement with rollback if generated CoreDNS files cannot be written
 - CoreDNS log tailer that parses query logs into SQLite
-- React UI pages for Dashboard, Query Log, Local DNS, Blocklists, Allowlist / Blocklist, and Settings
+- React UI pages for Dashboard, Activity, Devices, Local DNS, Blocklists, Allowlist / Blocklist, and Settings
 - Favicon fetching for public-looking domains when enabled, with local placeholder circles for local-only names
 
 ## DNS behavior

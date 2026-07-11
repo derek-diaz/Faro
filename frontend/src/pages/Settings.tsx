@@ -1,4 +1,4 @@
-import { CheckCircle2, Database, Globe2, Image, RotateCw, Save, Server, ShieldAlert } from "lucide-react";
+import { CheckCircle2, Database, Gauge, Globe2, Image, RotateCw, Save, Server, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, type Setting } from "../api/client";
 
@@ -35,7 +35,7 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
       await api.updateSettings(form);
       await refresh();
       setSaveState("saved");
-      setMessage("Settings saved and CoreDNS reload requested.");
+      setMessage("Settings saved and the DNS engine reloaded.");
     } catch (caught) {
       setSaveState("error");
       setMessage(caught instanceof Error ? caught.message : "Failed to save settings.");
@@ -48,7 +48,7 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
     try {
       await api.reload();
       setReloadState("reloaded");
-      setMessage("CoreDNS reload completed.");
+      setMessage("DNS engine reload completed.");
     } catch (caught) {
       setReloadState("error");
       setMessage(caught instanceof Error ? caught.message : "CoreDNS reload failed.");
@@ -112,6 +112,28 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
             </label>
           </div>
 
+          <div className="settings-card cache-settings-card">
+            <div className="settings-card-icon">
+              <Gauge size={22} />
+            </div>
+            <div className="setting-copy">
+              <strong>DNS response cache</strong>
+              <span>Answer repeated public lookups locally to reduce latency and upstream traffic. Shorter authoritative TTLs are still respected.</span>
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={form.dns_cache_enabled !== "false"}
+                  onChange={(event) => setForm({ ...form, dns_cache_enabled: String(event.target.checked) })}
+                />
+                Enable DNS caching
+              </label>
+              <label className="cache-ttl-field">
+                Maximum cache TTL
+                <span><input type="number" min="30" max="3600" step="30" disabled={form.dns_cache_enabled === "false"} value={form.dns_cache_ttl ?? "300"} onChange={(event) => setForm({ ...form, dns_cache_ttl: event.target.value })} /><em>seconds</em></span>
+              </label>
+            </div>
+          </div>
+
           <div className="settings-card favicon-settings-card">
             <div className="settings-card-icon">
               <Image size={22} />
@@ -149,6 +171,7 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
             <SummaryRow label="Upstreams" value={upstreams.length > 0 ? upstreams.join(", ") : "Not set"} />
             <SummaryRow label="Local suffix" value={form.local_domain_suffix || "home"} />
             <SummaryRow label="Retention" value={`${form.retention_days || "30"} days`} />
+            <SummaryRow label="DNS cache" value={form.dns_cache_enabled !== "false" ? `${form.dns_cache_ttl || "300"}s maximum` : "Disabled"} />
             <SummaryRow label="Favicon fetcher" value={form.favicon_fetching_enabled === "true" ? "Enabled" : "Disabled"} />
           </div>
         </section>

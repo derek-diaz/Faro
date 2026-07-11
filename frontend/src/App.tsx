@@ -16,9 +16,9 @@ import { GlobalSearch } from "./components/GlobalSearch";
 import { Layout } from "./components/Layout";
 import { NotificationDrawer } from "./components/NotificationDrawer";
 import { Blocklists } from "./pages/Blocklists";
+import { Allowlist } from "./pages/Allowlist";
 import { Dashboard } from "./pages/Dashboard";
 import { Devices } from "./pages/Devices";
-import { Lists } from "./pages/Lists";
 import { LocalDns } from "./pages/LocalDns";
 import { QueryLog } from "./pages/QueryLog";
 import { Settings } from "./pages/Settings";
@@ -26,8 +26,38 @@ import { Upstreams } from "./pages/Upstreams";
 
 export type Page = "dashboard" | "queries" | "devices" | "records" | "upstreams" | "blocklists" | "lists" | "settings";
 
+const pagePaths: Record<Page, string> = {
+  dashboard: "/",
+  queries: "/activity",
+  devices: "/devices",
+  records: "/local-dns",
+  upstreams: "/upstreams",
+  blocklists: "/blocklists",
+  lists: "/allowlist",
+  settings: "/settings"
+};
+
+const pageLabels: Record<Page, string> = {
+  dashboard: "Dashboard",
+  queries: "Activity",
+  devices: "Devices",
+  records: "Local DNS",
+  upstreams: "Upstreams",
+  blocklists: "Blocklists",
+  lists: "Allowlist",
+  settings: "Settings"
+};
+
+type AppRoute = {
+  page: Page;
+  clientIP: string | null;
+  domain: string | null;
+  canonicalPath: string;
+};
+
 export function App() {
-  const [page, setPage] = useState<Page>("dashboard");
+  const [initialRoute] = useState(readRoute);
+  const [page, setPageState] = useState<Page>(initialRoute.page);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [queries, setQueries] = useState<DNSQuery[]>([]);
   const [events, setEvents] = useState<FaroEvent[]>([]);
@@ -37,11 +67,11 @@ export function App() {
   const [allowlist, setAllowlist] = useState<DomainEntry[]>([]);
   const [manualBlocks, setManualBlocks] = useState<DomainEntry[]>([]);
   const [settings, setSettings] = useState<Setting[]>([]);
-  const [notifications, setNotifications] = useState<NotificationsResponse>({ unread_count: 0, items: [] });
+  const [notifications, setNotifications] = useState<NotificationsResponse>({ attention_count: 0, unread_count: 0, items: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
-  const [selectedClientIP, setSelectedClientIP] = useState<string | null>(null);
+  const [selectedDomain, setSelectedDomain] = useState<string | null>(initialRoute.domain);
+  const [selectedClientIP, setSelectedClientIPState] = useState<string | null>(initialRoute.clientIP);
   const [searchOpen, setSearchOpen] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
 
@@ -86,10 +116,30 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (`${window.location.pathname}${window.location.search}` !== initialRoute.canonicalPath) {
+      window.history.replaceState({}, "", initialRoute.canonicalPath);
+    }
+    function onPopState() {
+      const route = readRoute();
+      setPageState(route.page);
+      setSelectedClientIPState(route.clientIP);
+      setSelectedDomain(route.domain);
+      setSearchOpen(false);
+      setNotificationOpen(false);
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [initialRoute]);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       void refreshLiveData();
     }, 5000);
     return () => window.clearInterval(timer);
+  }, [page]);
+
+  useEffect(() => {
+    document.title = `${pageLabels[page]} | Faro`;
   }, [page]);
 
   useEffect(() => {
@@ -134,6 +184,46 @@ export function App() {
     await api.reload();
   }
 
+  function navigateToPage(nextPage: Page) {
+    setPageState(nextPage);
+    setSelectedDomain(null);
+    if (nextPage !== "devices") setSelectedClientIPState(null);
+    const target = nextPage === "devices" && selectedClientIP
+      ? `/devices/${encodeURIComponent(selectedClientIP)}`
+      : pagePaths[nextPage];
+    pushRoute(target);
+    window.scrollTo({ top: 0 });
+  }
+
+  function selectDevice(clientIP: string | null, replace = false) {
+    setPageState("devices");
+    setSelectedClientIPState(clientIP);
+    setSelectedDomain(null);
+    const target = clientIP ? `/devices/${encodeURIComponent(clientIP)}` : pagePaths.devices;
+    const invalidCurrentSelection = selectedClientIP !== null && !devices.some((device) => device.client_ip === selectedClientIP);
+    const shouldReplace = replace || invalidCurrentSelection || (window.location.pathname === pagePaths.devices && clientIP !== null);
+    pushRoute(target, shouldReplace);
+  }
+
+  function openDevice(clientIP: string) {
+    selectDevice(clientIP, false);
+    window.scrollTo({ top: 0 });
+  }
+
+  function openDomain(domain: string) {
+    setSelectedDomain(domain);
+    const url = new URL(window.location.href);
+    url.searchParams.set("domain", domain);
+    pushRoute(`${url.pathname}${url.search}`);
+  }
+
+  function closeDomain() {
+    setSelectedDomain(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("domain");
+    pushRoute(`${url.pathname}${url.search}`, true);
+  }
+
   const content = (() => {
     switch (page) {
       case "dashboard":
@@ -142,9 +232,10 @@ export function App() {
             summary={summary}
             settings={settings}
             loading={loading}
-            onDomainSelect={setSelectedDomain}
-            onViewActivity={() => setPage("queries")}
-            onViewDevices={() => setPage("devices")}
+            onDomainSelect={openDomain}
+            onViewActivity={() => navigateToPage("queries")}
+            onViewDevices={() => navigateToPage("devices")}
+            onManageUpstreams={() => navigateToPage("upstreams")}
           />
         );
       case "queries":
@@ -152,11 +243,8 @@ export function App() {
           <QueryLog
             events={events}
             refresh={refreshQueries}
-            onDomainSelect={setSelectedDomain}
-            onDeviceSelect={(clientIP) => {
-              setSelectedClientIP(clientIP);
-              setPage("devices");
-            }}
+            onDomainSelect={openDomain}
+            onDeviceSelect={openDevice}
           />
         );
       case "devices":
@@ -165,8 +253,8 @@ export function App() {
             devices={devices}
             refresh={refreshDevices}
             selectedClientIP={selectedClientIP}
-            onSelectClient={setSelectedClientIP}
-            onDomainSelect={setSelectedDomain}
+            onSelectClient={selectDevice}
+            onDomainSelect={openDomain}
           />
         );
       case "records":
@@ -174,18 +262,18 @@ export function App() {
       case "upstreams":
         return <Upstreams settings={settings} refresh={loadAll} />;
       case "blocklists":
-        return <Blocklists blocklists={blocklists} refresh={loadAll} />;
+        return <Blocklists blocklists={blocklists} manualBlocks={manualBlocks} refresh={loadAll} />;
       case "lists":
-        return <Lists allowlist={allowlist} blocklist={manualBlocks} refresh={loadAll} />;
+        return <Allowlist entries={allowlist} refresh={loadAll} />;
       case "settings":
-        return <Settings settings={settings} refresh={loadAll} onManageUpstreams={() => setPage("upstreams")} />;
+        return <Settings settings={settings} refresh={loadAll} onManageUpstreams={() => navigateToPage("upstreams")} />;
     }
   })();
 
   return (
     <Layout
       page={page}
-      setPage={setPage}
+      setPage={navigateToPage}
       apiState={apiState}
       onReload={reloadCoreDNS}
       onOpenSearch={() => setSearchOpen(true)}
@@ -202,27 +290,64 @@ export function App() {
         </div>
       )}
       {content}
-      <DomainDrawer domain={selectedDomain} onClose={() => setSelectedDomain(null)} onChanged={loadAll} />
+      <DomainDrawer domain={selectedDomain} onClose={closeDomain} onChanged={loadAll} />
       <GlobalSearch
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
-        setPage={setPage}
-        onDomainSelect={setSelectedDomain}
-        onDeviceSelect={(clientIP) => {
-          setSelectedClientIP(clientIP);
-          setPage("devices");
-        }}
+        setPage={navigateToPage}
+        onDomainSelect={openDomain}
+        onDeviceSelect={openDevice}
       />
       <NotificationDrawer
         open={notificationOpen}
         notifications={notifications.items}
+        attentionCount={notifications.attention_count}
         onClose={() => setNotificationOpen(false)}
-        onDomainSelect={setSelectedDomain}
-        onDeviceSelect={(clientIP) => {
-          setSelectedClientIP(clientIP);
-          setPage("devices");
-        }}
+        onDomainSelect={openDomain}
+        onDeviceSelect={openDevice}
+        setPage={navigateToPage}
       />
     </Layout>
   );
+}
+
+function readRoute(): AppRoute {
+  const pathname = normalizePath(window.location.pathname);
+  const domain = new URLSearchParams(window.location.search).get("domain");
+  const directPage = (Object.entries(pagePaths) as [Page, string][]).find(([, path]) => path === pathname)?.[0];
+  if (directPage) return { page: directPage, clientIP: null, domain, canonicalPath: withDomain(pagePaths[directPage], domain) };
+
+  if (pathname.startsWith("/devices/")) {
+    const encodedClientIP = pathname.slice("/devices/".length);
+    try {
+      const clientIP = decodeURIComponent(encodedClientIP);
+      if (clientIP.trim()) return { page: "devices", clientIP, domain, canonicalPath: withDomain(`/devices/${encodeURIComponent(clientIP)}`, domain) };
+    } catch {
+      // Invalid path segments fall through to the Devices index.
+    }
+    return { page: "devices", clientIP: null, domain, canonicalPath: withDomain(pagePaths.devices, domain) };
+  }
+
+  const legacyPages: Record<string, Page> = { "/query-log": "queries", "/records": "records", "/lists": "lists", "/rules": "lists" };
+  const legacyPage = legacyPages[pathname];
+  if (legacyPage) return { page: legacyPage, clientIP: null, domain, canonicalPath: withDomain(pagePaths[legacyPage], domain) };
+  return { page: "dashboard", clientIP: null, domain: null, canonicalPath: pagePaths.dashboard };
+}
+
+function normalizePath(pathname: string) {
+  if (pathname === "/") return pathname;
+  return pathname.replace(/\/+$/, "") || "/";
+}
+
+function withDomain(pathname: string, domain: string | null) {
+  if (!domain) return pathname;
+  const params = new URLSearchParams({ domain });
+  return `${pathname}?${params.toString()}`;
+}
+
+function pushRoute(target: string, replace = false) {
+  const current = `${window.location.pathname}${window.location.search}`;
+  if (current === target) return;
+  if (replace) window.history.replaceState({}, "", target);
+  else window.history.pushState({}, "", target);
 }

@@ -1,10 +1,13 @@
-import { Activity, CheckCircle2, ListFilter, MonitorSmartphone, RadioTower, ShieldCheck, ShieldX } from "lucide-react";
-import type { ReactNode } from "react";
-import type { DashboardSummary, Setting } from "../api/client";
+import { Activity, CheckCircle2, Database, Gauge, ListFilter, MonitorSmartphone, RadioTower, RefreshCw, Server, ShieldX } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { api, type DashboardSummary, type Setting, type UpstreamProbe } from "../api/client";
 import { DomainFavicon } from "../components/DomainFavicon";
+import { ProviderLogo } from "../components/ProviderLogo";
+import { ResolutionSource } from "../components/ResolutionSource";
 import { Sparkline } from "../components/Sparkline";
 import { StatusBadge } from "../components/StatusBadge";
 import { TrafficChart } from "../components/TrafficChart";
+import { findUpstreamAddress, parseUpstreamServers } from "../data/upstreams";
 
 type DashboardProps = {
   summary: DashboardSummary | null;
@@ -13,17 +16,63 @@ type DashboardProps = {
   onDomainSelect: (domain: string) => void;
   onViewActivity: () => void;
   onViewDevices: () => void;
+  onManageUpstreams: () => void;
 };
 
-export function Dashboard({ summary, settings, loading, onDomainSelect, onViewActivity, onViewDevices }: DashboardProps) {
+export function Dashboard({ summary, settings, loading, onDomainSelect, onViewActivity, onViewDevices, onManageUpstreams }: DashboardProps) {
+  const upstreams = useMemo(() => parseUpstreamServers(settings.find((setting) => setting.key === "upstream_dns")?.value ?? "1.1.1.1,9.9.9.9"), [settings]);
+  const [upstreamProbes, setUpstreamProbes] = useState<Record<string, UpstreamProbe>>({});
+  const [probingUpstreams, setProbingUpstreams] = useState(false);
+  const [probeCheckedAt, setProbeCheckedAt] = useState<string | null>(null);
+  const [upstreamProbeError, setUpstreamProbeError] = useState("");
+  const upstreamKey = upstreams.join(",");
+
+  useEffect(() => {
+    if (!upstreams.length) return undefined;
+    let cancelled = false;
+    async function runProbe() {
+      setProbingUpstreams(true);
+      setUpstreamProbeError("");
+      try {
+        const response = await api.probeUpstreams(upstreams);
+        if (!cancelled) {
+          setUpstreamProbes(Object.fromEntries(response.items.map((probe) => [probe.address, probe])));
+          setProbeCheckedAt(response.items[0]?.checked_at ?? new Date().toISOString());
+        }
+      } catch {
+        if (!cancelled) setUpstreamProbeError("Latency check unavailable");
+      } finally {
+        if (!cancelled) setProbingUpstreams(false);
+      }
+    }
+    void runProbe();
+    const timer = window.setInterval(() => void runProbe(), 15000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [upstreamKey]);
+
+  async function refreshUpstreamLatency() {
+    if (!upstreams.length) return;
+    setProbingUpstreams(true);
+    setUpstreamProbeError("");
+    try {
+      const response = await api.probeUpstreams(upstreams);
+      setUpstreamProbes(Object.fromEntries(response.items.map((probe) => [probe.address, probe])));
+      setProbeCheckedAt(response.items[0]?.checked_at ?? new Date().toISOString());
+    } catch {
+      setUpstreamProbeError("Latency check unavailable");
+    } finally {
+      setProbingUpstreams(false);
+    }
+  }
+
   if (loading || !summary) {
     return <div className="loading-panel">Loading dashboard...</div>;
   }
 
-  const upstreams = (settings.find((setting) => setting.key === "upstream_dns")?.value ?? "1.1.1.1,9.9.9.9")
-    .split(",")
-    .map((upstream) => upstream.trim())
-    .filter(Boolean);
+  const bestUpstream = bestDashboardProbe(upstreams, upstreamProbes);
   const activity = summary.sparklines?.activity ?? [];
   const blocked = summary.sparklines?.blocked ?? [];
   const deviceHealth = summary.health_cards?.find((card) => card.label.toLowerCase().includes("device"));
@@ -42,6 +91,7 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
         <div className="status-facts">
           <span><RadioTower size={15} /> DNS online</span>
           <span><CheckCircle2 size={15} /> {upstreams.length} upstream{upstreams.length === 1 ? "" : "s"}</span>
+          <span><Gauge size={15} /> {bestUpstream?.latency_ms !== null && bestUpstream?.latency_ms !== undefined ? `${formatLatency(bestUpstream.latency_ms)} ms fastest` : probingUpstreams ? "Testing latency" : "Latency unavailable"}</span>
           <span><ListFilter size={15} /> {summary.enabled_blocklists} active list{summary.enabled_blocklists === 1 ? "" : "s"}</span>
         </div>
       </section>
@@ -50,7 +100,7 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
         <OverviewMetric label="Queries today" value={formatNumber(summary.total_queries_today)} detail="DNS requests" icon={<Activity size={18} />} sparkline={activity} />
         <OverviewMetric label="Blocked" value={formatNumber(summary.blocked_queries_today)} detail={`${summary.block_percentage.toFixed(1)}% of traffic`} tone="blocked" icon={<ShieldX size={18} />} sparkline={blocked} />
         <OverviewMetric label="Active devices" value={activeDevices} detail="Seen today" icon={<MonitorSmartphone size={18} />} />
-        <OverviewMetric label="Filtering" value={formatNumber(summary.blocklist_entries)} detail={`${summary.enabled_blocklists} enabled blocklists`} icon={<ShieldCheck size={18} />} />
+        <OverviewMetric label="Cache hit rate" value={summary.cache.enabled ? `${summary.cache.hit_rate_today.toFixed(1)}%` : "Off"} detail={summary.cache.enabled ? summary.cache.hits_today > 0 ? `${formatNumber(summary.cache.hits_today)} avoided · ${formatLatency(summary.cache.average_cache_latency_ms)} ms avg` : "Warming up" : "Enable in Settings"} icon={<Database size={18} />} />
       </div>
 
       <div className="dashboard-main-grid">
@@ -68,20 +118,28 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
           <TrafficChart activity={activity} blocked={blocked} />
         </section>
 
-        <section className="panel service-panel">
+        <section className="panel service-panel upstream-dashboard-panel">
           <div className="panel-title dashboard-panel-title">
             <div>
-              <h2>DNS service</h2>
-              <p>Current configuration</p>
+              <h2>Upstream resolvers</h2>
+              <p>Live response time · {formatNumber(summary.cache.upstream_queries_today)} calls · {formatLatency(summary.cache.average_upstream_latency_ms)} ms avg</p>
             </div>
-            <span className="service-state"><span /> Healthy</span>
+            <div className="dashboard-upstream-actions">
+              <span className="service-state"><span /> {probingUpstreams ? "Testing" : "Live"}</span>
+              <button className="icon-button" type="button" onClick={() => void refreshUpstreamLatency()} disabled={probingUpstreams} aria-label="Refresh dashboard upstream latency"><RefreshCw className={probingUpstreams ? "spinning" : ""} size={15} /></button>
+            </div>
           </div>
-          <div className="service-list">
-            <ServiceRow label="Resolver" value="Online" />
-            <ServiceRow label="Upstreams" value={upstreams.join(", ") || "Not configured"} />
-            <ServiceRow label="Blocklists" value={`${summary.enabled_blocklists} enabled`} />
-            <ServiceRow label="Domains filtered" value={formatNumber(summary.blocklist_entries)} />
+          <div className="dashboard-upstream-list">
+            {upstreams.map((address) => {
+              const match = findUpstreamAddress(address);
+              return <div className="dashboard-upstream-row" key={address}>
+                <span className="dashboard-provider-logo">{match ? <ProviderLogo providerID={match.provider.id} providerName={match.provider.name} /> : <Server size={17} />}</span>
+                <div><strong>{match?.provider.name ?? "Custom resolver"}</strong><span>{match?.profile.name ?? "Custom DNS"}</span><code>{address}</code></div>
+                <DashboardProbeBadge probe={upstreamProbes[address]} loading={probingUpstreams && !upstreamProbes[address]} />
+              </div>;
+            })}
           </div>
+          <div className="dashboard-upstream-footer"><span className={upstreamProbeError ? "dashboard-upstream-error" : ""}>{upstreamProbeError || (probeCheckedAt ? `Updated ${new Date(probeCheckedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Starting latency check")}</span><button className="text-action" type="button" onClick={onManageUpstreams}>Compare providers</button></div>
         </section>
       </div>
 
@@ -130,7 +188,7 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
                     </td>
                     <td>{query.client_ip}</td>
                     <td><span className="query-type-chip">{query.query_type}</span></td>
-                    <td className="muted-column">{query.source}</td>
+                    <td><ResolutionSource source={query.source} upstream={query.upstream} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -158,13 +216,24 @@ function OverviewMetric({ label, value, detail, icon, tone = "default", sparklin
   );
 }
 
-function ServiceRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="service-row">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
+function DashboardProbeBadge({ probe, loading }: { probe?: UpstreamProbe; loading: boolean }) {
+  if (!probe) return <span className="dashboard-probe-badge pending"><span />{loading ? "Testing" : "Not tested"}</span>;
+  if (probe.status !== "online" || probe.latency_ms === null) return <span className="dashboard-probe-badge offline"><span />Unavailable</span>;
+  return <span className={`dashboard-probe-badge ${latencyTone(probe.latency_ms)}`}><span />{formatLatency(probe.latency_ms)} ms</span>;
+}
+
+function bestDashboardProbe(addresses: string[], probes: Record<string, UpstreamProbe>) {
+  return addresses.map((address) => probes[address]).filter((probe): probe is UpstreamProbe => probe?.status === "online" && probe.latency_ms !== null).sort((left, right) => (left.latency_ms ?? Infinity) - (right.latency_ms ?? Infinity))[0];
+}
+
+function formatLatency(value: number) {
+  return value >= 100 ? Math.round(value).toString() : value.toFixed(value >= 10 ? 0 : 1);
+}
+
+function latencyTone(value: number) {
+  if (value < 40) return "fast";
+  if (value < 100) return "moderate";
+  return "slow";
 }
 
 function RankPanel({ title, items, empty, showFavicons = false, tone = "default", onSelect, onViewAll }: { title: string; items: { label: string; count: number }[]; empty: string; showFavicons?: boolean; tone?: "default" | "blocked"; onSelect?: (label: string) => void; onViewAll?: () => void }) {

@@ -9,4 +9,5 @@ frontend/dist/
 *.db-shm
 *.db-wal
 coverage/
+.cache/
 .idea

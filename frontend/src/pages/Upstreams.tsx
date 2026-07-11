@@ -1,94 +1,76 @@
-import { AlertTriangle, Check, Plus, RotateCcw, Save, Server, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Check, Gauge, Plus, RefreshCw, RotateCcw, Save, Server, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { api, type Setting } from "../api/client";
-import { DomainFavicon } from "../components/DomainFavicon";
+import { api, type Setting, type UpstreamProbe } from "../api/client";
+import { allCatalogAddresses, findUpstreamAddress, parseUpstreamServers, upstreamProviders, type ResolverProfile } from "../data/upstreams";
+import { ProviderLogo } from "../components/ProviderLogo";
 
 type UpstreamsProps = {
   settings: Setting[];
   refresh: () => Promise<void>;
 };
 
-type FilteringMode = "none" | "security" | "family" | "ads";
-
-type ResolverProfile = {
-  id: string;
-  name: string;
-  description: string;
-  addresses: string[];
-  mode: FilteringMode;
-  badges: string[];
-  recommended?: boolean;
-};
-
-type ResolverProvider = {
-  id: string;
-  name: string;
-  domain: string;
-  description: string;
-  profiles: ResolverProfile[];
-};
-
-const providers: ResolverProvider[] = [
-  {
-    id: "cloudflare",
-    name: "Cloudflare",
-    domain: "cloudflare.com",
-    description: "Fast, privacy-focused public DNS with optional malware and family filtering.",
-    profiles: [
-      { id: "cloudflare-standard", name: "Standard", description: "Fast DNS without content filtering.", addresses: ["1.1.1.1", "1.0.0.1"], mode: "none", badges: ["Private", "Unfiltered"], recommended: true },
-      { id: "cloudflare-malware", name: "Malware blocking", description: "Blocks known malware and phishing domains.", addresses: ["1.1.1.2", "1.0.0.2"], mode: "security", badges: ["Security"] },
-      { id: "cloudflare-family", name: "Family", description: "Blocks malware and adult content.", addresses: ["1.1.1.3", "1.0.0.3"], mode: "family", badges: ["Security", "Family"] }
-    ]
-  },
-  {
-    id: "google",
-    name: "Google Public DNS",
-    domain: "google.com",
-    description: "Global public resolver focused on speed, security, and accurate DNS answers.",
-    profiles: [
-      { id: "google-standard", name: "Standard", description: "Reliable DNS without general content filtering.", addresses: ["8.8.8.8", "8.8.4.4"], mode: "none", badges: ["Global", "Unfiltered"], recommended: true }
-    ]
-  },
-  {
-    id: "quad9",
-    name: "Quad9",
-    domain: "quad9.net",
-    description: "Privacy-first DNS with DNSSEC and optional threat blocking.",
-    profiles: [
-      { id: "quad9-secure", name: "Secure", description: "Blocks known malicious domains and validates DNSSEC.", addresses: ["9.9.9.9", "149.112.112.112"], mode: "security", badges: ["Malware blocking", "DNSSEC"], recommended: true },
-      { id: "quad9-unfiltered", name: "No threat blocking", description: "Privacy-focused resolution without threat blocking.", addresses: ["9.9.9.10", "149.112.112.10"], mode: "none", badges: ["Private", "Unfiltered"] },
-      { id: "quad9-ecs", name: "Secure + ECS", description: "Threat blocking with ECS for improved CDN location responses.", addresses: ["9.9.9.11", "149.112.112.11"], mode: "security", badges: ["Malware blocking", "ECS"] }
-    ]
-  },
-  {
-    id: "adguard",
-    name: "AdGuard DNS",
-    domain: "adguard-dns.io",
-    description: "Public DNS with built-in ad, tracker, and family filtering options.",
-    profiles: [
-      { id: "adguard-default", name: "Default", description: "Blocks ads and trackers at the DNS layer.", addresses: ["94.140.14.14", "94.140.15.15"], mode: "ads", badges: ["Ads", "Trackers"], recommended: true },
-      { id: "adguard-unfiltered", name: "Non-filtering", description: "AdGuard infrastructure without content filtering.", addresses: ["94.140.14.140", "94.140.14.141"], mode: "none", badges: ["Unfiltered"] },
-      { id: "adguard-family", name: "Family protection", description: "Blocks ads, trackers, adult content, and enables Safe Search where possible.", addresses: ["94.140.14.15", "94.140.15.16"], mode: "family", badges: ["Ads", "Family", "Safe Search"] }
-    ]
-  }
-];
-
 export function Upstreams({ settings, refresh }: UpstreamsProps) {
-  const configured = useMemo(() => parseServers(settings.find((setting) => setting.key === "upstream_dns")?.value ?? ""), [settings]);
+  const configured = useMemo(() => parseUpstreamServers(settings.find((setting) => setting.key === "upstream_dns")?.value ?? ""), [settings]);
   const [selected, setSelected] = useState<string[]>(configured);
   const [customInput, setCustomInput] = useState("");
   const [customError, setCustomError] = useState("");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [message, setMessage] = useState("");
+  const [probes, setProbes] = useState<Record<string, UpstreamProbe>>({});
+  const [probing, setProbing] = useState(false);
+  const [probeError, setProbeError] = useState("");
+  const [lastChecked, setLastChecked] = useState<string | null>(null);
 
   useEffect(() => {
     setSelected(configured);
   }, [configured.join(",")]);
 
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const probeAddresses = useMemo(() => unique([...allCatalogAddresses(), ...selected]), [selected.join(",")]);
+  const probeKey = probeAddresses.join(",");
   const dirty = selected.join(",") !== configured.join(",");
-  const selectedProfiles = providers.flatMap((provider) => provider.profiles.filter((profile) => profile.addresses.some((address) => selectedSet.has(address))));
+  const selectedProfiles = upstreamProviders.flatMap((provider) => provider.profiles.filter((profile) => profile.addresses.some((address) => selectedSet.has(address))));
   const mixesFiltering = selectedProfiles.some((profile) => profile.mode === "none") && selectedProfiles.some((profile) => profile.mode !== "none");
+  const fastestProfileID = fastestProfile(probes);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function runProbe() {
+      setProbing(true);
+      setProbeError("");
+      try {
+        const response = await api.probeUpstreams(probeAddresses);
+        if (!cancelled) {
+          setProbes(Object.fromEntries(response.items.map((probe) => [probe.address, probe])));
+          setLastChecked(response.items[0]?.checked_at ?? new Date().toISOString());
+        }
+      } catch (caught) {
+        if (!cancelled) setProbeError(caught instanceof Error ? caught.message : "Latency check failed.");
+      } finally {
+        if (!cancelled) setProbing(false);
+      }
+    }
+    void runProbe();
+    const timer = window.setInterval(() => void runProbe(), 30000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [probeKey]);
+
+  async function refreshLatency() {
+    setProbing(true);
+    setProbeError("");
+    try {
+      const response = await api.probeUpstreams(probeAddresses);
+      setProbes(Object.fromEntries(response.items.map((probe) => [probe.address, probe])));
+      setLastChecked(response.items[0]?.checked_at ?? new Date().toISOString());
+    } catch (caught) {
+      setProbeError(caught instanceof Error ? caught.message : "Latency check failed.");
+    } finally {
+      setProbing(false);
+    }
+  }
 
   function toggleProfile(profile: ResolverProfile) {
     const fullySelected = profile.addresses.every((address) => selectedSet.has(address));
@@ -101,7 +83,7 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
 
   function addCustomServers(event: FormEvent) {
     event.preventDefault();
-    const candidates = parseServers(customInput.replace(/\s+/g, ","));
+    const candidates = parseUpstreamServers(customInput.replace(/\s+/g, ","));
     if (candidates.length === 0 || candidates.some((server) => !isIPAddress(server))) {
       setCustomError("Enter valid IPv4 or IPv6 addresses separated by commas or spaces.");
       return;
@@ -134,36 +116,31 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
   return (
     <div className="upstreams-layout">
       <div className="upstream-catalog">
-        <section className="upstream-intro-strip">
-          <div>
-            <strong>Plain DNS upstreams</strong>
-            <span>Choose one or more profiles. Each profile adds both provider addresses for redundancy.</span>
+        <section className="upstream-toolbar" aria-label="Resolver comparison controls">
+          <div className="upstream-live-state">
+            <span><Gauge size={15} /> Live latency</span>
+            <small>{lastChecked ? `Checked ${new Date(lastChecked).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Checking providers..."}</small>
           </div>
-          <span className="configured-count"><Server size={16} /> {selected.length} server{selected.length === 1 ? "" : "s"} selected</span>
+          <div className="upstream-toolbar-actions">
+            <button className="secondary compact-button" type="button" onClick={() => void refreshLatency()} disabled={probing} aria-label="Refresh upstream latency"><RefreshCw className={probing ? "spinning" : ""} size={15} /><span>Refresh</span></button>
+          </div>
         </section>
 
-        {mixesFiltering && (
-          <div className="upstream-warning">
-            <AlertTriangle size={18} />
-            <div>
-              <strong>Mixed filtering policies</strong>
-              <span>CoreDNS may use any selected server. Combining filtered and unfiltered profiles can make provider-level blocking inconsistent.</span>
-            </div>
-          </div>
-        )}
+        {probeError && <div className="upstream-probe-error"><AlertTriangle size={16} /><span>{probeError}</span></div>}
 
         <div className="provider-list">
-          {providers.map((provider) => (
-            <section className="provider-panel" key={provider.id}>
+          {upstreamProviders.map((provider) => {
+            const providerProbe = bestProbe(provider.profiles.flatMap((profile) => profile.addresses), probes);
+            return <section className="provider-panel" key={provider.id}>
               <header className="provider-header">
                 <div className="provider-identity">
-                  <span className="provider-logo"><DomainFavicon domain={provider.domain} /></span>
+                  <span className="provider-logo"><ProviderLogo providerID={provider.id} providerName={provider.name} /></span>
                   <div>
                     <h2>{provider.name}</h2>
                     <p>{provider.description}</p>
                   </div>
                 </div>
-                <span>{provider.profiles.length} option{provider.profiles.length === 1 ? "" : "s"}</span>
+                <div className="provider-live-summary"><span>{provider.profiles.length} option{provider.profiles.length === 1 ? "" : "s"}</span><ProbeBadge probe={providerProbe} loading={probing && !providerProbe} /></div>
               </header>
 
               <div className="resolver-profile-list">
@@ -171,6 +148,7 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
                   const selectedCount = profile.addresses.filter((address) => selectedSet.has(address)).length;
                   const fullySelected = selectedCount === profile.addresses.length;
                   const partiallySelected = selectedCount > 0 && !fullySelected;
+                  const profileProbe = bestProbe(profile.addresses, probes);
                   return (
                     <button
                       className={`resolver-profile ${fullySelected ? "selected" : ""} ${partiallySelected ? "partial" : ""}`}
@@ -183,18 +161,22 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
                       <span className="profile-copy">
                         <span className="profile-title-row">
                           <strong>{profile.name}</strong>
-                          {profile.recommended && <em>Recommended</em>}
+                          <span className="profile-title-badges">
+                            {profile.id === fastestProfileID && <em className="fastest">Fastest</em>}
+                            {profile.recommended && <em>Recommended</em>}
+                          </span>
                         </span>
                         <span>{profile.description}</span>
-                        <span className="profile-addresses">{profile.addresses.join(" · ")}</span>
+                        <span className="profile-latency"><Gauge size={14} /><ProbeText probe={profileProbe} loading={probing && !profileProbe} /></span>
+                        <span className="profile-addresses">{profile.addresses.map((address) => <span key={address}><code>{address}</code><ProbeText probe={probes[address]} compact loading={probing && !probes[address]} /></span>)}</span>
                       </span>
                       <span className="profile-badges">{profile.badges.map((badge) => <span key={badge}>{badge}</span>)}</span>
                     </button>
                   );
                 })}
               </div>
-            </section>
-          ))}
+            </section>;
+          })}
         </div>
 
         <section className="panel custom-upstream-panel">
@@ -218,21 +200,29 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
             <span>Current selection</span>
             <strong>{selected.length} upstream server{selected.length === 1 ? "" : "s"}</strong>
           </div>
-          <span className="selection-status"><ShieldCheck size={15} /> Ready</span>
+          <span className={`selection-status ${dirty ? "pending" : ""}`}>{dirty ? <AlertTriangle size={15} /> : <ShieldCheck size={15} />} {dirty ? "Unsaved" : "Active"}</span>
         </div>
+
+        {mixesFiltering && (
+          <div className="selection-policy-note">
+            <AlertTriangle size={16} />
+            <div><strong>Mixed filtering</strong><span>Filtered and unfiltered resolvers are selected, so blocking results can vary.</span></div>
+          </div>
+        )}
 
         <div className="selected-server-list">
           {selected.length === 0 ? (
             <div className="selection-empty">Choose a provider profile or add a custom resolver.</div>
-          ) : selected.map((server, index) => {
-            const match = findAddress(server);
+          ) : selected.map((server) => {
+            const match = findUpstreamAddress(server);
             return (
               <div className="selected-server" key={server}>
-                <span className="server-order">{index + 1}</span>
+                <span className="selected-provider-logo">{match ? <ProviderLogo providerID={match.provider.id} providerName={match.provider.name} /> : <Server size={15} />}</span>
                 <div>
                   <strong>{server}</strong>
                   <span>{match ? `${match.provider.name} · ${match.profile.name}` : "Custom resolver"}</span>
                 </div>
+                <ProbeBadge probe={probes[server]} loading={probing && !probes[server]} compact />
                 <button className="icon-button" type="button" onClick={() => setSelected((current) => current.filter((address) => address !== server))} aria-label={`Remove ${server}`}><X size={15} /></button>
               </div>
             );
@@ -240,8 +230,8 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
         </div>
 
         <div className="selection-note">
-          <strong>How selection works</strong>
-          <span>CoreDNS forwards requests across these servers. Faro blocklists and manual rules are applied before forwarding.</span>
+          <strong>How latency is measured</strong>
+          <span>Response time is measured from the Faro host. Your devices may see slightly different results.</span>
         </div>
 
         <div className="selection-actions">
@@ -252,10 +242,6 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
       </aside>
     </div>
   );
-}
-
-function parseServers(value: string) {
-  return unique(value.split(",").map((server) => server.trim()).filter(Boolean));
 }
 
 function unique(values: string[]) {
@@ -275,11 +261,50 @@ function isIPAddress(value: string) {
   return parts.length === 4 && parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255);
 }
 
-function findAddress(address: string) {
-  for (const provider of providers) {
+function bestProbe(addresses: string[], probes: Record<string, UpstreamProbe>) {
+  return addresses
+    .map((address) => probes[address])
+    .filter((probe): probe is UpstreamProbe => probe?.status === "online" && probe.latency_ms !== null)
+    .sort((left, right) => (left.latency_ms ?? Infinity) - (right.latency_ms ?? Infinity))[0];
+}
+
+function fastestProfile(probes: Record<string, UpstreamProbe>) {
+  let fastestID: string | null = null;
+  let fastestLatency = Infinity;
+  for (const provider of upstreamProviders) {
     for (const profile of provider.profiles) {
-      if (profile.addresses.includes(address)) return { provider, profile };
+      const probe = bestProbe(profile.addresses, probes);
+      if (probe?.latency_ms !== null && probe?.latency_ms !== undefined && probe.latency_ms < fastestLatency) {
+        fastestID = profile.id;
+        fastestLatency = probe.latency_ms;
+      }
     }
   }
-  return null;
+  return fastestID;
+}
+
+function ProbeText({ probe, loading = false, compact = false }: { probe?: UpstreamProbe; loading?: boolean; compact?: boolean }) {
+  const state = probeState(probe, loading);
+  return <span className={`probe-text ${state.tone} ${compact ? "compact" : ""}`}>{state.label}</span>;
+}
+
+function ProbeBadge({ probe, loading = false, compact = false }: { probe?: UpstreamProbe; loading?: boolean; compact?: boolean }) {
+  const state = probeState(probe, loading);
+  return <span className={`probe-badge ${state.tone} ${compact ? "compact" : ""}`}><span />{state.label}</span>;
+}
+
+function probeState(probe?: UpstreamProbe, loading = false) {
+  if (!probe) return { label: loading ? "Testing" : "Not tested", tone: "pending" };
+  if (probe.status === "online" && probe.latency_ms !== null) return { label: `${formatLatency(probe.latency_ms)} ms`, tone: latencyTone(probe.latency_ms) };
+  return { label: "Unavailable", tone: "offline" };
+}
+
+function formatLatency(value: number) {
+  return value >= 100 ? Math.round(value).toString() : value.toFixed(value >= 10 ? 0 : 1);
+}
+
+function latencyTone(value: number) {
+  if (value < 40) return "fast";
+  if (value < 100) return "moderate";
+  return "slow";
 }

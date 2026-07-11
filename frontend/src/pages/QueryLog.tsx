@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { api, type FaroEvent } from "../api/client";
 import { DomainFavicon } from "../components/DomainFavicon";
 import { EmptyState } from "../components/EmptyState";
+import { ResolutionSource } from "../components/ResolutionSource";
 
 type QueryLogProps = {
   events: FaroEvent[];
@@ -11,7 +12,7 @@ type QueryLogProps = {
   onDeviceSelect: (clientIP: string) => void;
 };
 
-type EventFilter = "all" | "dns" | "blocked" | "system";
+type EventFilter = "all" | "dns" | "cache" | "upstream" | "blocked" | "system";
 
 export function QueryLog({ events, refresh, onDomainSelect, onDeviceSelect }: QueryLogProps) {
   const [search, setSearch] = useState("");
@@ -21,12 +22,16 @@ export function QueryLog({ events, refresh, onDomainSelect, onDeviceSelect }: Qu
   const counts = useMemo(() => ({
     all: events.length,
     dns: events.filter((event) => event.type === "dns.query" || event.type === "dns.blocked").length,
+    cache: events.filter((event) => event.source === "cache").length,
+    upstream: events.filter((event) => event.source === "upstream").length,
     blocked: events.filter((event) => event.type === "dns.blocked").length,
     system: events.filter((event) => event.type !== "dns.query" && event.type !== "dns.blocked").length
   }), [events]);
 
   const visibleEvents = useMemo(() => events.filter((event) => {
     if (filter === "dns") return event.type === "dns.query" || event.type === "dns.blocked";
+    if (filter === "cache") return event.source === "cache";
+    if (filter === "upstream") return event.source === "upstream";
     if (filter === "blocked") return event.type === "dns.blocked";
     if (filter === "system") return event.type !== "dns.query" && event.type !== "dns.blocked";
     return true;
@@ -79,6 +84,8 @@ export function QueryLog({ events, refresh, onDomainSelect, onDeviceSelect }: Qu
           <div className="event-filter-tabs" role="group" aria-label="Filter activity">
             <FilterButton active={filter === "all"} label="All" count={counts.all} onClick={() => setFilter("all")} />
             <FilterButton active={filter === "dns"} label="DNS" count={counts.dns} onClick={() => setFilter("dns")} />
+            <FilterButton active={filter === "cache"} label="Cache" count={counts.cache} onClick={() => setFilter("cache")} />
+            <FilterButton active={filter === "upstream"} label="Upstream" count={counts.upstream} onClick={() => setFilter("upstream")} />
             <FilterButton active={filter === "blocked"} label="Blocked" count={counts.blocked} onClick={() => setFilter("blocked")} />
             <FilterButton active={filter === "system"} label="System" count={counts.system} onClick={() => setFilter("system")} />
           </div>
@@ -130,7 +137,7 @@ export function QueryLog({ events, refresh, onDomainSelect, onDeviceSelect }: Qu
                         ) : <span className="empty-cell">—</span>}
                       </td>
                       <td><span className="event-type-chip">{friendlyType(event.type)}</span></td>
-                      <td className="muted-column">{event.source}</td>
+                      <td><ResolutionSource source={event.source} upstream={eventUpstream(event)} /></td>
                       <td className="event-actions-cell">
                         {domain && (
                           <div className="table-icon-actions">
@@ -149,6 +156,11 @@ export function QueryLog({ events, refresh, onDomainSelect, onDeviceSelect }: Qu
       </section>
     </div>
   );
+}
+
+function eventUpstream(event: FaroEvent) {
+  const value = event.metadata?.upstream;
+  return typeof value === "string" ? value : null;
 }
 
 function ActivityStat({ label, value, tone = "default" }: { label: string; value: number; tone?: "default" | "blocked" }) {

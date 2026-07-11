@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"text/template"
@@ -24,9 +25,10 @@ type Manager struct {
 }
 
 type renderState struct {
-	Upstreams []string
-	LocalHost string
-	BlockHost string
+	Upstreams    []string
+	CacheEnabled bool
+	CacheTTL     int
+	DenialTTL    int
 }
 
 func NewManager(store *db.Store, configDir string) *Manager {
@@ -81,6 +83,12 @@ func (m *Manager) render(ctx context.Context) (renderedFiles, error) {
 	if len(upstreams) == 0 {
 		upstreams = []string{"1.1.1.1", "9.9.9.9"}
 	}
+	cacheEnabled := settings["dns_cache_enabled"] != "false"
+	cacheTTL := 300
+	if parsed, parseErr := strconv.Atoi(settings["dns_cache_ttl"]); parseErr == nil {
+		cacheTTL = max(30, min(parsed, 3600))
+	}
+	denialTTL := min(cacheTTL, 60)
 
 	localHosts, err := m.localHosts(ctx)
 	if err != nil {
@@ -93,17 +101,23 @@ func (m *Manager) render(ctx context.Context) (renderedFiles, error) {
 
 	corefileTemplate := template.Must(template.New("Corefile").Parse(`.:53 {
     errors
-    log
+    metadata
+    log . "FARO|{remote}|{type}|{name}|{rcode}|{duration}|{/forward/upstream}"
+    prometheus 0.0.0.0:9153
     reload 2s
     hosts /etc/coredns/faro.hosts {
         ttl 60
         fallthrough
     }
-    forward . {{ range .Upstreams }}{{ . }} {{ end }}
+    {{ if .CacheEnabled }}cache {{ .CacheTTL }} {
+        success 9984 {{ .CacheTTL }} 5
+        denial 4096 {{ .DenialTTL }} 5
+    }
+    {{ end }}forward . {{ range .Upstreams }}{{ . }} {{ end }}
 }
 `))
 	var core bytes.Buffer
-	if err := corefileTemplate.Execute(&core, renderState{Upstreams: upstreams}); err != nil {
+	if err := corefileTemplate.Execute(&core, renderState{Upstreams: upstreams, CacheEnabled: cacheEnabled, CacheTTL: cacheTTL, DenialTTL: denialTTL}); err != nil {
 		return renderedFiles{}, err
 	}
 	return renderedFiles{

@@ -10,6 +10,7 @@ services:
       FARO_DB_PATH: /data/faro.db
       FARO_COREDNS_CONFIG_DIR: /coredns
       FARO_COREDNS_LOG_PATH: /var/log/coredns/query.log
+      FARO_COREDNS_METRICS_URL: http://coredns:9153/metrics
     volumes:
       - faro-data:/data
       - coredns-config:/coredns

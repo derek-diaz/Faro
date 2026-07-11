@@ -15,6 +15,8 @@ export type Blocklist = {
   enabled: boolean;
   entry_count: number;
   last_refreshed_at?: string | null;
+  created_at?: string;
+  updated_at?: string;
 };
 
 export type DomainEntry = {
@@ -31,6 +33,7 @@ export type DNSQuery = {
   query_type: string;
   action: "allowed" | "blocked";
   source: string;
+  upstream?: string | null;
   latency_ms?: number | null;
 };
 
@@ -48,6 +51,31 @@ export type DeviceSummary = {
   first_seen?: string | null;
   profile: string;
   recent_activity?: DNSQuery[];
+};
+
+export type ReplayBucket = {
+  timestamp: string;
+  total: number;
+  blocked: number;
+};
+
+export type DeviceReplay = {
+  client_ip: string;
+  range: string;
+  from: string;
+  to: string;
+  bucket_seconds: number;
+  total_queries: number;
+  blocked_queries: number;
+  unique_domains: number;
+  queries_per_minute: number;
+  first_seen?: string | null;
+  last_seen?: string | null;
+  buckets: ReplayBucket[];
+  top_domains: CountItem[];
+  sources: CountItem[];
+  events: DNSQuery[];
+  truncated: boolean;
 };
 
 export type DomainSummary = {
@@ -122,6 +150,7 @@ export type DashboardSummary = {
   block_percentage: number;
   enabled_blocklists: number;
   blocklist_entries: number;
+  cache: CacheSummary;
   network_summary: NetworkSummary;
   health_cards: HealthCard[];
   stories: DashboardStory[];
@@ -134,6 +163,20 @@ export type DashboardSummary = {
   upstream_health: string;
   upstream_health_status: string;
   favicon_fetching_enabled: string;
+};
+
+export type CacheSummary = {
+  enabled: boolean;
+  metrics_available: boolean;
+  entries: number;
+  hits_since_restart: number;
+  requests_since_restart: number;
+  hit_rate_since_restart: number;
+  hits_today: number;
+  upstream_queries_today: number;
+  hit_rate_today: number;
+  average_cache_latency_ms: number;
+  average_upstream_latency_ms: number;
 };
 
 export type CountItem = {
@@ -163,8 +206,21 @@ export type SearchResults = {
 };
 
 export type NotificationsResponse = {
+  attention_count: number;
   unread_count: number;
   items: FaroEvent[];
+};
+
+export type UpstreamProbe = {
+  address: string;
+  status: "online" | "unavailable";
+  latency_ms: number | null;
+  checked_at: string;
+  error?: string;
+};
+
+export type UpstreamProbeResponse = {
+  items: UpstreamProbe[];
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
@@ -186,8 +242,10 @@ export const api = {
   queries: (search = "") => request<DNSQuery[]>(`/api/queries?search=${encodeURIComponent(search)}`),
   events: (search = "") => request<FaroEvent[]>(`/api/events?search=${encodeURIComponent(search)}`),
   notifications: () => request<NotificationsResponse>("/api/notifications"),
+  probeUpstreams: (addresses: string[]) => request<UpstreamProbeResponse>("/api/upstreams/probe", { method: "POST", body: JSON.stringify({ addresses }) }),
   devices: () => request<DeviceSummary[]>("/api/devices"),
   device: (clientIP: string) => request<DeviceSummary>(`/api/devices/${encodeURIComponent(clientIP)}`),
+  deviceReplay: (clientIP: string, range = "7d") => request<DeviceReplay>(`/api/devices/${encodeURIComponent(clientIP)}/replay?range=${encodeURIComponent(range)}`),
   updateDeviceAlias: (clientIP: string, alias: { name: string; location?: string; notes?: string }) =>
     request<{ ok: boolean }>(`/api/devices/${encodeURIComponent(clientIP)}/alias`, { method: "PUT", body: JSON.stringify(alias) }),
   domainSummary: (domain: string) => request<DomainSummary>(`/api/domains/${encodeURIComponent(domain)}/summary`),
@@ -204,6 +262,7 @@ export const api = {
   updateBlocklist: (blocklist: Blocklist) =>
     request<{ ok: boolean }>(`/api/blocklists/${blocklist.id}`, { method: "PUT", body: JSON.stringify(blocklist) }),
   refreshBlocklist: (id: number) => request<{ entry_count: number }>(`/api/blocklists/${id}/refresh`, { method: "POST" }),
+  refreshBlocklists: () => request<{ updated: number; entry_count: number }>("/api/blocklists/refresh", { method: "POST" }),
   deleteBlocklist: (id: number) => request<{ ok: boolean }>(`/api/blocklists/${id}`, { method: "DELETE" }),
   allowlist: () => request<DomainEntry[]>("/api/allowlist"),
   blockDomains: () => request<DomainEntry[]>("/api/blocklist-domains"),

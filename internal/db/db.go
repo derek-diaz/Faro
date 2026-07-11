@@ -86,12 +86,14 @@ func (s *Store) migrate(ctx context.Context) error {
 			query_type TEXT NOT NULL,
 			action TEXT NOT NULL,
 			source TEXT NOT NULL,
+			upstream TEXT NOT NULL DEFAULT '',
 			latency_ms REAL,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_timestamp ON dns_queries(timestamp);`,
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_domain ON dns_queries(domain);`,
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_client_ip ON dns_queries(client_ip);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_client_timestamp ON dns_queries(client_ip, timestamp);`,
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_action ON dns_queries(action);`,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
@@ -140,6 +142,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE dns_queries ADD COLUMN upstream TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		return err
+	}
 	return nil
 }
 
@@ -149,6 +154,8 @@ func (s *Store) seed(ctx context.Context) error {
 		"local_domain_suffix":      "home",
 		"retention_days":           "30",
 		"favicon_fetching_enabled": "false",
+		"dns_cache_enabled":        "true",
+		"dns_cache_ttl":            "300",
 	}
 	for key, value := range defaults {
 		if _, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)`, key, value); err != nil {
@@ -156,6 +163,9 @@ func (s *Store) seed(ctx context.Context) error {
 		}
 	}
 	if err := s.removeLegacyDemoQueries(ctx); err != nil {
+		return err
+	}
+	if err := s.removeLegacyDemoRules(ctx); err != nil {
 		return err
 	}
 
@@ -178,37 +188,36 @@ func (s *Store) seed(ctx context.Context) error {
 		}
 	}
 
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM manual_block_entries`).Scan(&count); err != nil {
-		return err
-	}
-	if count == 0 {
-		for _, domain := range []string{"ads.example.com", "tracker.example.net"} {
-			if _, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO manual_block_entries(domain) VALUES(?)`, domain); err != nil {
-				return err
-			}
-		}
-	}
-
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM blocklists`).Scan(&count); err != nil {
-		return err
-	}
-	if count == 0 {
-		result, err := s.DB.ExecContext(ctx, `INSERT INTO blocklists(name, url, enabled, last_refreshed_at) VALUES(?, ?, 1, CURRENT_TIMESTAMP)`, "Faro sample blocklist", "file:///app/coredns/sample-blocklist.txt")
-		if err != nil {
-			return err
-		}
-		id, _ := result.LastInsertId()
-		for _, domain := range []string{"ads.example.com", "badtelemetry.example.org", "tracker.example.net"} {
-			if _, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO blocklist_entries(blocklist_id, domain) VALUES(?, ?)`, id, domain); err != nil {
-				return err
-			}
-		}
-	}
-
 	if os.Getenv("FARO_SEED_DEMO_QUERIES") == "true" {
 		return s.seedDemoQueries(ctx)
 	}
 	return nil
+}
+
+func (s *Store) removeLegacyDemoRules(ctx context.Context) error {
+	var marker string
+	err := s.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'legacy_demo_rules_removed'`).Scan(&marker)
+	if err == nil && marker == "true" {
+		return nil
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM manual_block_entries WHERE domain IN ('ads.example.com', 'tracker.example.net')`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM blocklists WHERE name = 'Faro sample blocklist' AND url = 'file:///app/coredns/sample-blocklist.txt'`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value, updated_at) VALUES('legacy_demo_rules_removed', 'true', CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) removeLegacyDemoQueries(ctx context.Context) error {

@@ -1,12 +1,15 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -30,6 +33,7 @@ type Server struct {
 	reloader   CoreDNSManager
 	refresher  blocklists.Refresher
 	faviconDir string
+	metricsURL string
 }
 
 func NewServer(store *db.Store, reloader CoreDNSManager) http.Handler {
@@ -38,6 +42,7 @@ func NewServer(store *db.Store, reloader CoreDNSManager) http.Handler {
 		reloader:   reloader,
 		refresher:  blocklists.Refresher{Store: store},
 		faviconDir: env("FARO_FAVICON_DIR", "/data/favicons"),
+		metricsURL: env("FARO_COREDNS_METRICS_URL", "http://coredns:9153/metrics"),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.health)
@@ -53,6 +58,7 @@ func NewServer(store *db.Store, reloader CoreDNSManager) http.Handler {
 	mux.HandleFunc("/api/queries", server.queries)
 	mux.HandleFunc("/api/events", server.events)
 	mux.HandleFunc("/api/notifications", server.notifications)
+	mux.HandleFunc("/api/upstreams/probe", server.upstreamProbes)
 	mux.HandleFunc("/api/devices", server.devices)
 	mux.HandleFunc("/api/devices/", server.device)
 	mux.HandleFunc("/api/domains/", server.domainSummary)
@@ -73,6 +79,122 @@ func env(key, fallback string) string {
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "faro-api"})
+}
+
+func (s *Server) upstreamProbes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w)
+		return
+	}
+	var input struct {
+		Addresses []string `json:"addresses"`
+	}
+	if !decode(w, r, &input) {
+		return
+	}
+	addresses := []string{}
+	seen := map[string]bool{}
+	for _, rawAddress := range input.Addresses {
+		address := strings.TrimSpace(rawAddress)
+		if address == "" || seen[address] {
+			continue
+		}
+		if net.ParseIP(address) == nil {
+			writeBadRequest(w, fmt.Errorf("invalid upstream IP address: %s", address))
+			return
+		}
+		seen[address] = true
+		addresses = append(addresses, address)
+	}
+	if len(addresses) == 0 {
+		writeBadRequest(w, errors.New("at least one upstream IP address is required"))
+		return
+	}
+	if len(addresses) > 32 {
+		writeBadRequest(w, errors.New("a maximum of 32 upstreams can be probed at once"))
+		return
+	}
+
+	type indexedProbe struct {
+		index int
+		probe map[string]any
+	}
+	results := make([]map[string]any, len(addresses))
+	probes := make(chan indexedProbe, len(addresses))
+	for index, address := range addresses {
+		go func(index int, address string) {
+			probes <- indexedProbe{index: index, probe: probeDNSUpstream(r.Context(), address)}
+		}(index, address)
+	}
+	for range addresses {
+		result := <-probes
+		results[result.index] = result.probe
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": results})
+}
+
+func probeDNSUpstream(ctx context.Context, address string) map[string]any {
+	checkedAt := time.Now().UTC()
+	result := map[string]any{
+		"address":    address,
+		"status":     "unavailable",
+		"latency_ms": nil,
+		"checked_at": checkedAt.Format(time.RFC3339),
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
+	defer cancel()
+	connection, err := (&net.Dialer{}).DialContext(probeCtx, "udp", net.JoinHostPort(address, "53"))
+	if err != nil {
+		result["error"] = compactProbeError(err)
+		return result
+	}
+	defer connection.Close()
+	_ = connection.SetDeadline(time.Now().Add(1500 * time.Millisecond))
+
+	queryID := uint16(time.Now().UnixNano())
+	query := dnsProbeQuery(queryID, "example.com")
+	started := time.Now()
+	if _, err := connection.Write(query); err != nil {
+		result["error"] = compactProbeError(err)
+		return result
+	}
+	response := make([]byte, 1232)
+	n, err := connection.Read(response)
+	if err != nil {
+		result["error"] = compactProbeError(err)
+		return result
+	}
+	if n < 12 || binary.BigEndian.Uint16(response[0:2]) != queryID || response[2]&0x80 == 0 {
+		result["error"] = "invalid DNS response"
+		return result
+	}
+	latency := float64(time.Since(started).Microseconds()) / 1000
+	result["status"] = "online"
+	result["latency_ms"] = float64(int(latency*10+0.5)) / 10
+	delete(result, "error")
+	return result
+}
+
+func dnsProbeQuery(id uint16, hostname string) []byte {
+	packet := make([]byte, 12)
+	binary.BigEndian.PutUint16(packet[0:2], id)
+	binary.BigEndian.PutUint16(packet[2:4], 0x0100)
+	binary.BigEndian.PutUint16(packet[4:6], 1)
+	for _, label := range strings.Split(strings.TrimSuffix(hostname, "."), ".") {
+		packet = append(packet, byte(len(label)))
+		packet = append(packet, label...)
+	}
+	packet = append(packet, 0)
+	packet = binary.BigEndian.AppendUint16(packet, 1)
+	packet = binary.BigEndian.AppendUint16(packet, 1)
+	return packet
+}
+
+func compactProbeError(err error) string {
+	if networkError, ok := err.(net.Error); ok && networkError.Timeout() {
+		return "DNS query timed out"
+	}
+	return "DNS query failed"
 }
 
 func (s *Server) dnsRecords(w http.ResponseWriter, r *http.Request) {
@@ -199,6 +321,57 @@ func (s *Server) blocklists(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) blocklist(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/blocklists/")
+	if strings.Trim(path, "/") == "refresh" {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		rows, err := s.store.DB.QueryContext(r.Context(), `SELECT id FROM blocklists WHERE enabled = 1 ORDER BY id`)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		var ids []int64
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				writeError(w, err)
+				return
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Close(); err != nil {
+			writeError(w, err)
+			return
+		}
+
+		totalEntries := 0
+		for _, id := range ids {
+			count, err := s.refresher.Refresh(r.Context(), id)
+			if err != nil {
+				writeError(w, fmt.Errorf("refresh blocklist %d: %w", id, err))
+				return
+			}
+			totalEntries += count
+		}
+		if len(ids) > 0 {
+			if err := s.reloader.Apply(r.Context()); err != nil {
+				writeError(w, err)
+				return
+			}
+		}
+		s.recordEvent(r.Context(), eventInput{
+			Type:        "blocklist.updated",
+			Severity:    "success",
+			Title:       "Blocklists updated",
+			Description: fmt.Sprintf("Refreshed %d enabled lists with %d domains.", len(ids), totalEntries),
+			Metadata:    map[string]any{"blocklist_count": len(ids), "entry_count": totalEntries},
+			Source:      "blocklists",
+		})
+		writeJSON(w, http.StatusOK, map[string]any{"updated": len(ids), "entry_count": totalEntries})
+		return
+	}
 	if strings.HasSuffix(path, "/refresh") {
 		idText := strings.TrimSuffix(path, "/refresh")
 		id, err := strconv.ParseInt(strings.Trim(idText, "/"), 10, 64)
@@ -355,7 +528,7 @@ func (s *Server) queries(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, latency_ms FROM dns_queries`
+	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms FROM dns_queries`
 	args := []any{}
 	if search != "" {
 		query += ` WHERE domain LIKE ? OR client_ip LIKE ?`
@@ -396,17 +569,37 @@ func (s *Server) notifications(w http.ResponseWriter, r *http.Request) {
 	}
 	allEvents := localEvents(r.Context(), s.store.DB, 80, "")
 	notifications := []map[string]any{}
+	attentionCount := 0
 	for _, event := range allEvents {
 		eventType, _ := event["type"].(string)
-		if eventType == "dns.query" {
+		severity, _ := event["severity"].(string)
+		if !isUsefulNotification(eventType, severity) {
 			continue
 		}
 		notifications = append(notifications, event)
-		if len(notifications) == 12 {
+		if severity == "warning" || severity == "critical" {
+			attentionCount++
+		}
+		if len(notifications) == 10 {
 			break
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"unread_count": len(notifications), "items": notifications})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"attention_count": attentionCount,
+		"unread_count":    attentionCount,
+		"items":           notifications,
+	})
+}
+
+func isUsefulNotification(eventType, severity string) bool {
+	switch eventType {
+	case "dns.query", "dns.blocked", "dns.reload", "device.alias_updated":
+		return false
+	case "device.first_seen", "dns.reload_failed", "blocklist.installed", "blocklist.updated", "upstream.changed":
+		return true
+	default:
+		return severity == "warning" || severity == "critical"
+	}
 }
 
 func (s *Server) devices(w http.ResponseWriter, r *http.Request) {
@@ -510,6 +703,16 @@ func (s *Server) device(w http.ResponseWriter, r *http.Request) {
 		s.deviceAlias(w, r, clientIP)
 		return
 	}
+	if strings.HasSuffix(path, "/replay") {
+		rawClientIP := strings.TrimSuffix(path, "/replay")
+		clientIP, err := url.PathUnescape(strings.Trim(rawClientIP, "/"))
+		if err != nil || strings.TrimSpace(clientIP) == "" {
+			writeBadRequest(w, errors.New("invalid client ip"))
+			return
+		}
+		s.deviceReplay(w, r, clientIP)
+		return
+	}
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
@@ -542,6 +745,197 @@ func (s *Server) device(w http.ResponseWriter, r *http.Request) {
 		"profile":               "Default",
 		"recent_activity":       recentQueriesFor(r.Context(), s.store.DB, `client_ip = ?`, clientIP),
 	})
+}
+
+func (s *Server) deviceReplay(w http.ResponseWriter, r *http.Request, clientIP string) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+
+	from, to, bucket, rangeLabel, err := replayWindow(r.Context(), s.store.DB, clientIP, r)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	fromText := from.UTC().Format(time.RFC3339)
+	toText := to.UTC().Format(time.RFC3339)
+
+	total := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?`, clientIP, fromText, toText)
+	blocked := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ? AND action = 'blocked'`, clientIP, fromText, toText)
+	uniqueDomains := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(DISTINCT domain) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?`, clientIP, fromText, toText)
+
+	bucketCount := int((to.Sub(from) + bucket - 1) / bucket)
+	if bucketCount < 1 {
+		bucketCount = 1
+	}
+	buckets := make([]map[string]any, bucketCount)
+	for index := range buckets {
+		buckets[index] = map[string]any{
+			"timestamp": from.Add(time.Duration(index) * bucket).UTC().Format(time.RFC3339),
+			"total":     0,
+			"blocked":   0,
+		}
+	}
+	rows, queryErr := s.store.DB.QueryContext(r.Context(), `
+		SELECT
+			CAST((strftime('%s', timestamp) - strftime('%s', ?)) / ? AS INTEGER) AS bucket_index,
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END), 0)
+		FROM dns_queries
+		WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?
+		GROUP BY bucket_index
+		ORDER BY bucket_index
+	`, fromText, int(bucket.Seconds()), clientIP, fromText, toText)
+	if queryErr == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var index, count, blockedCount int
+			if scanErr := rows.Scan(&index, &count, &blockedCount); scanErr != nil {
+				break
+			}
+			if index >= 0 && index < len(buckets) {
+				buckets[index]["total"] = count
+				buckets[index]["blocked"] = blockedCount
+			}
+		}
+	}
+
+	events, truncated := replayQueries(r.Context(), s.store.DB, clientIP, fromText, toText, 2500)
+	durationMinutes := to.Sub(from).Minutes()
+	queriesPerMinute := 0.0
+	if durationMinutes > 0 {
+		queriesPerMinute = float64(total) / durationMinutes
+	}
+	var firstSeen, lastSeen sql.NullString
+	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT MIN(timestamp), MAX(timestamp) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?`, clientIP, fromText, toText).Scan(&firstSeen, &lastSeen)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"client_ip":          clientIP,
+		"range":              rangeLabel,
+		"from":               fromText,
+		"to":                 toText,
+		"bucket_seconds":     int(bucket.Seconds()),
+		"total_queries":      total,
+		"blocked_queries":    blocked,
+		"unique_domains":     uniqueDomains,
+		"queries_per_minute": queriesPerMinute,
+		"first_seen":         nullableString(firstSeen),
+		"last_seen":          nullableString(lastSeen),
+		"buckets":            buckets,
+		"top_domains": grouped(r.Context(), s.store.DB, `
+			SELECT domain, COUNT(*) FROM dns_queries
+			WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?
+			GROUP BY domain ORDER BY COUNT(*) DESC, domain LIMIT 10
+		`, clientIP, fromText, toText),
+		"sources": grouped(r.Context(), s.store.DB, `
+			SELECT source, COUNT(*) FROM dns_queries
+			WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?
+			GROUP BY source ORDER BY COUNT(*) DESC, source
+		`, clientIP, fromText, toText),
+		"events":    events,
+		"truncated": truncated,
+	})
+}
+
+func replayWindow(ctx context.Context, database *sql.DB, clientIP string, r *http.Request) (time.Time, time.Time, time.Duration, string, error) {
+	now := time.Now().UTC()
+	if fromRaw, toRaw := strings.TrimSpace(r.URL.Query().Get("from")), strings.TrimSpace(r.URL.Query().Get("to")); fromRaw != "" || toRaw != "" {
+		from, fromErr := time.Parse(time.RFC3339, fromRaw)
+		to, toErr := time.Parse(time.RFC3339, toRaw)
+		if fromErr != nil || toErr != nil || !to.After(from) {
+			return time.Time{}, time.Time{}, 0, "", errors.New("from and to must be valid RFC3339 timestamps with to after from")
+		}
+		return from.UTC(), to.UTC(), replayBucketSize(to.Sub(from)), "custom", nil
+	}
+
+	rangeLabel := strings.TrimSpace(r.URL.Query().Get("range"))
+	if rangeLabel == "" {
+		rangeLabel = "7d"
+	}
+	var from time.Time
+	switch rangeLabel {
+	case "1h":
+		from = now.Add(-time.Hour)
+	case "24h":
+		from = now.Add(-24 * time.Hour)
+	case "7d":
+		from = now.Add(-7 * 24 * time.Hour)
+	case "30d":
+		from = now.Add(-30 * 24 * time.Hour)
+	case "all":
+		var firstSeen sql.NullString
+		_ = database.QueryRowContext(ctx, `SELECT MIN(timestamp) FROM dns_queries WHERE client_ip = ?`, clientIP).Scan(&firstSeen)
+		if firstSeen.Valid {
+			if parsed, parseErr := time.Parse(time.RFC3339, firstSeen.String); parseErr == nil {
+				from = parsed.UTC()
+			}
+		}
+		if from.IsZero() {
+			from = now.Add(-7 * 24 * time.Hour)
+		}
+	default:
+		return time.Time{}, time.Time{}, 0, "", errors.New("range must be one of 1h, 24h, 7d, 30d, or all")
+	}
+	return from, now, replayBucketSize(now.Sub(from)), rangeLabel, nil
+}
+
+func replayBucketSize(duration time.Duration) time.Duration {
+	switch {
+	case duration <= 2*time.Hour:
+		return 5 * time.Minute
+	case duration <= 2*24*time.Hour:
+		return 30 * time.Minute
+	case duration <= 8*24*time.Hour:
+		return 3 * time.Hour
+	case duration <= 32*24*time.Hour:
+		return 12 * time.Hour
+	default:
+		hours := int(duration.Hours()/72) + 1
+		if hours < 1 {
+			hours = 1
+		}
+		return time.Duration(hours) * time.Hour
+	}
+}
+
+func replayQueries(ctx context.Context, database *sql.DB, clientIP, from, to string, limit int) ([]map[string]any, bool) {
+	rows, err := database.QueryContext(ctx, `
+		SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms
+		FROM dns_queries
+		WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?
+		ORDER BY timestamp ASC, id ASC
+		LIMIT ?
+	`, clientIP, from, to, limit+1)
+	if err != nil {
+		return []map[string]any{}, false
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	for rows.Next() {
+		var id int64
+		var timestamp, rowClientIP, domain, queryType, action, source, upstream string
+		var latency sql.NullFloat64
+		if scanErr := rows.Scan(&id, &timestamp, &rowClientIP, &domain, &queryType, &action, &source, &upstream, &latency); scanErr != nil {
+			break
+		}
+		items = append(items, map[string]any{
+			"id":         id,
+			"timestamp":  timestamp,
+			"client_ip":  rowClientIP,
+			"domain":     domain,
+			"query_type": queryType,
+			"action":     action,
+			"source":     source,
+			"upstream":   upstream,
+			"latency_ms": nullableFloat(latency),
+		})
+	}
+	truncated := len(items) > limit
+	if truncated {
+		items = items[:limit]
+	}
+	return items, truncated
 }
 
 func (s *Server) deviceAlias(w http.ResponseWriter, r *http.Request, clientIP string) {
@@ -713,13 +1107,31 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	topBlocked := grouped(r.Context(), s.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? AND action = 'blocked' GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start)
 	deviceCount := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(DISTINCT client_ip) FROM dns_queries`)
 	reloadFailures := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM events WHERE type = 'dns.reload_failed' AND timestamp >= ?`, start)
+	cacheHits := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ? AND source = 'cache'`, start)
+	upstreamQueries := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ? AND source = 'upstream'`, start)
+	cacheLatency := scalarFloat(r.Context(), s.store.DB, `SELECT COALESCE(AVG(latency_ms), 0) FROM dns_queries WHERE timestamp >= ? AND source = 'cache'`, start)
+	upstreamLatency := scalarFloat(r.Context(), s.store.DB, `SELECT COALESCE(AVG(latency_ms), 0) FROM dns_queries WHERE timestamp >= ? AND source = 'upstream'`, start)
+	liveCache := s.coreDNSCacheMetrics(r.Context())
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total_queries_today":      total,
-		"blocked_queries_today":    blocked,
-		"block_percentage":         percentage(blocked, total),
-		"enabled_blocklists":       enabledBlocklists,
-		"blocklist_entries":        blockEntries,
+		"total_queries_today":   total,
+		"blocked_queries_today": blocked,
+		"block_percentage":      percentage(blocked, total),
+		"enabled_blocklists":    enabledBlocklists,
+		"blocklist_entries":     blockEntries,
+		"cache": map[string]any{
+			"enabled":                     settingValue(r.Context(), s.store.DB, "dns_cache_enabled") != "false",
+			"metrics_available":           liveCache.available,
+			"entries":                     liveCache.entries,
+			"hits_since_restart":          liveCache.hits,
+			"requests_since_restart":      liveCache.requests,
+			"hit_rate_since_restart":      percentage64(liveCache.hits, liveCache.requests),
+			"hits_today":                  cacheHits,
+			"upstream_queries_today":      upstreamQueries,
+			"hit_rate_today":              percentage(cacheHits, cacheHits+upstreamQueries),
+			"average_cache_latency_ms":    cacheLatency,
+			"average_upstream_latency_ms": upstreamLatency,
+		},
 		"network_summary":          networkSummary(r.Context(), s.store.DB, start, blocked, topClients, topBlocked),
 		"health_cards":             healthCards(r.Context(), s.store.DB, total, blocked, enabledBlocklists, blockEntries, deviceCount, reloadFailures),
 		"stories":                  dashboardStories(r.Context(), s.store.DB, start, blocked, topClients, topBlocked, reloadFailures),
@@ -733,6 +1145,60 @@ func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 		"upstream_health_status":   "placeholder",
 		"favicon_fetching_enabled": settingValue(r.Context(), s.store.DB, "favicon_fetching_enabled"),
 	})
+}
+
+type cacheMetrics struct {
+	available bool
+	entries   float64
+	hits      float64
+	requests  float64
+}
+
+func (s *Server) coreDNSCacheMetrics(ctx context.Context) cacheMetrics {
+	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, s.metricsURL, nil)
+	if err != nil {
+		return cacheMetrics{}
+	}
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	if err != nil {
+		return cacheMetrics{}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return cacheMetrics{}
+	}
+
+	result := cacheMetrics{available: true}
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		value, parseErr := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if parseErr != nil {
+			continue
+		}
+		name := fields[0]
+		if label := strings.Index(name, "{"); label >= 0 {
+			name = name[:label]
+		}
+		switch name {
+		case "coredns_cache_entries":
+			result.entries += value
+		case "coredns_cache_hits_total":
+			result.hits += value
+		case "coredns_cache_requests_total":
+			result.requests += value
+		}
+	}
+	return result
 }
 
 func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
@@ -759,7 +1225,18 @@ func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
 		defer tx.Rollback()
 		for key, value := range input {
 			switch key {
-			case "upstream_dns", "local_domain_suffix", "retention_days", "favicon_fetching_enabled":
+			case "upstream_dns", "local_domain_suffix", "retention_days", "favicon_fetching_enabled", "dns_cache_enabled", "dns_cache_ttl":
+				if key == "dns_cache_enabled" && value != "true" && value != "false" {
+					writeBadRequest(w, errors.New("dns_cache_enabled must be true or false"))
+					return
+				}
+				if key == "dns_cache_ttl" {
+					ttl, parseErr := strconv.Atoi(value)
+					if parseErr != nil || ttl < 30 || ttl > 3600 {
+						writeBadRequest(w, errors.New("dns_cache_ttl must be between 30 and 3600 seconds"))
+						return
+					}
+				}
 				if _, err := tx.ExecContext(r.Context(), `INSERT INTO settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, key, value); err != nil {
 					writeError(w, err)
 					return
@@ -966,11 +1443,17 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	reloads, reloadFailures := coredns.ReloadTotals()
 	total := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries`)
 	blocked := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE action = 'blocked'`)
+	cacheHits := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE source = 'cache'`)
+	upstreamQueries := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE source = 'upstream'`)
+	cache := s.coreDNSCacheMetrics(r.Context())
 	enabled := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM blocklists WHERE enabled = 1`)
 	entries := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM blocklist_entries`)
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	_, _ = fmt.Fprintf(w, "# TYPE faro_dns_queries_total counter\nfaro_dns_queries_total %d\n", total)
 	_, _ = fmt.Fprintf(w, "# TYPE faro_dns_blocked_queries_total counter\nfaro_dns_blocked_queries_total %d\n", blocked)
+	_, _ = fmt.Fprintf(w, "# TYPE faro_dns_cache_hits_total counter\nfaro_dns_cache_hits_total %d\n", cacheHits)
+	_, _ = fmt.Fprintf(w, "# TYPE faro_dns_upstream_queries_total counter\nfaro_dns_upstream_queries_total %d\n", upstreamQueries)
+	_, _ = fmt.Fprintf(w, "# TYPE faro_dns_cache_entries gauge\nfaro_dns_cache_entries %.0f\n", cache.entries)
 	_, _ = fmt.Fprintf(w, "# TYPE faro_blocklists_enabled_total gauge\nfaro_blocklists_enabled_total %d\n", enabled)
 	_, _ = fmt.Fprintf(w, "# TYPE faro_blocklist_entries_total gauge\nfaro_blocklist_entries_total %d\n", entries)
 	_, _ = fmt.Fprintf(w, "# TYPE faro_coredns_reload_total counter\nfaro_coredns_reload_total %d\n", reloads)
@@ -1071,7 +1554,7 @@ func grouped(ctx context.Context, database *sql.DB, query string, args ...any) [
 }
 
 func recentQueries(ctx context.Context, database *sql.DB) []map[string]any {
-	rows, err := database.QueryContext(ctx, `SELECT timestamp, client_ip, domain, query_type, action, source, latency_ms FROM dns_queries ORDER BY timestamp DESC LIMIT 8`)
+	rows, err := database.QueryContext(ctx, `SELECT timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms FROM dns_queries ORDER BY timestamp DESC LIMIT 8`)
 	if err != nil {
 		return []map[string]any{}
 	}
@@ -1101,7 +1584,7 @@ func recentQueries(ctx context.Context, database *sql.DB) []map[string]any {
 }
 
 func recentQueriesFor(ctx context.Context, database *sql.DB, where string, args ...any) []map[string]any {
-	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, latency_ms FROM dns_queries WHERE ` + where + ` ORDER BY timestamp DESC LIMIT 12`
+	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms FROM dns_queries WHERE ` + where + ` ORDER BY timestamp DESC LIMIT 12`
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
 		return []map[string]any{}
@@ -1222,7 +1705,7 @@ func persistedEvents(ctx context.Context, database *sql.DB, limit int, search st
 
 func queryEvents(ctx context.Context, database *sql.DB, limit int, search string) []map[string]any {
 	query := `
-		SELECT q.id, q.timestamp, q.client_ip, q.domain, q.query_type, q.action, q.source, q.latency_ms, COALESCE(a.name, '')
+		SELECT q.id, q.timestamp, q.client_ip, q.domain, q.query_type, q.action, q.source, q.upstream, q.latency_ms, COALESCE(a.name, '')
 		FROM dns_queries q
 		LEFT JOIN device_aliases a ON a.client_ip = q.client_ip
 	`
@@ -1242,9 +1725,9 @@ func queryEvents(ctx context.Context, database *sql.DB, limit int, search string
 	items := []map[string]any{}
 	for rows.Next() {
 		var id int64
-		var timestamp, clientIP, domain, queryType, action, source, alias string
+		var timestamp, clientIP, domain, queryType, action, source, upstream, alias string
 		var latency sql.NullFloat64
-		if err := rows.Scan(&id, &timestamp, &clientIP, &domain, &queryType, &action, &source, &latency, &alias); err != nil {
+		if err := rows.Scan(&id, &timestamp, &clientIP, &domain, &queryType, &action, &source, &upstream, &latency, &alias); err != nil {
 			return items
 		}
 		deviceName := clientIP
@@ -1255,6 +1738,13 @@ func queryEvents(ctx context.Context, database *sql.DB, limit int, search string
 		severity := "info"
 		title := domain + " resolved"
 		description := "Requested by " + deviceName + "."
+		if source == "cache" {
+			description = "Served from Faro's cache for " + deviceName + "."
+		} else if source == "upstream" && upstream != "" {
+			description = "Resolved through " + upstream + " for " + deviceName + "."
+		} else if source == "local" {
+			description = "Answered by Local DNS for " + deviceName + "."
+		}
 		if action == "blocked" {
 			eventType = "dns.blocked"
 			severity = "warning"
@@ -1274,6 +1764,7 @@ func queryEvents(ctx context.Context, database *sql.DB, limit int, search string
 				"query_type": queryType,
 				"action":     action,
 				"latency_ms": nullableFloat(latency),
+				"upstream":   upstream,
 			},
 			"source": source,
 		})
@@ -1424,14 +1915,14 @@ func healthCards(ctx context.Context, database *sql.DB, total, blocked, enabledB
 			upstreamCount++
 		}
 	}
-	localAnswers := scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'local'`)
-	allQueries := scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries`)
+	cacheAnswers := scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'cache'`)
+	forwardedAnswers := scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'upstream'`)
 	return []map[string]any{
 		{"label": "DNS", "value": ternary(reloadFailures == 0, "Healthy", "Needs attention"), "detail": ternary(reloadFailures == 0, "Engine running", "Reload failures detected"), "status": ternary(reloadFailures == 0, "healthy", "critical")},
 		{"label": "Upstreams", "value": fmt.Sprintf("%d configured", upstreamCount), "detail": "Ready for resolution", "status": "healthy"},
 		{"label": "Devices", "value": fmt.Sprintf("%d observed", deviceCount), "detail": "From local query data", "status": "healthy"},
 		{"label": "Filtering", "value": fmt.Sprintf("%d domains", blockEntries), "detail": fmt.Sprintf("%d enabled lists", enabledBlocklists), "status": ternary(blockEntries > 0, "healthy", "warning")},
-		{"label": "Cache", "value": fmt.Sprintf("%.1f%% local", percentage(localAnswers, allQueries)), "detail": "Local answer rate", "status": "info"},
+		{"label": "Cache", "value": fmt.Sprintf("%.1f%% hit rate", percentage(cacheAnswers, cacheAnswers+forwardedAnswers)), "detail": fmt.Sprintf("%d upstream calls avoided", cacheAnswers), "status": "info"},
 		{"label": "Blocked", "value": fmt.Sprintf("%d today", blocked), "detail": fmt.Sprintf("%.1f%% of activity", percentage(blocked, total)), "status": ternary(blocked > 0, "warning", "healthy")},
 	}
 }
@@ -1523,6 +2014,12 @@ func scalarInt(ctx context.Context, database *sql.DB, query string, args ...any)
 	return count
 }
 
+func scalarFloat(ctx context.Context, database *sql.DB, query string, args ...any) float64 {
+	var value float64
+	_ = database.QueryRowContext(ctx, query, args...).Scan(&value)
+	return float64(int(value*100+0.5)) / 100
+}
+
 func settingValue(ctx context.Context, database *sql.DB, key string) string {
 	var value string
 	_ = database.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value)
@@ -1534,6 +2031,13 @@ func percentage(part, total int) float64 {
 		return 0
 	}
 	return float64(part) / float64(total) * 100
+}
+
+func percentage64(part, total float64) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(int(part/total*1000+0.5)) / 10
 }
 
 func todayStart() string {

@@ -1,6 +1,5 @@
 import {
 	Activity,
-	Ban,
 	BarChart3,
 	Bell,
 	CheckCircle2,
@@ -10,22 +9,23 @@ import {
 	Router,
 	Search,
 	Settings,
-	Shield
+	Shield,
+	ShieldCheck
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { NotificationsResponse } from "../api/client";
 import type { Page } from "../App";
 
-const navItems: { id: Page; label: string; description: string; icon: LucideIcon }[] = [
-  { id: "dashboard", label: "Dashboard", description: "Live network health and DNS traffic at a glance.", icon: BarChart3 },
-  { id: "queries", label: "Activity", description: "Explore DNS requests, blocks, and system changes.", icon: Activity },
-  { id: "devices", label: "Devices", description: "See which devices are active on your network.", icon: MonitorSmartphone },
-  { id: "records", label: "Local DNS", description: "Manage friendly names for services on your network.", icon: Router },
-  { id: "upstreams", label: "Upstreams", description: "Choose the DNS providers Faro uses for public lookups.", icon: Network },
-  { id: "blocklists", label: "Blocklists", description: "Manage the lists Faro uses to filter domains.", icon: Shield },
-  { id: "lists", label: "Allowlist / Blocklist", description: "Create precise rules for individual domains.", icon: Ban },
-  { id: "settings", label: "Settings", description: "Configure DNS behavior and Faro preferences.", icon: Settings }
+const navItems: { id: Page; label: string; description: string; href: string; icon: LucideIcon }[] = [
+  { id: "dashboard", label: "Dashboard", description: "Live network health and DNS traffic at a glance.", href: "/", icon: BarChart3 },
+  { id: "queries", label: "Activity", description: "Explore DNS requests, blocks, and system changes.", href: "/activity", icon: Activity },
+  { id: "devices", label: "Devices", description: "See which devices are active on your network.", href: "/devices", icon: MonitorSmartphone },
+  { id: "records", label: "Local DNS", description: "Manage friendly names for services on your network.", href: "/local-dns", icon: Router },
+  { id: "upstreams", label: "Upstreams", description: "Choose the DNS providers Faro uses for public lookups.", href: "/upstreams", icon: Network },
+  { id: "blocklists", label: "Blocklists", description: "Manage the lists Faro uses to filter domains.", href: "/blocklists", icon: Shield },
+  { id: "lists", label: "Allowlist", description: "Manage domains that should always be allowed.", href: "/allowlist", icon: ShieldCheck },
+  { id: "settings", label: "Settings", description: "Configure DNS behavior and Faro preferences.", href: "/settings", icon: Settings }
 ];
 
 type LayoutProps = {
@@ -58,15 +58,18 @@ export function Layout({ page, setPage, children, apiState, onReload, onOpenSear
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
-              <button
+              <a
                 key={item.id}
                 className={page === item.id ? "nav-item active" : "nav-item"}
-                onClick={() => setPage(item.id)}
-                type="button"
+                href={item.href}
+                onClick={(event) => {
+                  event.preventDefault();
+                  setPage(item.id);
+                }}
               >
                 <Icon size={18} />
                 <span>{item.label}</span>
-              </button>
+              </a>
             );
           })}
         </nav>
@@ -100,9 +103,9 @@ export function Layout({ page, setPage, children, apiState, onReload, onOpenSear
               <CheckCircle2 size={17} />
               <span>{apiState === "online" ? "All systems normal" : apiState === "offline" ? "API offline" : "Checking systems"}</span>
             </div>
-            <button className="icon-button notification-button" type="button" onClick={onOpenNotifications} aria-label="Notifications">
+            <button className="icon-button notification-button" type="button" onClick={onOpenNotifications} aria-label="Network updates">
               <Bell size={18} />
-              {notifications.unread_count > 0 && <span>{Math.min(notifications.unread_count, 9)}</span>}
+              {notifications.attention_count > 0 && <span>{Math.min(notifications.attention_count, 9)}</span>}
             </button>
           </div>
         </header>

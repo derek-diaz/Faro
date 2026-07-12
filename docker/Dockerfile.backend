@@ -1,10 +1,32 @@
-FROM golang:1.22-bookworm AS build
+# Compile CGO binaries on the native builder instead of running the Go toolchain in QEMU.
+FROM --platform=$BUILDPLATFORM golang:1.22-bookworm AS build
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG BUILDARCH
 
 WORKDIR /app
 COPY go.mod go.sum* ./
 RUN go mod download
+RUN if [ "$BUILDARCH" != "$TARGETARCH" ]; then \
+      case "$TARGETARCH" in \
+        amd64) packages="gcc-x86-64-linux-gnu libc6-dev-amd64-cross" ;; \
+        arm64) packages="gcc-aarch64-linux-gnu libc6-dev-arm64-cross" ;; \
+        *) echo "Unsupported target architecture: $TARGETARCH" >&2; exit 1 ;; \
+      esac && \
+      apt-get update && \
+      apt-get install -y --no-install-recommends $packages && \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
 COPY . .
-RUN CGO_ENABLED=1 GOOS=linux go build -o /out/faro-api ./cmd/faro-api
+RUN case "$BUILDARCH/$TARGETARCH" in \
+      amd64/amd64|arm64/arm64) CC=gcc ;; \
+      */amd64) CC=x86_64-linux-gnu-gcc ;; \
+      */arm64) CC=aarch64-linux-gnu-gcc ;; \
+      *) echo "Unsupported build: $BUILDARCH -> $TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    CGO_ENABLED=1 GOOS="$TARGETOS" GOARCH="$TARGETARCH" CC="$CC" \
+      go build -o /out/faro-api ./cmd/faro-api
 
 FROM debian:bookworm-slim
 

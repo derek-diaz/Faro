@@ -95,6 +95,8 @@ docker compose logs --tail=200 api ui dns
 
 ## Local development
 
+Local frontend development requires Node.js 24. The repository includes `.nvmrc` and `.node-version` files for compatible version managers.
+
 Clone the repository:
 
 ```sh

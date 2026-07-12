@@ -1,4 +1,5 @@
-FROM node:22-alpine AS build
+# The output is static, so compile on the native builder instead of emulating Node.
+FROM --platform=$BUILDPLATFORM node:24-alpine AS build
 
 WORKDIR /app
 COPY frontend/package*.json ./

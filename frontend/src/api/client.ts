@@ -35,6 +35,34 @@ export type DNSQuery = {
   source: string;
   upstream?: string | null;
   latency_ms?: number | null;
+  rcode?: string;
+  decision_reason?: string;
+  decision?: DNSDecision;
+};
+
+export type DecisionRule = {
+  kind: "allowlist" | "manual_block" | "blocklist" | string;
+  id: number;
+  name: string;
+};
+
+export type DecisionLocalRecord = {
+  id: number;
+  type: string;
+  value: string;
+};
+
+export type DNSDecision = {
+  action?: "allowed" | "blocked";
+  reason?: string;
+  allowlist?: DecisionRule;
+  manual_block?: DecisionRule;
+  blocklists?: DecisionRule[];
+  local_record?: DecisionLocalRecord;
+  confidence?: "observed" | "inferred" | "configuration_snapshot" | string;
+  captured_at?: string;
+  upstream?: string;
+  response_code?: string;
 };
 
 export type DeviceSummary = {
@@ -223,6 +251,47 @@ export type UpstreamProbeResponse = {
   items: UpstreamProbe[];
 };
 
+export type MaintenanceStorage = {
+  database_bytes: number;
+  database_used_bytes: number;
+  database_reclaimable_bytes: number;
+  query_count: number;
+  event_count: number;
+  oldest_query?: string;
+  oldest_event?: string;
+  retention_days: number;
+  retention_cutoff: string;
+  last_pruned_at?: string;
+  last_queries_deleted: number;
+  last_events_deleted: number;
+};
+
+export type MaintenanceStatus = {
+  status: "healthy" | "degraded" | string;
+  process_memory_bytes: number;
+  uptime_seconds: number;
+  storage: MaintenanceStorage;
+};
+
+export type PruneResult = {
+  queries_deleted: number;
+  events_deleted: number;
+  before_bytes: number;
+  after_bytes: number;
+  reclaimed_bytes: number;
+  retention_days: number;
+  cutoff: string;
+  compacted: boolean;
+  completed_at: string;
+};
+
+export type AuthStatus = {
+  configured: boolean;
+  authenticated: boolean;
+  onboarding_complete: boolean;
+  username?: string;
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -230,6 +299,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
     ...init
   });
+  if (response.status === 401) {
+    window.dispatchEvent(new Event("faro:unauthorized"));
+  }
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: response.statusText }));
     throw new Error(body.error ?? response.statusText);
@@ -238,6 +310,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  authStatus: () => request<AuthStatus>("/api/auth/status"),
+  setupAuth: (username: string, password: string) => request<{ ok: boolean; username: string }>("/api/auth/setup", { method: "POST", body: JSON.stringify({ username, password }) }),
+  login: (username: string, password: string) => request<{ ok: boolean; username: string }>("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
+  logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ ok: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) }),
   dashboard: () => request<DashboardSummary>("/api/dashboard"),
   queries: (search = "") => request<DNSQuery[]>(`/api/queries?search=${encodeURIComponent(search)}`),
   events: (search = "") => request<FaroEvent[]>(`/api/events?search=${encodeURIComponent(search)}`),
@@ -274,5 +352,8 @@ export const api = {
   settings: () => request<Setting[]>("/api/settings"),
   updateSettings: (settings: Record<string, string>) =>
     request<{ ok: boolean }>("/api/settings", { method: "PUT", body: JSON.stringify(settings) }),
+  maintenance: () => request<MaintenanceStatus>("/api/maintenance"),
+  prune: (retentionDays: number, compact: boolean) =>
+    request<PruneResult>("/api/maintenance", { method: "POST", body: JSON.stringify({ retention_days: retentionDays, compact }) }),
   reload: () => request<{ ok: boolean }>("/api/reload", { method: "POST" })
 };

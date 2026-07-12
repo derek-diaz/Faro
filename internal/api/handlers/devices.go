@@ -310,7 +310,7 @@ func replayBucketSize(duration time.Duration) time.Duration {
 
 func replayQueries(ctx context.Context, database *sql.DB, clientIP, from, to string, limit int) ([]map[string]any, bool) {
 	rows, err := database.QueryContext(ctx, `
-		SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms
+		SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata
 		FROM dns_queries
 		WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?
 		ORDER BY timestamp ASC, id ASC
@@ -323,21 +323,24 @@ func replayQueries(ctx context.Context, database *sql.DB, clientIP, from, to str
 	items := []map[string]any{}
 	for rows.Next() {
 		var id int64
-		var timestamp, rowClientIP, domain, queryType, action, source, upstream string
+		var timestamp, rowClientIP, domain, queryType, action, source, upstream, rcode, decisionReason, decisionMetadata string
 		var latency sql.NullFloat64
-		if scanErr := rows.Scan(&id, &timestamp, &rowClientIP, &domain, &queryType, &action, &source, &upstream, &latency); scanErr != nil {
+		if scanErr := rows.Scan(&id, &timestamp, &rowClientIP, &domain, &queryType, &action, &source, &upstream, &latency, &rcode, &decisionReason, &decisionMetadata); scanErr != nil {
 			break
 		}
 		items = append(items, map[string]any{
-			"id":         id,
-			"timestamp":  timestamp,
-			"client_ip":  rowClientIP,
-			"domain":     domain,
-			"query_type": queryType,
-			"action":     action,
-			"source":     source,
-			"upstream":   upstream,
-			"latency_ms": nullableFloat(latency),
+			"id":              id,
+			"timestamp":       timestamp,
+			"client_ip":       rowClientIP,
+			"domain":          domain,
+			"query_type":      queryType,
+			"action":          action,
+			"source":          source,
+			"upstream":        upstream,
+			"latency_ms":      nullableFloat(latency),
+			"rcode":           rcode,
+			"decision_reason": decisionReason,
+			"decision":        metadataMap(decisionMetadata),
 		})
 	}
 	truncated := len(items) > limit

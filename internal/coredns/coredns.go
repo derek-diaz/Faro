@@ -3,7 +3,6 @@ package coredns
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,6 +28,31 @@ type renderState struct {
 	CacheEnabled bool
 	CacheTTL     int
 	DenialTTL    int
+}
+
+type RuleMatch struct {
+	Kind string `json:"kind"`
+	ID   int64  `json:"id"`
+	Name string `json:"name"`
+}
+
+type LocalRecordMatch struct {
+	ID    int64  `json:"id"`
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+type DomainDecision struct {
+	Action       string            `json:"action"`
+	Reason       string            `json:"reason"`
+	Allowlist    *RuleMatch        `json:"allowlist,omitempty"`
+	ManualBlock  *RuleMatch        `json:"manual_block,omitempty"`
+	Blocklists   []RuleMatch       `json:"blocklists,omitempty"`
+	LocalRecord  *LocalRecordMatch `json:"local_record,omitempty"`
+	Confidence   string            `json:"confidence,omitempty"`
+	CapturedAt   string            `json:"captured_at,omitempty"`
+	Upstream     string            `json:"upstream,omitempty"`
+	ResponseCode string            `json:"response_code,omitempty"`
 }
 
 func NewManager(store *db.Store, configDir string) *Manager {
@@ -296,32 +320,72 @@ func rollback(dir string, backups map[string][]byte, written []string) {
 }
 
 func IsBlocked(ctx context.Context, store *db.Store, domain string) (bool, string) {
+	decision := ExplainDomain(ctx, store, domain)
+	if decision.Action != "blocked" {
+		if decision.Allowlist != nil {
+			return false, "allowlist"
+		}
+		return false, "unknown"
+	}
+	if decision.ManualBlock != nil {
+		return true, "manual"
+	}
+	return true, "blocklist"
+}
+
+func ExplainDomain(ctx context.Context, store *db.Store, domain string) DomainDecision {
 	normalized, err := db.NormalizeDomain(domain)
 	if err != nil {
-		return false, "unknown"
+		return DomainDecision{Action: "allowed"}
 	}
-	var exists int
-	err = store.DB.QueryRowContext(ctx, `SELECT 1 FROM allowlist_entries WHERE domain = ?`, normalized).Scan(&exists)
+	decision := DomainDecision{Action: "allowed"}
+	var allowID int64
+	if err := store.DB.QueryRowContext(ctx, `SELECT id FROM allowlist_entries WHERE domain = ?`, normalized).Scan(&allowID); err == nil {
+		decision.Allowlist = &RuleMatch{Kind: "allowlist", ID: allowID, Name: "Manual allowlist"}
+	}
+
+	var manualID int64
+	if err := store.DB.QueryRowContext(ctx, `SELECT id FROM manual_block_entries WHERE domain = ?`, normalized).Scan(&manualID); err == nil {
+		decision.ManualBlock = &RuleMatch{Kind: "manual_block", ID: manualID, Name: "Manual domain block"}
+	}
+
+	rows, err := store.DB.QueryContext(ctx, `
+		SELECT b.id, b.name
+		FROM blocklist_entries e
+		JOIN blocklists b ON b.id = e.blocklist_id
+		WHERE b.enabled = 1 AND e.domain = ?
+		ORDER BY b.name
+	`, normalized)
 	if err == nil {
-		return false, "allowlist"
+		defer rows.Close()
+		for rows.Next() {
+			var match RuleMatch
+			match.Kind = "blocklist"
+			if rows.Scan(&match.ID, &match.Name) == nil {
+				decision.Blocklists = append(decision.Blocklists, match)
+			}
+		}
 	}
-	if err != nil && err != sql.ErrNoRows {
-		return false, "unknown"
+
+	var local LocalRecordMatch
+	if err := store.DB.QueryRowContext(ctx, `SELECT id, type, value FROM dns_records WHERE hostname = ? ORDER BY id LIMIT 1`, normalized).Scan(&local.ID, &local.Type, &local.Value); err == nil {
+		decision.LocalRecord = &local
 	}
-	err = store.DB.QueryRowContext(ctx, `
-		SELECT 1
-		FROM (
-			SELECT domain FROM manual_block_entries WHERE domain = ?
-			UNION
-			SELECT e.domain
-			FROM blocklist_entries e
-			JOIN blocklists b ON b.id = e.blocklist_id
-			WHERE b.enabled = 1 AND e.domain = ?
-		)
-		LIMIT 1
-	`, normalized, normalized).Scan(&exists)
-	if err == nil {
-		return true, "blocklist"
+
+	switch {
+	case decision.Allowlist != nil:
+		decision.Reason = "A manual allowlist exception bypassed filtering."
+	case decision.ManualBlock != nil:
+		decision.Action = "blocked"
+		decision.Reason = "Matched a manual domain block."
+	case len(decision.Blocklists) == 1:
+		decision.Action = "blocked"
+		decision.Reason = "Matched the " + decision.Blocklists[0].Name + " blocklist."
+	case len(decision.Blocklists) > 1:
+		decision.Action = "blocked"
+		decision.Reason = fmt.Sprintf("Matched %d enabled blocklists.", len(decision.Blocklists))
+	case decision.LocalRecord != nil:
+		decision.Reason = "Matched a Faro Local DNS record."
 	}
-	return false, "unknown"
+	return decision
 }

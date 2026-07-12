@@ -22,7 +22,7 @@ func (s *Handler) queries(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms FROM dns_queries`
+	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata FROM dns_queries`
 	args := []any{}
 	if search != "" {
 		query += ` WHERE domain LIKE ? OR client_ip LIKE ?`
@@ -169,7 +169,8 @@ func persistedEvents(ctx context.Context, database *sql.DB, limit int, search st
 
 func queryEvents(ctx context.Context, database *sql.DB, limit int, search string) []map[string]any {
 	query := `
-		SELECT q.id, q.timestamp, q.client_ip, q.domain, q.query_type, q.action, q.source, q.upstream, q.latency_ms, COALESCE(a.name, '')
+		SELECT q.id, q.timestamp, q.client_ip, q.domain, q.query_type, q.action, q.source, q.upstream, q.latency_ms,
+		       q.rcode, q.decision_reason, q.decision_metadata, COALESCE(a.name, '')
 		FROM dns_queries q
 		LEFT JOIN device_aliases a ON a.client_ip = q.client_ip
 	`
@@ -189,9 +190,9 @@ func queryEvents(ctx context.Context, database *sql.DB, limit int, search string
 	items := []map[string]any{}
 	for rows.Next() {
 		var id int64
-		var timestamp, clientIP, domain, queryType, action, source, upstream, alias string
+		var timestamp, clientIP, domain, queryType, action, source, upstream, rcode, decisionReason, decisionMetadata, alias string
 		var latency sql.NullFloat64
-		if err := rows.Scan(&id, &timestamp, &clientIP, &domain, &queryType, &action, &source, &upstream, &latency, &alias); err != nil {
+		if err := rows.Scan(&id, &timestamp, &clientIP, &domain, &queryType, &action, &source, &upstream, &latency, &rcode, &decisionReason, &decisionMetadata, &alias); err != nil {
 			return items
 		}
 		deviceName := clientIP
@@ -215,6 +216,9 @@ func queryEvents(ctx context.Context, database *sql.DB, limit int, search string
 			title = "Domain blocked"
 			description = domain + " was blocked by " + source + "."
 		}
+		if decisionReason != "" {
+			description = decisionReason
+		}
 		items = append(items, map[string]any{
 			"id":          fmt.Sprintf("query-%d", id),
 			"timestamp":   timestamp,
@@ -229,6 +233,8 @@ func queryEvents(ctx context.Context, database *sql.DB, limit int, search string
 				"action":     action,
 				"latency_ms": nullableFloat(latency),
 				"upstream":   upstream,
+				"rcode":      rcode,
+				"decision":   metadataMap(decisionMetadata),
 			},
 			"source": source,
 		})

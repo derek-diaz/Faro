@@ -136,7 +136,7 @@ export function QueryLog({ events, refresh, onDomainSelect, onDeviceSelect }: Qu
                           <button className="device-link" type="button" onClick={() => onDeviceSelect(event.client_ip!)}>{event.client_ip}</button>
                         ) : <span className="empty-cell">—</span>}
                       </td>
-                      <td><span className="event-type-chip">{friendlyType(event.type)}</span></td>
+                      <td><EventType event={event} /></td>
                       <td><ResolutionSource source={event.source} upstream={eventUpstream(event)} /></td>
                       <td className="event-actions-cell">
                         {domain && (
@@ -180,6 +180,20 @@ function EventResult({ event }: { event: FaroEvent }) {
 
 function EventMark({ event }: { event: FaroEvent }) {
   return event.severity === "critical" ? <Ban size={16} /> : <CheckCircle2 size={16} />;
+}
+
+function EventType({ event }: { event: FaroEvent }) {
+  const type = typeof event.metadata?.query_type === "string" ? event.metadata.query_type.toUpperCase() : "";
+  if ((event.type === "dns.query" || event.type === "dns.blocked") && type) {
+    const family = type === "A" ? "IPv4" : type === "AAAA" ? "IPv6" : "DNS";
+    return (
+      <span className="event-type-chip dns-record-type" title={`${type} record request (${family})`}>
+        <strong>{type}</strong>
+        <small>{family}</small>
+      </span>
+    );
+  }
+  return <span className="event-type-chip">{friendlyType(event.type)}</span>;
 }
 
 function friendlyType(type: string) {

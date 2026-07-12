@@ -1,6 +1,6 @@
-import { CheckCircle2, Database, Gauge, Globe2, Image, RotateCw, Save, Server, ShieldAlert } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { api, type Setting } from "../api/client";
+import { Check, CheckCircle2, Clock3, Cpu, Database, Eye, EyeOff, Gauge, Globe2, HardDrive, Image, KeyRound, LockKeyhole, Network, RefreshCw, RotateCw, Save, Server, Trash2, UserRound } from "lucide-react";
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { api, type MaintenanceStatus, type PruneResult, type Setting } from "../api/client";
 
 type SettingsProps = {
   settings: Setting[];
@@ -8,200 +8,342 @@ type SettingsProps = {
   onManageUpstreams: () => void;
 };
 
+type SettingsTab = "general" | "data" | "account";
+type ActionState = "idle" | "working" | "done" | "error";
+
 export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps) {
+  const [tab, setTab] = useState<SettingsTab>("general");
   const [form, setForm] = useState<Record<string, string>>({});
-  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const [reloadState, setReloadState] = useState<"idle" | "reloading" | "reloaded" | "error">("idle");
+  const [actionState, setActionState] = useState<ActionState>("idle");
   const [message, setMessage] = useState("");
+  const [maintenance, setMaintenance] = useState<MaintenanceStatus | null>(null);
+  const [maintenanceLoading, setMaintenanceLoading] = useState(true);
+  const [pruneDays, setPruneDays] = useState(30);
+  const [compact, setCompact] = useState(true);
+  const [pruneResult, setPruneResult] = useState<PruneResult | null>(null);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordVisible, setPasswordVisible] = useState(false);
 
   useEffect(() => {
-    setForm(Object.fromEntries(settings.map((setting) => [setting.key, setting.value])));
+    const values = Object.fromEntries(settings.map((setting) => [setting.key, setting.value]));
+    setForm(values);
+    const days = Number(values.retention_days || 30);
+    if (Number.isFinite(days)) setPruneDays(days);
   }, [settings]);
 
+  useEffect(() => {
+    void loadMaintenance();
+  }, []);
+
   const upstreams = useMemo(
-    () =>
-      (form.upstream_dns ?? "")
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean),
+    () => (form.upstream_dns ?? "").split(",").map((value) => value.trim()).filter(Boolean),
     [form.upstream_dns]
   );
 
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    setSaveState("saving");
-    setMessage("");
+  async function loadMaintenance() {
+    setMaintenanceLoading(true);
     try {
-      await api.updateSettings(form);
-      await refresh();
-      setSaveState("saved");
-      setMessage("Settings saved and the DNS engine reloaded.");
-    } catch (caught) {
-      setSaveState("error");
-      setMessage(caught instanceof Error ? caught.message : "Failed to save settings.");
+      setMaintenance(await api.maintenance());
+    } finally {
+      setMaintenanceLoading(false);
     }
   }
 
-  async function reloadCoreDNS() {
-    setReloadState("reloading");
+  async function saveGeneral(event: FormEvent) {
+    event.preventDefault();
+    await runAction(async () => {
+      await api.updateSettings({
+        local_domain_suffix: form.local_domain_suffix || "home",
+        faro_lan_ip: form.faro_lan_ip || "",
+        dns_cache_enabled: form.dns_cache_enabled || "true",
+        dns_cache_ttl: form.dns_cache_ttl || "300",
+        favicon_fetching_enabled: form.favicon_fetching_enabled || "false"
+      });
+      await refresh();
+      return "Settings saved. DNS configuration reloaded safely.";
+    });
+  }
+
+  async function saveRetention() {
+    const days = Number(form.retention_days || 30);
+    if (!Number.isInteger(days) || days < 1 || days > 3650) {
+      setActionState("error");
+      setMessage("Retention must be between 1 and 3650 days.");
+      return;
+    }
+    await runAction(async () => {
+      await api.updateSettings({ retention_days: String(days) });
+      setPruneDays(days);
+      await refresh();
+      await loadMaintenance();
+      return `Automatic retention set to ${days} days.`;
+    });
+  }
+
+  async function reloadDNS() {
+    await runAction(async () => {
+      await api.reload();
+      return "DNS engine reloaded successfully.";
+    });
+  }
+
+  async function pruneNow() {
+    if (!Number.isInteger(pruneDays) || pruneDays < 1 || pruneDays > 3650) {
+      setActionState("error");
+      setMessage("Prune age must be between 1 and 3650 days.");
+      return;
+    }
+    await runAction(async () => {
+      const result = await api.prune(pruneDays, compact);
+      setPruneResult(result);
+      await loadMaintenance();
+      return `Removed ${formatNumber(result.queries_deleted)} queries and ${formatNumber(result.events_deleted)} system events.`;
+    });
+  }
+
+  async function changePassword(event: FormEvent) {
+    event.preventDefault();
+    if (newPassword.length < 8) {
+      setActionState("error");
+      setMessage("The new password must be at least 8 characters.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setActionState("error");
+      setMessage("The new passwords do not match.");
+      return;
+    }
+    await runAction(async () => {
+      await api.changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      return "Password changed. Other signed-in sessions were closed.";
+    });
+  }
+
+  async function runAction(action: () => Promise<string>) {
+    setActionState("working");
     setMessage("");
     try {
-      await api.reload();
-      setReloadState("reloaded");
-      setMessage("DNS engine reload completed.");
+      setMessage(await action());
+      setActionState("done");
     } catch (caught) {
-      setReloadState("error");
-      setMessage(caught instanceof Error ? caught.message : "CoreDNS reload failed.");
+      setActionState("error");
+      setMessage(caught instanceof Error ? caught.message : "The operation failed.");
     }
   }
 
   return (
-    <div className="settings-layout">
-      <section className="panel settings-panel">
-        <div className="panel-title with-actions">
-          <div>
-            <h2>DNS behavior</h2>
-            <p>These settings regenerate the CoreDNS config through Faro's safe reload path.</p>
-          </div>
-          <button type="button" className="secondary icon-text-button" onClick={() => void reloadCoreDNS()} disabled={reloadState === "reloading"}>
-            <RotateCw size={16} />
-            <span>{reloadState === "reloading" ? "Reloading" : "Safe reload"}</span>
-          </button>
+    <div className="settings-workspace">
+      <div className="settings-tabs" role="tablist" aria-label="Settings sections">
+        <button type="button" role="tab" aria-selected={tab === "general"} className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>
+          <Gauge size={16} /> DNS & interface
+        </button>
+        <button type="button" role="tab" aria-selected={tab === "data"} className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}>
+          <Database size={16} /> Health & data
+        </button>
+        <button type="button" role="tab" aria-selected={tab === "account"} className={tab === "account" ? "active" : ""} onClick={() => setTab("account")}>
+          <UserRound size={16} /> Account
+        </button>
+      </div>
+
+      {message && <div className={`settings-feedback ${actionState === "error" ? "error" : "success"}`}><CheckCircle2 size={16} /><span>{message}</span></div>}
+
+      {tab === "general" ? (
+        <div className="settings-general-grid">
+          <section className="panel settings-compact-panel">
+            <div className="panel-title with-actions">
+              <div><h2>DNS & resolution</h2><p>Core behavior for local and public lookups.</p></div>
+              <button type="button" className="secondary icon-text-button" onClick={() => void reloadDNS()} disabled={actionState === "working"}>
+                <RotateCw size={16} /><span>Reload DNS</span>
+              </button>
+            </div>
+
+            <form className="settings-rows" onSubmit={(event) => void saveGeneral(event)}>
+              <SettingRow icon={<Server size={19} />} title="Upstream providers" description={`${upstreams.length} selected: ${upstreams.join(", ") || "none"}`}>
+                <button type="button" className="secondary" onClick={onManageUpstreams}>Manage</button>
+              </SettingRow>
+
+              <SettingRow icon={<Globe2 size={19} />} title="Local domain suffix" description="Default suffix suggested for local records.">
+                <input className="settings-short-input" value={form.local_domain_suffix ?? ""} onChange={(event) => setForm({ ...form, local_domain_suffix: event.target.value })} placeholder="home" />
+              </SettingRow>
+
+              <SettingRow icon={<Network size={19} />} title="Faro LAN address" description="Fixed address distributed to devices as their DNS server.">
+                <input className="settings-short-input" value={form.faro_lan_ip ?? ""} onChange={(event) => setForm({ ...form, faro_lan_ip: event.target.value })} placeholder="192.168.1.20" required />
+              </SettingRow>
+
+              <SettingRow icon={<Gauge size={19} />} title="DNS response cache" description="Keep repeated answers local to reduce latency and upstream traffic.">
+                <div className="settings-inline-controls">
+                  <label className="compact-toggle"><input type="checkbox" checked={form.dns_cache_enabled !== "false"} onChange={(event) => setForm({ ...form, dns_cache_enabled: String(event.target.checked) })} /><span>Enabled</span></label>
+                  <label className="unit-input"><input type="number" min="30" max="3600" step="30" disabled={form.dns_cache_enabled === "false"} value={form.dns_cache_ttl ?? "300"} onChange={(event) => setForm({ ...form, dns_cache_ttl: event.target.value })} /><span>sec max</span></label>
+                </div>
+              </SettingRow>
+
+              <SettingRow icon={<Image size={19} />} title="Domain favicons" description="Fetch and cache icons for public domains; local names retain initials.">
+                <label className="compact-toggle"><input type="checkbox" checked={form.favicon_fetching_enabled === "true"} onChange={(event) => setForm({ ...form, favicon_fetching_enabled: String(event.target.checked) })} /><span>Enabled</span></label>
+              </SettingRow>
+
+              <div className="settings-save-row">
+                <button type="submit" className="icon-text-button" disabled={actionState === "working"}><Save size={16} /><span>{actionState === "working" ? "Saving" : "Save changes"}</span></button>
+              </div>
+            </form>
+          </section>
+
+          <aside className="settings-overview-column">
+            <section className="panel settings-summary">
+              <div className="panel-title"><h2>Current configuration</h2></div>
+              <div className="settings-summary-list">
+                <SummaryRow label="Upstreams" value={upstreams.join(", ") || "Not configured"} />
+                <SummaryRow label="Local suffix" value={form.local_domain_suffix || "home"} />
+                <SummaryRow label="LAN address" value={form.faro_lan_ip || "Not configured"} />
+                <SummaryRow label="Cache" value={form.dns_cache_enabled !== "false" ? `${form.dns_cache_ttl || "300"} seconds` : "Disabled"} />
+                <SummaryRow label="Favicons" value={form.favicon_fetching_enabled === "true" ? "Enabled" : "Disabled"} />
+              </div>
+            </section>
+            <section className="panel settings-note">
+              <CheckCircle2 size={19} />
+              <div><strong>Safe configuration updates</strong><span>Faro validates generated DNS files before replacing the active configuration.</span></div>
+            </section>
+          </aside>
         </div>
-
-        <form className="settings-form" onSubmit={(event) => void submit(event)}>
-          <div className="settings-card">
-            <div className="settings-card-icon">
-              <Server size={22} />
+      ) : tab === "data" ? (
+        <DataAndHealth
+          maintenance={maintenance}
+          loading={maintenanceLoading}
+          retentionDays={form.retention_days || "30"}
+          setRetentionDays={(value) => setForm({ ...form, retention_days: value })}
+          saveRetention={() => void saveRetention()}
+          pruneDays={pruneDays}
+          setPruneDays={setPruneDays}
+          compact={compact}
+          setCompact={setCompact}
+          prune={() => void pruneNow()}
+          refresh={() => void loadMaintenance()}
+          busy={actionState === "working"}
+          result={pruneResult}
+        />
+      ) : (
+        <section className="panel account-password-panel">
+          <div className="panel-title"><div><h2>Change password</h2><p>Enter your current password, then choose a new one.</p></div></div>
+          <form className="account-password-form" onSubmit={(event) => void changePassword(event)}>
+            <PasswordField label="Current password" value={currentPassword} setValue={setCurrentPassword} visible={passwordVisible} autoComplete="current-password" />
+            <PasswordField label="New password" value={newPassword} setValue={setNewPassword} visible={passwordVisible} autoComplete="new-password" />
+            <PasswordField label="Confirm new password" value={confirmPassword} setValue={setConfirmPassword} visible={passwordVisible} autoComplete="new-password" />
+            <div className="account-password-footer">
+              <div className="password-requirements" aria-label="Password requirements">
+                <span className={newPassword.length >= 8 ? "met" : ""}><Check size={13} /> 8 or more characters</span>
+                <span className={confirmPassword.length > 0 && newPassword === confirmPassword ? "met" : ""}><Check size={13} /> Passwords match</span>
+              </div>
+              <button type="button" className="secondary password-visibility" onClick={() => setPasswordVisible((visible) => !visible)}>{passwordVisible ? <EyeOff size={15} /> : <Eye size={15} />}<span>{passwordVisible ? "Hide" : "Show"}</span></button>
             </div>
-            <div className="setting-copy">
-              <strong>Upstream DNS servers</strong>
-              <span>{upstreams.length} servers configured: {upstreams.join(", ") || "none"}</span>
-              <button type="button" className="secondary settings-link-button" onClick={onManageUpstreams}>Manage upstream providers</button>
-            </div>
-          </div>
-
-          <div className="settings-card">
-            <div className="settings-card-icon">
-              <Globe2 size={22} />
-            </div>
-            <label>
-              Local domain suffix
-              <input
-                value={form.local_domain_suffix ?? ""}
-                onChange={(event) => setForm({ ...form, local_domain_suffix: event.target.value })}
-                placeholder="home"
-              />
-              <span>Used as the friendly default suffix for local records.</span>
-            </label>
-          </div>
-
-          <div className="settings-card">
-            <div className="settings-card-icon">
-              <Database size={22} />
-            </div>
-            <label>
-              Query log retention days
-              <input
-                inputMode="numeric"
-                value={form.retention_days ?? ""}
-                onChange={(event) => setForm({ ...form, retention_days: event.target.value })}
-                placeholder="30"
-              />
-              <span>The setting is stored now; scheduled pruning is a follow-up task.</span>
-            </label>
-          </div>
-
-          <div className="settings-card cache-settings-card">
-            <div className="settings-card-icon">
-              <Gauge size={22} />
-            </div>
-            <div className="setting-copy">
-              <strong>DNS response cache</strong>
-              <span>Answer repeated public lookups locally to reduce latency and upstream traffic. Shorter authoritative TTLs are still respected.</span>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={form.dns_cache_enabled !== "false"}
-                  onChange={(event) => setForm({ ...form, dns_cache_enabled: String(event.target.checked) })}
-                />
-                Enable DNS caching
-              </label>
-              <label className="cache-ttl-field">
-                Maximum cache TTL
-                <span><input type="number" min="30" max="3600" step="30" disabled={form.dns_cache_enabled === "false"} value={form.dns_cache_ttl ?? "300"} onChange={(event) => setForm({ ...form, dns_cache_ttl: event.target.value })} /><em>seconds</em></span>
-              </label>
-            </div>
-          </div>
-
-          <div className="settings-card favicon-settings-card">
-            <div className="settings-card-icon">
-              <Image size={22} />
-            </div>
-            <div className="setting-copy">
-              <strong>Domain favicons</strong>
-              <span>When enabled, Faro fetches and caches `/favicon.ico` for public-looking domains. Local domains such as `.home`, `.lan`, and `.local` keep placeholder initials.</span>
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={form.favicon_fetching_enabled === "true"}
-                  onChange={(event) => setForm({ ...form, favicon_fetching_enabled: String(event.target.checked) })}
-                />
-                Enable favicon fetching
-              </label>
-            </div>
-          </div>
-
-          <div className="settings-actions">
-            <button type="submit" className="icon-text-button" disabled={saveState === "saving"}>
-              <Save size={16} />
-              <span>{saveState === "saving" ? "Saving" : "Save settings"}</span>
-            </button>
-            {message && <span className={`settings-message ${saveState === "error" || reloadState === "error" ? "error" : "ok"}`}>{message}</span>}
-          </div>
-        </form>
-      </section>
-
-      <aside className="settings-side">
-        <section className="panel settings-summary">
-          <div className="panel-title">
-            <h2>Current config</h2>
-          </div>
-          <div className="settings-summary-list">
-            <SummaryRow label="Upstreams" value={upstreams.length > 0 ? upstreams.join(", ") : "Not set"} />
-            <SummaryRow label="Local suffix" value={form.local_domain_suffix || "home"} />
-            <SummaryRow label="Retention" value={`${form.retention_days || "30"} days`} />
-            <SummaryRow label="DNS cache" value={form.dns_cache_enabled !== "false" ? `${form.dns_cache_ttl || "300"}s maximum` : "Disabled"} />
-            <SummaryRow label="Favicon fetcher" value={form.favicon_fetching_enabled === "true" ? "Enabled" : "Disabled"} />
-          </div>
+            <div className="settings-save-row account-password-action"><span>Other sessions will be signed out.</span><button type="submit" className="icon-text-button" disabled={actionState === "working" || !currentPassword || !newPassword || !confirmPassword}><KeyRound size={16} /><span>{actionState === "working" ? "Changing password" : "Change password"}</span></button></div>
+          </form>
         </section>
-
-        <section className="panel settings-summary">
-          <div className="settings-warning">
-            <ShieldAlert size={20} />
-            <div>
-              <strong>Favicon status</strong>
-              <span>Public-domain icons are fetched only when enabled. Local-only names always use placeholders.</span>
-            </div>
-          </div>
-          <div className="settings-warning ok">
-            <CheckCircle2 size={20} />
-            <div>
-              <strong>Safe reload path</strong>
-              <span>Saving DNS settings writes generated files and requests CoreDNS reload.</span>
-            </div>
-          </div>
-        </section>
-      </aside>
+      )}
     </div>
   );
 }
 
-function SummaryRow({ label, value }: { label: string; value: string }) {
+function PasswordField({ label, value, setValue, visible, autoComplete }: { label: string; value: string; setValue: (value: string) => void; visible: boolean; autoComplete: string }) {
+  return <label className="account-password-field"><span>{label}</span><div><LockKeyhole size={17} /><input type={visible ? "text" : "password"} value={value} onChange={(event) => setValue(event.target.value)} autoComplete={autoComplete} required /></div></label>;
+}
+
+function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, saveRetention, pruneDays, setPruneDays, compact, setCompact, prune, refresh, busy, result }: {
+  maintenance: MaintenanceStatus | null;
+  loading: boolean;
+  retentionDays: string;
+  setRetentionDays: (value: string) => void;
+  saveRetention: () => void;
+  pruneDays: number;
+  setPruneDays: (value: number) => void;
+  compact: boolean;
+  setCompact: (value: boolean) => void;
+  prune: () => void;
+  refresh: () => void;
+  busy: boolean;
+  result: PruneResult | null;
+}) {
+  const storage = maintenance?.storage;
   return (
-    <div className="summary-config-row">
-      <span>{label}</span>
-      <strong>{value}</strong>
+    <div className="maintenance-layout">
+      <section className="panel maintenance-health-panel">
+        <div className="panel-title with-actions">
+          <div><h2>Application health</h2><p>{maintenance ? `Faro has been running for ${formatDuration(maintenance.uptime_seconds)}.` : "Live resource use and local data footprint."}</p></div>
+          <button type="button" className="secondary icon-button" title="Refresh health" aria-label="Refresh health" onClick={refresh} disabled={loading}><RefreshCw size={16} /></button>
+        </div>
+        <div className="maintenance-metrics">
+          <HealthMetric icon={<Cpu size={18} />} label="App memory" value={maintenance ? formatBytes(maintenance.process_memory_bytes) : "—"} detail="Current Go heap" />
+          <HealthMetric icon={<HardDrive size={18} />} label="Database storage" value={storage ? formatBytes(storage.database_bytes) : "—"} detail={storage ? `${formatBytes(storage.database_reclaimable_bytes)} reclaimable` : "SQLite file allocation"} />
+          <HealthMetric icon={<Database size={18} />} label="Activity records" value={storage ? formatNumber(storage.query_count + storage.event_count) : "—"} detail={storage ? `${formatNumber(storage.query_count)} DNS · ${formatNumber(storage.event_count)} system` : "Queries and system events"} />
+        </div>
+      </section>
+
+      <div className="maintenance-columns">
+        <section className="panel retention-panel">
+          <div className="maintenance-section-heading"><Clock3 size={19} /><div><h2>Automatic retention</h2><p>Faro removes expired DNS queries and system events on startup and every six hours.</p></div></div>
+          <label className="retention-days-field"><span>Keep logs for</span><div><input type="number" min="1" max="3650" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} /><span>days</span></div></label>
+          <button type="button" className="secondary icon-text-button" onClick={saveRetention} disabled={busy}><Save size={16} /><span>Save retention</span></button>
+          <div className="retention-status">
+            <SummaryRow label="Oldest DNS query" value={formatTimestamp(storage?.oldest_query)} />
+            <SummaryRow label="Last automatic cleanup" value={formatTimestamp(storage?.last_pruned_at)} />
+            <SummaryRow label="Last cleanup removed" value={storage ? `${formatNumber(storage.last_queries_deleted)} queries · ${formatNumber(storage.last_events_deleted)} events` : "—"} />
+          </div>
+        </section>
+
+        <section className="panel prune-panel">
+          <div className="maintenance-section-heading"><Trash2 size={19} /><div><h2>Prune database now</h2><p>Delete data older than the selected age. This does not change the automatic retention policy.</p></div></div>
+          <div className="prune-controls">
+            <label className="retention-days-field"><span>Delete logs older than</span><div><input type="number" min="1" max="3650" value={pruneDays} onChange={(event) => setPruneDays(Number(event.target.value))} /><span>days</span></div></label>
+            <label className="compact-toggle prune-compact"><input type="checkbox" checked={compact} onChange={(event) => setCompact(event.target.checked)} /><span>Compact SQLite afterward to reclaim disk space</span></label>
+          </div>
+          {result && <div className="prune-result"><strong>{formatNumber(result.queries_deleted + result.events_deleted)} rows removed</strong><span>{result.compacted ? `${formatBytes(result.reclaimed_bytes)} returned to disk.` : "Free pages retained for SQLite reuse."}</span></div>}
+          <div className="prune-action-footer">
+            <span>Only DNS query history and system events are removed.</span>
+            <button type="button" className="danger-outline icon-text-button" onClick={prune} disabled={busy}><Trash2 size={16} /><span>{busy ? "Pruning" : "Prune now"}</span></button>
+          </div>
+        </section>
+      </div>
     </div>
   );
+}
+
+function SettingRow({ icon, title, description, children }: { icon: ReactNode; title: string; description: string; children: ReactNode }) {
+  return <div className="compact-setting-row"><span className="compact-setting-icon">{icon}</span><div className="compact-setting-copy"><strong>{title}</strong><span>{description}</span></div><div className="compact-setting-control">{children}</div></div>;
+}
+
+function HealthMetric({ icon, label, value, detail, tone = "default" }: { icon: ReactNode; label: string; value: string; detail: string; tone?: "default" | "healthy" }) {
+  return <div className={`maintenance-metric ${tone}`}><span className="maintenance-metric-icon">{icon}</span><div><small>{label}</small><strong>{value}</strong><span>{detail}</span></div></div>;
+}
+
+function SummaryRow({ label, value }: { label: string; value: string }) {
+  return <div className="summary-config-row"><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  const amount = value / 1024 ** index;
+  return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+}
+
+function formatNumber(value: number) {
+  return value.toLocaleString();
+}
+
+function formatTimestamp(value?: string) {
+  if (!value) return "Not yet";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function formatDuration(seconds: number) {
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${Math.floor(seconds / 86400)}d ${Math.floor((seconds % 86400) / 3600)}h`;
 }

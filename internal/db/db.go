@@ -88,6 +88,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			source TEXT NOT NULL,
 			upstream TEXT NOT NULL DEFAULT '',
 			latency_ms REAL,
+			rcode TEXT NOT NULL DEFAULT '',
+			decision_reason TEXT NOT NULL DEFAULT '',
+			decision_metadata TEXT NOT NULL DEFAULT '{}',
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_timestamp ON dns_queries(timestamp);`,
@@ -136,6 +139,24 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS users (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			singleton INTEGER NOT NULL DEFAULT 1 UNIQUE CHECK(singleton = 1),
+			username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+			password_hash TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS auth_sessions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id INTEGER NOT NULL,
+			token_hash TEXT NOT NULL UNIQUE,
+			expires_at TEXT NOT NULL,
+			last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);`,
 	}
 	for _, stmt := range schema {
 		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
@@ -145,6 +166,15 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE dns_queries ADD COLUMN upstream TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
+	for _, column := range []string{
+		`ALTER TABLE dns_queries ADD COLUMN rcode TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE dns_queries ADD COLUMN decision_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE dns_queries ADD COLUMN decision_metadata TEXT NOT NULL DEFAULT '{}'`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, column); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -152,6 +182,7 @@ func (s *Store) seed(ctx context.Context) error {
 	defaults := map[string]string{
 		"upstream_dns":             "1.1.1.1,9.9.9.9",
 		"local_domain_suffix":      "home",
+		"faro_lan_ip":              "",
 		"retention_days":           "30",
 		"favicon_fetching_enabled": "false",
 		"dns_cache_enabled":        "true",

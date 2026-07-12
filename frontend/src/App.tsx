@@ -9,9 +9,12 @@ import {
   type DomainEntry,
   type FaroEvent,
   type NotificationsResponse,
+  type AuthStatus,
   type Setting
 } from "./api/client";
 import { DomainDrawer } from "./components/DomainDrawer";
+import { AuthLoading, AuthScreen } from "./components/AuthScreen";
+import { Onboarding } from "./components/Onboarding";
 import { GlobalSearch } from "./components/GlobalSearch";
 import { Layout } from "./components/Layout";
 import { NotificationDrawer } from "./components/NotificationDrawer";
@@ -56,6 +59,43 @@ type AppRoute = {
 };
 
 export function App() {
+  const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [authError, setAuthError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    api.authStatus()
+      .then((status) => { if (active) setAuth(status); })
+      .catch((caught) => { if (active) setAuthError(caught instanceof Error ? caught.message : "Faro API is unavailable."); });
+    function unauthorized() {
+      setAuth((current) => current ? { ...current, authenticated: false, username: undefined } : current);
+    }
+    window.addEventListener("faro:unauthorized", unauthorized);
+    return () => {
+      active = false;
+      window.removeEventListener("faro:unauthorized", unauthorized);
+    };
+  }, []);
+
+  async function authenticate(username: string, password: string) {
+    setAuthError("");
+    try {
+      auth?.configured ? await api.login(username, password) : await api.setupAuth(username, password);
+      setAuth(await api.authStatus());
+    } catch (caught) {
+      setAuthError(caught instanceof Error ? caught.message : "Authentication failed.");
+    }
+  }
+
+  if (!auth) return authError ? <AuthScreen mode="login" onSubmit={authenticate} error={authError} /> : <AuthLoading />;
+  if (!auth.configured) return <AuthScreen mode="setup" onSubmit={authenticate} error={authError} />;
+  if (!auth.authenticated) return <AuthScreen mode="login" onSubmit={authenticate} error={authError} />;
+  if (!auth.onboarding_complete) return <Onboarding username={auth.username || "admin"} onComplete={() => setAuth({ ...auth, onboarding_complete: true })} />;
+
+  return <AuthenticatedApp username={auth.username || "admin"} onSignedOut={() => setAuth({ configured: true, authenticated: false, onboarding_complete: true })} />;
+}
+
+function AuthenticatedApp({ username, onSignedOut }: { username: string; onSignedOut: () => void }) {
   const [initialRoute] = useState(readRoute);
   const [page, setPageState] = useState<Page>(initialRoute.page);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -180,8 +220,12 @@ export function App() {
     setSummary(await api.dashboard());
   }
 
-  async function reloadCoreDNS() {
-    await api.reload();
+  async function signOut() {
+    try {
+      await api.logout();
+    } finally {
+      onSignedOut();
+    }
   }
 
   function navigateToPage(nextPage: Page) {
@@ -275,10 +319,11 @@ export function App() {
       page={page}
       setPage={navigateToPage}
       apiState={apiState}
-      onReload={reloadCoreDNS}
       onOpenSearch={() => setSearchOpen(true)}
       notifications={notifications}
       onOpenNotifications={() => setNotificationOpen(true)}
+      username={username}
+      onSignOut={signOut}
     >
       {error && (
         <div className="error-banner">

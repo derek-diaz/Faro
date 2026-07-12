@@ -14,6 +14,7 @@ import (
 	"github.com/derek/faro/internal/coredns"
 	"github.com/derek/faro/internal/db"
 	"github.com/derek/faro/internal/querylog"
+	"github.com/derek/faro/internal/retention"
 )
 
 func main() {
@@ -42,6 +43,8 @@ func main() {
 
 	tailer := querylog.NewTailer(store, logPath)
 	go tailer.Run(ctx)
+	retentionManager := retention.NewManager(store)
+	go retentionManager.Run(ctx)
 
 	srv := &http.Server{
 		Addr:              addr,

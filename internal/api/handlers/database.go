@@ -28,6 +28,16 @@ func writeRows(w http.ResponseWriter, rows *sql.Rows) {
 		}
 		row := map[string]any{}
 		for i, column := range columns {
+			if column == "decision_metadata" {
+				raw := "{}"
+				if value, ok := values[i].([]byte); ok {
+					raw = string(value)
+				} else if value, ok := values[i].(string); ok {
+					raw = value
+				}
+				row["decision"] = metadataMap(raw)
+				continue
+			}
 			switch value := values[i].(type) {
 			case []byte:
 				row[column] = string(value)
@@ -69,7 +79,7 @@ func grouped(ctx context.Context, database *sql.DB, query string, args ...any) [
 }
 
 func recentQueries(ctx context.Context, database *sql.DB) []map[string]any {
-	rows, err := database.QueryContext(ctx, `SELECT timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms FROM dns_queries ORDER BY timestamp DESC LIMIT 8`)
+	rows, err := database.QueryContext(ctx, `SELECT timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata FROM dns_queries ORDER BY timestamp DESC LIMIT 8`)
 	if err != nil {
 		return []map[string]any{}
 	}
@@ -87,6 +97,10 @@ func recentQueries(ctx context.Context, database *sql.DB) []map[string]any {
 		}
 		item := map[string]any{}
 		for i, column := range columns {
+			if column == "decision_metadata" {
+				item["decision"] = metadataMap(decisionMetadataString(values[i]))
+				continue
+			}
 			if bytes, ok := values[i].([]byte); ok {
 				item[column] = string(bytes)
 			} else {
@@ -99,7 +113,7 @@ func recentQueries(ctx context.Context, database *sql.DB) []map[string]any {
 }
 
 func recentQueriesFor(ctx context.Context, database *sql.DB, where string, args ...any) []map[string]any {
-	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms FROM dns_queries WHERE ` + where + ` ORDER BY timestamp DESC LIMIT 12`
+	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata FROM dns_queries WHERE ` + where + ` ORDER BY timestamp DESC LIMIT 12`
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
 		return []map[string]any{}
@@ -118,6 +132,10 @@ func recentQueriesFor(ctx context.Context, database *sql.DB, where string, args 
 		}
 		item := map[string]any{}
 		for i, column := range columns {
+			if column == "decision_metadata" {
+				item["decision"] = metadataMap(decisionMetadataString(values[i]))
+				continue
+			}
 			if bytes, ok := values[i].([]byte); ok {
 				item[column] = string(bytes)
 			} else {
@@ -127,6 +145,17 @@ func recentQueriesFor(ctx context.Context, database *sql.DB, where string, args 
 		items = append(items, item)
 	}
 	return items
+}
+
+func decisionMetadataString(value any) string {
+	switch typed := value.(type) {
+	case []byte:
+		return string(typed)
+	case string:
+		return typed
+	default:
+		return "{}"
+	}
 }
 
 func searchRows(ctx context.Context, database *sql.DB, query string, args ...any) []map[string]any {

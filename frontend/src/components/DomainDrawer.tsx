@@ -1,5 +1,5 @@
-import { Ban, ShieldCheck, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Ban, CheckCircle2, Database, GitBranch, Route, Server, ShieldCheck, ShieldX, X } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, type DNSQuery, type DomainSummary } from "../api/client";
 import { DomainFavicon } from "./DomainFavicon";
 import { StatusBadge } from "./StatusBadge";
@@ -36,6 +36,7 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
   }, [domain]);
 
   const recentActivity = useMemo(() => groupRecentQueries(summary?.recent_queries ?? []), [summary?.recent_queries]);
+  const latestQuery = summary?.recent_queries[0];
 
   async function addRule(action: "allow" | "block") {
     if (!domain) return;
@@ -110,6 +111,8 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
               </div>
             </section>
 
+            {latestQuery && <DecisionTrace query={latestQuery} />}
+
             <section className="inspector-section domain-recent-section">
               <div className="inspector-section-heading">
                 <h3>Recent activity</h3>
@@ -137,6 +140,80 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
       </aside>
     </div>
   );
+}
+
+function DecisionTrace({ query }: { query: DNSQuery }) {
+  const decision = query.decision;
+  const hasDecision = Boolean(decision && (
+    decision.captured_at || decision.reason || decision.allowlist || decision.manual_block ||
+    decision.local_record || decision.blocklists?.length
+  ));
+  const rules = decision?.blocklists ?? [];
+  const policyDetail = decision?.allowlist
+    ? "Manual allowlist exception bypassed filtering."
+    : decision?.manual_block
+      ? "Matched a manual domain block."
+      : rules.length > 0
+        ? `Matched ${rules.map((rule) => rule.name).join(", ")}.`
+        : decision?.local_record
+          ? `Matched Local DNS ${decision.local_record.type} record ${decision.local_record.value}.`
+          : hasDecision
+            ? "No blocking rule matched when Faro handled this request."
+            : "This request predates stored rule provenance.";
+  const resolution = resolutionDetail(query);
+  const responseCode = query.rcode || decision?.response_code || "Response recorded";
+  const latency = typeof query.latency_ms === "number" ? `${formatLatency(query.latency_ms)} ms` : "Latency unavailable";
+  const confidence = !hasDecision
+    ? "Historical request with limited provenance."
+    : decision?.confidence === "inferred"
+    ? "Cache classification inferred from the absence of an upstream hop."
+    : decision?.confidence === "configuration_snapshot"
+      ? "Rule provenance captured from Faro's active configuration."
+      : decision?.confidence === "observed"
+        ? "Upstream path observed in the CoreDNS response log."
+        : "Decision captured from Faro's local data.";
+
+  return (
+    <section className="inspector-section decision-trace-section">
+      <div className="inspector-section-heading">
+        <div><h3>Why Faro did this</h3><p>{query.decision_reason || decision?.reason || fallbackReason(query)}</p></div>
+        <time>{formatActivityTime(query.timestamp)}</time>
+      </div>
+      <div className="decision-trace" aria-label="DNS decision trace">
+        <TraceStep icon={<Route size={15} />} label="Request received" detail={`${query.client_ip} requested ${query.query_type} ${query.domain}.`} />
+        <TraceStep icon={query.action === "blocked" ? <ShieldX size={15} /> : <ShieldCheck size={15} />} label="Policy evaluation" detail={policyDetail} tone={query.action === "blocked" ? "blocked" : "allowed"} />
+        <TraceStep icon={query.source === "cache" ? <Database size={15} /> : query.source === "upstream" ? <Server size={15} /> : <GitBranch size={15} />} label="Resolution path" detail={resolution} />
+        <TraceStep icon={<CheckCircle2 size={15} />} label="Response" detail={`${responseCode} · ${latency}`} />
+      </div>
+      <span className="decision-confidence">{confidence}</span>
+    </section>
+  );
+}
+
+function TraceStep({ icon, label, detail, tone = "default" }: { icon: ReactNode; label: string; detail: string; tone?: "default" | "allowed" | "blocked" }) {
+  return <div className={`decision-trace-step ${tone}`}><span className="decision-trace-icon">{icon}</span><div><strong>{label}</strong><p>{detail}</p></div></div>;
+}
+
+function resolutionDetail(query: DNSQuery) {
+  if (query.source === "manual") return "Answered locally by Faro's manual blocking rule.";
+  if (query.source === "blocklist") return "Answered locally by Faro filtering; no upstream was contacted.";
+  if (query.source === "local") return "Answered by Faro Local DNS; no upstream was contacted.";
+  if (query.source === "cache") return "Answered from Faro's DNS cache; no upstream was contacted.";
+  if (query.source === "upstream") return query.upstream ? `Forwarded to upstream resolver ${query.upstream}.` : "Forwarded to a configured upstream resolver.";
+  return `Handled by ${query.source || "Faro"}.`;
+}
+
+function fallbackReason(query: DNSQuery) {
+  if (query.action === "blocked") return "Faro filtering blocked this request.";
+  if (query.source === "cache") return "Faro answered this request from its local cache.";
+  if (query.source === "local") return "Faro answered this request using Local DNS.";
+  return query.upstream ? `Faro forwarded this request to ${query.upstream}.` : "Faro allowed this request.";
+}
+
+function formatLatency(value: number) {
+  if (value < 1) return value.toFixed(2);
+  if (value < 10) return value.toFixed(1);
+  return Math.round(value).toString();
 }
 
 function OverviewItem({ label, value }: { label: string; value: string | number }) {

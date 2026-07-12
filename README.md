@@ -1,148 +1,153 @@
-# Faro
+<p align="center">
+  <img src="frontend/public/logos/web/icon-512.png" alt="Faro lighthouse logo" width="128" />
+</p>
 
-Faro is a self-hosted DNS control plane for modern homelabs. It manages CoreDNS underneath it and provides a UI, API, SQLite configuration model, blocklist management, query visibility, and a conservative CoreDNS reload workflow.
+<h1 align="center">Faro</h1>
 
-This repository is an MVP skeleton. It is intentionally small, local-first, and built around Docker Compose.
+<p align="center">
+  Friendly, self-hosted DNS control and network visibility for your homelab.
+</p>
 
-## Stack
+Faro runs CoreDNS behind an approachable web interface. It shows what devices are requesting, explains why a domain was allowed or blocked, manages local DNS and blocklists, compares upstream resolvers, and keeps all configuration and activity on your own network.
 
-- Backend: Go REST API
-- Frontend: React + TypeScript + Vite
-- DNS engine: CoreDNS
-- Database: SQLite
-- Runtime: Docker Compose
+## Quick start
 
-## Run with Docker Compose
+You need Docker with Docker Compose and a machine with a fixed LAN IP or DHCP reservation.
 
 ```sh
-docker compose up -d
+git clone https://github.com/derek-diaz/Faro.git
+cd Faro
+docker compose up -d --build
 ```
 
-Then open:
+Open `http://YOUR-FARO-IP:1787` and complete the guided setup. Faro will ask you to:
 
-- Faro UI: http://localhost:3000
-- API health: http://localhost:8080/healthz
-- Metrics: http://localhost:8080/metrics
-- DNS listener: your Docker host IP on port `53` by default
+1. Create the local administrator account.
+2. Confirm the Faro machine's LAN IP.
+3. Choose upstream DNS providers.
+4. Optionally install a starter blocklist.
 
-The default DNS port is `53` because routers such as UniFi normally let you set only a DNS server IP, not a custom port. If you are testing locally and port 53 is already in use, set `FARO_DNS_PORT=1053` in `.env` and query Faro explicitly on that port.
+When setup is complete, configure your router's DHCP DNS server to use `YOUR-FARO-IP`.
+
+> Faro publishes DNS on TCP and UDP port `53`. Most routers require this standard port. Make sure another DNS service is not already using port 53 on the Docker host.
+
+## Published ports
+
+| Port | Protocol | Purpose |
+| --- | --- | --- |
+| `1787` | TCP | Faro web interface, health check, and metrics |
+| `53` | TCP and UDP | DNS for your router and devices |
+
+The API stays inside the Compose network and is accessed through the web container. It is not exposed as a separate host port.
+
+Faro uses `1787` as its default web port, a small nod to Puerto Rico's `+1 787` numbering. You can replace it with any available TCP port.
+
+To change a published port, copy the example environment file and edit it before starting Faro:
+
+```sh
+cp .env.example .env
+```
+
+```dotenv
+FARO_BIND_ADDRESS=0.0.0.0
+FARO_UI_PORT=1787
+FARO_DNS_PORT=53
+```
+
+Use a nonstandard DNS port only for local testing. Routers normally cannot specify a DNS port other than `53`.
+
+## Verify the installation
+
+Check the containers:
+
+```sh
+docker compose ps
+```
+
+Test DNS from another machine on the network:
+
+```sh
+nslookup example.com YOUR-FARO-IP
+```
+
+Useful URLs:
+
+- Faro: `http://YOUR-FARO-IP:1787`
+- Health: `http://YOUR-FARO-IP:1787/healthz`
+- Prometheus metrics: `http://YOUR-FARO-IP:1787/metrics`
+
+## Everyday commands
+
+```sh
+# Follow logs
+docker compose logs -f
+
+# Apply an update after pulling new code
+docker compose up -d --build
+
+# Stop Faro without deleting data
+docker compose down
+```
+
+Faro stores its database, generated CoreDNS configuration, and DNS logs in named Docker volumes. `docker compose down` preserves them. Running `docker compose down -v` permanently deletes Faro's local data.
+
+## What Faro includes
+
+- First-run onboarding and local administrator authentication
+- Dashboard and searchable DNS activity
+- Device inventory, friendly names, and activity replay
+- Local DNS records and per-domain allow rules
+- Curated and custom blocklists
+- Upstream DNS selection with live latency checks
+- DNS cache and upstream-resolution visibility
+- Domain decision details: why Faro allowed or blocked a request
+- Configurable retention, database pruning, and health metrics
+
+Faro does not add fake activity. Dashboards remain empty until a device sends DNS requests through Faro.
+
+## Troubleshooting
+
+**Port 53 is already in use**
+
+Stop the existing DNS service or set `FARO_DNS_PORT=1053` in `.env` for testing. Router-wide DNS still requires port `53`.
+
+**The UI opens but no activity appears**
+
+Confirm the client or router is using the Faro host IP as its DNS server. Queries sent to another resolver cannot appear in Faro.
+
+**A container is unhealthy**
+
+```sh
+docker compose logs --tail=200 faro-api faro-ui coredns
+```
 
 ## Local development
 
-Backend:
-
 ```sh
+# Backend
 go run ./cmd/faro-api
-```
 
-Frontend:
-
-```sh
+# Frontend
 cd frontend
 npm install
 npm run dev
 ```
 
-The Vite dev server proxies `/api`, `/healthz`, and `/metrics` to `localhost:8080`.
+The frontend development server proxies `/api`, `/healthz`, and `/metrics` to the Go API on port `8080`.
 
-## Demo data
+<details>
+<summary>Architecture notes</summary>
 
-Faro seeds useful configuration data by default: sample local records, a sample manual blocklist, and a sample blocklist source. It does not seed fake query traffic by default. Query charts and tables stay empty until CoreDNS actually receives queries.
+Faro uses a Go API, React and TypeScript frontend, SQLite database, and CoreDNS. The API generates CoreDNS configuration into a shared volume and replaces active files safely. CoreDNS handles local records, blocked domains, caching, upstream forwarding, query logs, metrics, and configuration reloads.
 
-If you want demo query rows for screenshots or UI development, start the API with:
+The persistent volumes are:
 
-```sh
-FARO_SEED_DEMO_QUERIES=true
-```
+- `faro-data`: SQLite database and cached domain icons
+- `coredns-config`: generated CoreDNS files
+- `coredns-logs`: DNS query logs consumed by Faro
 
-## What the MVP includes
+</details>
 
-- Health check at `/healthz`
-- Prometheus metrics at `/metrics`
-- CRUD API for local DNS records
-- Blocklist CRUD plus refresh/download
-- Allowlist and manual blocklist entries
-- Query log API and dashboard summary API
-- SQLite migrations and seed data
-- CoreDNS Corefile generation from SQLite state
-- Generated `local.hosts` and `blocklist.hosts`
-- Safe file replacement with rollback if generated CoreDNS files cannot be written
-- CoreDNS log tailer that parses query logs into SQLite
-- React UI pages for Dashboard, Activity, Devices, Local DNS, Blocklists, Allowlist / Blocklist, and Settings
-- Favicon fetching for public-looking domains when enabled, with local placeholder circles for local-only names
-
-## DNS behavior
-
-Faro generates CoreDNS configuration files into a shared Docker volume:
-
-- `Corefile`
-- `faro.hosts`
-- `local.hosts`
-- `blocklist.hosts`
-
-Local `A` and `AAAA` records are rendered into `local.hosts`. Blocklist and manual blocked domains are rendered into `blocklist.hosts` as `0.0.0.0 domain`. CoreDNS reads the combined `faro.hosts` file because CoreDNS only allows one `hosts` plugin per server block. Allowlist entries are excluded from generated block entries.
-
-The Corefile uses:
-
-- `hosts` for local records
-- `hosts` for blocked domains
-- `forward` for upstream DNS, defaulting to `1.1.1.1` and `9.9.9.9`
-- `log` and `reload`
-
-For MVP validation, Faro performs basic generated Corefile checks and writes files through temp files before replacing active files. The reload plugin in CoreDNS picks up changes. A future iteration should run the CoreDNS binary against the generated Corefile before replacement when that binary is available in the API container.
-
-## Blocklist formats
-
-Faro parses common host/blocklist lines:
-
-```txt
-0.0.0.0 domain.com
-127.0.0.1 domain.com
-domain.com
-# comments
-! comments
-```
-
-Domains are normalized and deduplicated.
-
-## Point a client or router at Faro
-
-For a single client, set its DNS server to the host running Faro:
-
-- DNS server: your Docker host IP
-- Port: `53` for the default config
-
-Most routers only support DNS on port 53. For router-wide DNS, keep `FARO_DNS_PORT=53`, restart Docker Compose, then configure the UniFi DHCP DNS server to the host IP running Faro. Use `1053` only for local testing where you can specify a DNS port manually.
-
-## API overview
-
-- `GET /healthz`
-- `GET /api/dns-records`
-- `POST /api/dns-records`
-- `PUT /api/dns-records/{id}`
-- `DELETE /api/dns-records/{id}`
-- `GET /api/blocklists`
-- `POST /api/blocklists`
-- `PUT /api/blocklists/{id}`
-- `POST /api/blocklists/{id}/refresh`
-- `DELETE /api/blocklists/{id}`
-- `GET /api/allowlist`
-- `POST /api/allowlist`
-- `DELETE /api/allowlist/{id}`
-- `GET /api/blocklist-domains`
-- `POST /api/blocklist-domains`
-- `DELETE /api/blocklist-domains/{id}`
-- `GET /api/queries`
-- `GET /api/dashboard`
-- `GET /api/settings`
-- `PUT /api/settings`
-- `POST /api/reload`
-- `GET /metrics`
-
-## Not included yet
-
-- DHCP
-- DNS over HTTPS or DNS over TLS
-- Multi-user auth
-- Kubernetes deployment
-- Complex IPAM
+<p align="center">
+  Made in Puerto Rico.
+</p>

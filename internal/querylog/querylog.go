@@ -3,6 +3,7 @@ package querylog
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"log"
 	"net"
 	"os"
@@ -104,11 +105,15 @@ func (t *Tailer) insert(ctx context.Context, line string) {
 		return
 	}
 
-	blocked, source := coredns.IsBlocked(ctx, t.Store, entry.domain)
-	action := "allowed"
-	if blocked {
-		action = "blocked"
-		source = "blocklist"
+	decision := coredns.ExplainDomain(ctx, t.Store, entry.domain)
+	action := decision.Action
+	source := ""
+	if action == "blocked" {
+		if decision.ManualBlock != nil {
+			source = "manual"
+		} else {
+			source = "blocklist"
+		}
 	} else if isLocalRecord(ctx, t.Store, entry.domain) {
 		source = "local"
 	} else if !entry.observed || entry.upstream != "" {
@@ -116,12 +121,52 @@ func (t *Tailer) insert(ctx context.Context, line string) {
 	} else {
 		source = "cache"
 	}
+	decision.Upstream = entry.upstream
+	decision.ResponseCode = entry.rcode
+	decision.CapturedAt = time.Now().UTC().Format(time.RFC3339)
+	decision.Confidence = decisionConfidence(source, entry.upstream)
+	decision.Reason = decisionReason(decision, source, entry.upstream)
+	metadata, err := json.Marshal(decision)
+	if err != nil {
+		metadata = []byte("{}")
+	}
 
-	_, err := t.Store.DB.ExecContext(ctx, `INSERT INTO dns_queries(timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
-		time.Now().UTC().Format(time.RFC3339), entry.clientIP, entry.domain, entry.queryType, action, source, entry.upstream, entry.latencyMS)
+	_, err = t.Store.DB.ExecContext(ctx, `
+		INSERT INTO dns_queries(timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, time.Now().UTC().Format(time.RFC3339), entry.clientIP, entry.domain, entry.queryType, action, source, entry.upstream, entry.latencyMS, entry.rcode, decision.Reason, string(metadata))
 	if err != nil {
 		log.Printf("insert dns query failed: %v", err)
 	}
+}
+
+func decisionConfidence(source, upstream string) string {
+	if source == "upstream" && upstream != "" {
+		return "observed"
+	}
+	if source == "cache" {
+		return "inferred"
+	}
+	return "configuration_snapshot"
+}
+
+func decisionReason(decision coredns.DomainDecision, source, upstream string) string {
+	if decision.Action == "blocked" || decision.LocalRecord != nil {
+		if decision.LocalRecord != nil && decision.Action != "blocked" {
+			return "Matched a Faro Local DNS " + decision.LocalRecord.Type + " record pointing to " + decision.LocalRecord.Value + "."
+		}
+		return decision.Reason
+	}
+	resolution := "Forwarded to a configured upstream resolver."
+	if source == "cache" {
+		resolution = "Answered from Faro's DNS cache without contacting an upstream."
+	} else if upstream != "" {
+		resolution = "Forwarded to upstream resolver " + upstream + "."
+	}
+	if decision.Allowlist != nil {
+		return decision.Reason + " " + resolution
+	}
+	return resolution
 }
 
 func parseLine(line string) (logEntry, bool) {

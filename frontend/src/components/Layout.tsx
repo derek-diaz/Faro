@@ -3,9 +3,10 @@ import {
 	BarChart3,
 	Bell,
 	CheckCircle2,
+	ChevronDown,
 	MonitorSmartphone,
+	LogOut,
 	Network,
-	RefreshCw,
 	Router,
 	Search,
 	Settings,
@@ -16,6 +17,7 @@ import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { NotificationsResponse } from "../api/client";
 import type { Page } from "../App";
+import { BrandLogo } from "./BrandLogo";
 
 const navItems: { id: Page; label: string; description: string; href: string; icon: LucideIcon }[] = [
   { id: "dashboard", label: "Dashboard", description: "Live network health and DNS traffic at a glance.", href: "/", icon: BarChart3 },
@@ -33,25 +35,21 @@ type LayoutProps = {
   setPage: (page: Page) => void;
   children: ReactNode;
   apiState: "checking" | "online" | "offline";
-  onReload: () => Promise<void>;
   onOpenSearch: () => void;
   notifications: NotificationsResponse;
   onOpenNotifications: () => void;
+  username: string;
+  onSignOut: () => Promise<void>;
 };
 
-export function Layout({ page, setPage, children, apiState, onReload, onOpenSearch, notifications, onOpenNotifications }: LayoutProps) {
+export function Layout({ page, setPage, children, apiState, onOpenSearch, notifications, onOpenNotifications, username, onSignOut }: LayoutProps) {
   const currentPage = navItems.find((item) => item.id === page) ?? navItems[0];
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark" aria-hidden="true">
-            <span />
-          </div>
-          <div>
-            <strong>Faro</strong>
-            <span>Network observability</span>
-          </div>
+          <BrandLogo />
+          <strong className="brand-wordmark">Faro</strong>
         </div>
 
         <nav>
@@ -73,18 +71,6 @@ export function Layout({ page, setPage, children, apiState, onReload, onOpenSear
             );
           })}
         </nav>
-
-        <div className="sidebar-status">
-          <CheckCircle2 size={18} />
-          <div>
-            <strong>DNS Healthy</strong>
-            <span>{apiState === "online" ? "Engine running" : "Waiting for API"}</span>
-          </div>
-          <button className="reload-button" type="button" onClick={() => void onReload()} aria-label="Reload DNS">
-            <RefreshCw size={16} />
-            <span>Reload DNS</span>
-          </button>
-        </div>
       </aside>
 
       <main className="main">
@@ -99,18 +85,30 @@ export function Layout({ page, setPage, children, apiState, onReload, onOpenSear
               <span>Search</span>
               <kbd>Ctrl K</kbd>
             </button>
-            <div className="system-status">
+            <div className={`system-status ${apiState}`} title={apiState === "online" ? "Faro API and DNS services are responding" : apiState === "offline" ? "Faro API is not responding" : "Checking Faro services"}>
               <CheckCircle2 size={17} />
-              <span>{apiState === "online" ? "All systems normal" : apiState === "offline" ? "API offline" : "Checking systems"}</span>
+              <span>{apiState === "online" ? "Healthy" : apiState === "offline" ? "Offline" : "Checking"}</span>
             </div>
             <button className="icon-button notification-button" type="button" onClick={onOpenNotifications} aria-label="Network updates">
               <Bell size={18} />
               {notifications.attention_count > 0 && <span>{Math.min(notifications.attention_count, 9)}</span>}
             </button>
+            <details className="account-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute("open"); }} onKeyDown={(event) => { if (event.key === "Escape") { event.currentTarget.removeAttribute("open"); event.currentTarget.querySelector("summary")?.focus(); } }}>
+              <summary aria-label={`Account menu for ${username}`}><UserBadge username={username} /><ChevronDown size={14} /></summary>
+              <div className="account-menu-popover">
+                <header><small>Signed in as</small><strong>{username}</strong></header>
+                <button type="button" onClick={(event) => { event.currentTarget.closest("details")?.removeAttribute("open"); setPage("settings"); }}><Settings size={16} /><span>Settings</span></button>
+                <button type="button" onClick={(event) => { event.currentTarget.closest("details")?.removeAttribute("open"); void onSignOut(); }}><LogOut size={16} /><span>Sign out</span></button>
+              </div>
+            </details>
           </div>
         </header>
         {children}
       </main>
     </div>
   );
+}
+
+function UserBadge({ username }: { username: string }) {
+  return <span className="user-badge" aria-hidden="true">{username.slice(0, 1).toUpperCase()}</span>;
 }

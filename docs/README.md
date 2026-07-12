@@ -39,6 +39,15 @@ Test DNS from another machine on the network:
 nslookup example.com YOUR-FARO-IP
 ```
 
+Confirm that Docker published both DNS protocols:
+
+```sh
+docker compose port dns 53 --protocol udp
+docker compose port dns 53 --protocol tcp
+```
+
+Both commands should report the Faro host on port `53`.
+
 Useful endpoints:
 
 - Web interface: `http://YOUR-FARO-IP:1787`
@@ -78,7 +87,56 @@ Back up these volumes as part of the Docker host's normal backup process.
 
 ### Port 53 is already in use
 
-Stop the existing DNS service or set `FARO_DNS_PORT=1053` in `.env` for local testing. Router-wide DNS still requires port `53`.
+Identify the listener first:
+
+```sh
+sudo ss -lntup '( sport = :53 )'
+```
+
+If `systemd-resolved` is listening only on a loopback address such as `127.0.0.53`, keep it running and bind Faro to the server's fixed LAN IP in `.env`:
+
+```dotenv
+FARO_BIND_ADDRESS=192.168.1.10
+FARO_DNS_PORT=53
+```
+
+Apply the binding by recreating the services:
+
+```sh
+docker compose up -d --force-recreate
+```
+
+If the listener is a leftover Technitium system installation, its standard service is `dns.service`. Stop it only after confirming that it is the process shown above:
+
+```sh
+sudo systemctl disable --now dns.service
+docker compose up -d --force-recreate
+```
+
+For local testing only, `FARO_DNS_PORT=1053` avoids the conflict. Router-wide DNS normally requires port `53`.
+
+### The DNS container is healthy but has no published port
+
+First confirm that the rendered Compose configuration contains `published: "53"` for both protocols:
+
+```sh
+docker compose config
+```
+
+Then refresh the standalone Compose file and recreate only the DNS container:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/derek-diaz/Faro/main/docker-compose.yml -o docker-compose.yml
+docker compose up -d --pull always --force-recreate dns
+docker compose port dns 53 --protocol udp
+docker compose port dns 53 --protocol tcp
+```
+
+If recreation reports that port `53` is already allocated, identify the host DNS service before changing it:
+
+```sh
+sudo ss -lntup '( sport = :53 )'
+```
 
 ### The UI opens but no activity appears
 

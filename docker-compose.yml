@@ -1,13 +1,14 @@
+name: faro
+
 services:
-  faro-api:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.backend
+  api:
+    image: ${FARO_IMAGE_NAMESPACE:-tabierto}/faro-api:${FARO_VERSION:-latest}
+    pull_policy: always
     environment:
       FARO_DB_PATH: /data/faro.db
       FARO_COREDNS_CONFIG_DIR: /coredns
       FARO_COREDNS_LOG_PATH: /var/log/coredns/query.log
-      FARO_COREDNS_METRICS_URL: http://coredns:9153/metrics
+      FARO_COREDNS_METRICS_URL: http://dns:9153/metrics
     volumes:
       - faro-data:/data
       - coredns-config:/coredns
@@ -22,12 +23,11 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  faro-ui:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.frontend
+  ui:
+    image: ${FARO_IMAGE_NAMESPACE:-tabierto}/faro-ui:${FARO_VERSION:-latest}
+    pull_policy: always
     depends_on:
-      faro-api:
+      api:
         condition: service_healthy
     ports:
       - "${FARO_BIND_ADDRESS:-0.0.0.0}:${FARO_UI_PORT:-1787}:80"
@@ -38,12 +38,11 @@ services:
       retries: 5
     restart: unless-stopped
 
-  coredns:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.coredns
+  dns:
+    image: ${FARO_IMAGE_NAMESPACE:-tabierto}/faro-dns:${FARO_VERSION:-latest}
+    pull_policy: always
     depends_on:
-      faro-api:
+      api:
         condition: service_healthy
     volumes:
       - coredns-config:/etc/coredns

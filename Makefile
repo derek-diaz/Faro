@@ -1,7 +1,7 @@
 .PHONY: up down logs api-test frontend-build backend-build
 
 up:
-	docker compose up -d
+	docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 down:
 	docker compose down

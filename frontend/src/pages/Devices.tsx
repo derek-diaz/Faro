@@ -15,7 +15,8 @@ import {
   Server,
   ShieldCheck,
   Smartphone,
-  Tv
+  Tv,
+  X
 } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { api, type DeviceReplay as DeviceReplayData, type DeviceSummary, type DNSQuery, type ReplayBucket } from "../api/client";
@@ -49,13 +50,6 @@ export function Devices({ devices, refresh, selectedClientIP, onSelectClient, on
   }, null), [devices]);
 
   useEffect(() => {
-    if (!mostActiveDevice) return;
-    if (!selectedClientIP || !devices.some((device) => device.client_ip === selectedClientIP)) {
-      onSelectClient(mostActiveDevice.client_ip);
-    }
-  }, [devices, mostActiveDevice, onSelectClient, selectedClientIP]);
-
-  useEffect(() => {
     if (!selectedClientIP) {
       setDetail(null);
       setEditing(false);
@@ -86,10 +80,24 @@ export function Devices({ devices, refresh, selectedClientIP, onSelectClient, on
     };
   }, [selectedClientIP]);
 
+  useEffect(() => {
+    if (!selectedClientIP) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") onSelectClient(null);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onSelectClient, selectedClientIP]);
+
   const filteredDevices = useMemo(() => {
     const term = search.trim().toLowerCase();
     if (!term) return devices;
-    return devices.filter((device) => [device.name, device.client_ip, device.device_type, device.location, device.profile]
+    return devices.filter((device) => [device.name, device.display_name, device.client_ip, device.device_type, device.location, device.profile]
       .some((value) => value?.toLowerCase().includes(term)));
   }, [devices, search]);
 
@@ -123,7 +131,7 @@ export function Devices({ devices, refresh, selectedClientIP, onSelectClient, on
         <DeviceSummaryMetric icon={<MonitorSmartphone size={18} />} label="Observed devices" value={devices.length} detail={`${totals.active} active today`} />
         <DeviceSummaryMetric icon={<Activity size={18} />} label="Requests today" value={totals.requests.toLocaleString()} detail="Across all devices" />
         <DeviceSummaryMetric icon={<ShieldCheck size={18} />} label="Blocked today" value={totals.blocked.toLocaleString()} detail={`${totals.blockedRate.toFixed(1)}% of requests`} tone={totals.blocked > 0 ? "blocked" : "default"} />
-        <DeviceSummaryMetric icon={<Clock3 size={18} />} label="Most active" value={mostActiveDevice?.name || mostActiveDevice?.client_ip || "None"} detail={`${mostActiveDevice?.total_queries_today.toLocaleString() ?? "0"} requests today`} compact />
+        <DeviceSummaryMetric icon={<Clock3 size={18} />} label="Most active" value={deviceDisplayName(mostActiveDevice) || "None"} detail={`${mostActiveDevice?.total_queries_today.toLocaleString() ?? "0"} requests today`} compact />
       </section>
 
       <section className="panel device-inventory-panel">
@@ -155,8 +163,8 @@ export function Devices({ devices, refresh, selectedClientIP, onSelectClient, on
               <span className="device-table-identity">
                 <span className="device-icon">{deviceTypeIcon(device.device_type)}</span>
                 <span className="device-main">
-                  <strong>{device.name || device.client_ip}</strong>
-                  <small>{device.device_type} <i /> {device.name ? device.client_ip : "Unnamed device"}{device.location ? ` · ${device.location}` : ""}</small>
+                  <strong>{deviceDisplayName(device)}</strong>
+                  <small>{device.device_type} <i /> {deviceIdentityCaption(device)}{device.location ? ` · ${device.location}` : ""}</small>
                 </span>
               </span>
               <span className="device-table-value"><small>Requests today</small><strong>{device.total_queries_today.toLocaleString()}</strong></span>
@@ -173,36 +181,46 @@ export function Devices({ devices, refresh, selectedClientIP, onSelectClient, on
         )}
       </section>
 
-      <section className={`panel device-detail-panel ${view === "replay" ? "replay-active" : ""}`}>
-        {detailLoading && <div className="device-detail-loading">Loading device details...</div>}
-        {detailError && <div className="device-detail-error">{detailError}</div>}
-        {!detailLoading && detail && (
-          <>
-            <div className="device-detail-header">
-              <div className="device-detail-identity">
-                <span className="device-detail-icon">{deviceTypeIcon(detail.device_type)}</span>
-                <div>
-                  <div className="device-detail-context"><span className="device-profile-badge">{detail.profile} profile</span><span>{detail.client_ip}</span></div>
-                  <h2>{detail.name || detail.client_ip}</h2>
-                  <p>{detail.device_type}{detail.location ? ` · ${detail.location}` : detail.name ? " · Friendly name configured" : " · Add a friendly name to recognize this device"}</p>
-                </div>
-              </div>
-              {view === "overview" && <button className="secondary device-edit-button" type="button" onClick={() => setEditing((value) => !value)}><Edit3 size={16} /><span>{editing ? "Cancel" : "Edit device"}</span></button>}
-            </div>
+      {selectedClientIP && (
+        <div className="drawer-backdrop device-drawer-backdrop" onClick={() => onSelectClient(null)}>
+          <aside className="device-detail-drawer" role="dialog" aria-modal="true" aria-label="Device details" onClick={(event) => event.stopPropagation()}>
+            <header className="device-drawer-header">
+              <div><strong>Device details</strong><span>Inspect identity, traffic, and history without losing your place.</span></div>
+              <button className="icon-button" type="button" onClick={() => onSelectClient(null)} aria-label="Close device details"><X size={18} /></button>
+            </header>
+            <section className={`device-detail-panel ${view === "replay" ? "replay-active" : ""}`}>
+              {detailLoading && <div className="device-detail-loading">Loading device details...</div>}
+              {detailError && <div className="device-detail-error">{detailError}</div>}
+              {!detailLoading && detail && (
+                <>
+                  <div className="device-detail-header">
+                    <div className="device-detail-identity">
+                      <span className="device-detail-icon">{deviceTypeIcon(detail.device_type)}</span>
+                      <div>
+                        <div className="device-detail-context"><span className="device-profile-badge">{detail.profile} profile</span><span>{detail.client_ip}</span></div>
+                        <h2>{deviceDisplayName(detail)}</h2>
+                        <p>{detail.device_type} · {deviceIdentityDescription(detail)}</p>
+                      </div>
+                    </div>
+                    {view === "overview" && <button className="secondary device-edit-button" type="button" onClick={() => setEditing((value) => !value)}><Edit3 size={16} /><span>{editing ? "Cancel" : "Edit device"}</span></button>}
+                  </div>
 
-            <div className="device-view-tabs" role="tablist" aria-label="Device views">
-              <button className={view === "overview" ? "active" : ""} type="button" role="tab" aria-selected={view === "overview"} onClick={() => setView("overview")}><LayoutDashboard size={16} /><span>Overview</span></button>
-              <button className={view === "replay" ? "active" : ""} type="button" role="tab" aria-selected={view === "replay"} onClick={() => { setEditing(false); setView("replay"); }}><History size={16} /><span>Activity replay</span></button>
-            </div>
+                  <div className="device-view-tabs" role="tablist" aria-label="Device views">
+                    <button className={view === "overview" ? "active" : ""} type="button" role="tab" aria-selected={view === "overview"} onClick={() => setView("overview")}><LayoutDashboard size={16} /><span>Overview</span></button>
+                    <button className={view === "replay" ? "active" : ""} type="button" role="tab" aria-selected={view === "replay"} onClick={() => { setEditing(false); setView("replay"); }}><History size={16} /><span>Activity replay</span></button>
+                  </div>
 
-            {view === "overview" ? (
-              <DeviceOverview detail={detail} form={form} setForm={setForm} editing={editing} saveAlias={saveAlias} onDomainSelect={onDomainSelect} onOpenReplay={() => setView("replay")} />
-            ) : (
-              <DeviceReplay clientIP={detail.client_ip} deviceName={detail.name || detail.client_ip} onDomainSelect={onDomainSelect} />
-            )}
-          </>
-        )}
-      </section>
+                  {view === "overview" ? (
+                    <DeviceOverview detail={detail} form={form} setForm={setForm} editing={editing} saveAlias={saveAlias} onDomainSelect={onDomainSelect} onOpenReplay={() => setView("replay")} />
+                  ) : (
+                    <DeviceReplay clientIP={detail.client_ip} deviceName={deviceDisplayName(detail)} onDomainSelect={onDomainSelect} />
+                  )}
+                </>
+              )}
+            </section>
+          </aside>
+        </div>
+      )}
     </div>
   );
 }
@@ -388,6 +406,10 @@ function overviewFrequency(rate?: number) {
 function deviceTypeIcon(type: string) {
   switch (type) {
     case "Apple TV": return <Tv size={20} />;
+    case "Apple Device":
+    case "Android Device": return <Smartphone size={20} />;
+    case "Smart TV":
+    case "Roku": return <Tv size={20} />;
     case "Tesla": return <Car size={20} />;
     case "Windows PC":
     case "Mac": return <Laptop size={20} />;
@@ -396,6 +418,24 @@ function deviceTypeIcon(type: string) {
     case "Android Phone": return <Smartphone size={20} />;
     default: return <MonitorSmartphone size={20} />;
   }
+}
+
+function deviceDisplayName(device?: DeviceSummary | null) {
+  return device?.display_name || device?.name || device?.client_ip || "";
+}
+
+function deviceIdentityCaption(device: DeviceSummary) {
+  if (!device.display_name && !device.name) return "Name not discovered";
+  if (device.name_source === "manual" || device.name) return device.client_ip;
+  return `${device.client_ip} · Auto-detected`;
+}
+
+function deviceIdentityDescription(device: DeviceSummary) {
+  if (device.location) return device.location;
+  if (device.name_source === "local_dns") return "Name discovered from Local DNS";
+  if (device.name_source === "reverse_dns") return "Name discovered from reverse DNS";
+  if (device.name_source === "manual" || device.name) return "Friendly name configured";
+  return "No reliable hostname discovered yet";
 }
 
 function formatLastSeen(timestamp?: string | null, includeDate = false) {

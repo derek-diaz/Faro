@@ -29,7 +29,7 @@ func (s *Handler) domainSummary(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, err)
 		return
 	}
-	start := todayStart()
+	start := todayStart(r)
 	total := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE domain = ? AND timestamp >= ?`, domain, start)
 	blocked := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE domain = ? AND timestamp >= ? AND action = 'blocked'`, domain, start)
 	var firstSeen, lastSeen sql.NullString

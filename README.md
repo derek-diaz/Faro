@@ -10,6 +10,14 @@
 
 Faro pairs CoreDNS with an approachable web app so you can understand and control DNS activity without sending your network data to a third party.
 
+<p align="center">
+  <img src="docs/faro-screenshot-1.png" alt="Faro dashboard showing network health, DNS traffic, devices, and upstream resolvers" width="900" />
+</p>
+
+<p align="center">
+  <sub>Your network health, DNS activity, and devices&mdash;all in one place.</sub>
+</p>
+
 ## Features
 
 - Guided first-run setup and local administrator authentication

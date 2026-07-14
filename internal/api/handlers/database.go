@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	_ "time/tzdata"
 )
 
 func writeRows(w http.ResponseWriter, rows *sql.Rows) {
@@ -226,8 +227,24 @@ func percentage64(part, total float64) float64 {
 	return float64(int(part/total*1000+0.5)) / 10
 }
 
-func todayStart() string {
-	return time.Now().UTC().Truncate(24 * time.Hour).Format(time.RFC3339)
+func todayStart(r *http.Request) string {
+	timezone := ""
+	if r != nil {
+		timezone = r.Header.Get("X-Faro-Timezone")
+	}
+	return localDayStart(time.Now(), timezone)
+}
+
+func localDayStart(now time.Time, timezone string) string {
+	location := time.UTC
+	if requested := strings.TrimSpace(timezone); requested != "" {
+		if parsed, err := time.LoadLocation(requested); err == nil {
+			location = parsed
+		}
+	}
+	localNow := now.In(location)
+	start := time.Date(localNow.Year(), localNow.Month(), localNow.Day(), 0, 0, 0, 0, location)
+	return start.UTC().Format(time.RFC3339)
 }
 
 func nullableString(value sql.NullString) any {

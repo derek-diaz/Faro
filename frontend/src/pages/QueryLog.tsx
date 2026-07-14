@@ -1,56 +1,83 @@
-import { Ban, CheckCircle2, Filter, Search, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
-import { useMemo, useState } from "react";
-import { api, type FaroEvent } from "../api/client";
+import { Ban, CheckCircle2, ChevronLeft, ChevronRight, Filter, Search, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { api, type ActivityPage, type FaroEvent } from "../api/client";
 import { DomainFavicon } from "../components/DomainFavicon";
 import { EmptyState } from "../components/EmptyState";
 import { ResolutionSource } from "../components/ResolutionSource";
 
 type QueryLogProps = {
-  events: FaroEvent[];
-  refresh: (search?: string) => Promise<void>;
   onDomainSelect: (domain: string) => void;
   onDeviceSelect: (clientIP: string) => void;
 };
 
 type EventFilter = "all" | "dns" | "cache" | "upstream" | "blocked" | "system";
 
-export function QueryLog({ events, refresh, onDomainSelect, onDeviceSelect }: QueryLogProps) {
+const PAGE_SIZE = 50;
+const emptyActivity: ActivityPage = {
+  items: [],
+  page: 1,
+  page_size: PAGE_SIZE,
+  total: 0,
+  total_pages: 0,
+  counts: { all: 0, dns: 0, cache: 0, upstream: 0, blocked: 0, system: 0 }
+};
+
+export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
+  const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<EventFilter>("all");
+  const [page, setPage] = useState(1);
+  const [activity, setActivity] = useState<ActivityPage>(emptyActivity);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
 
-  const counts = useMemo(() => ({
-    all: events.length,
-    dns: events.filter((event) => event.type === "dns.query" || event.type === "dns.blocked").length,
-    cache: events.filter((event) => event.source === "cache").length,
-    upstream: events.filter((event) => event.source === "upstream").length,
-    blocked: events.filter((event) => event.type === "dns.blocked").length,
-    system: events.filter((event) => event.type !== "dns.query" && event.type !== "dns.blocked").length
-  }), [events]);
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setLoadError("");
+    api.events(search, filter, page, PAGE_SIZE)
+      .then((result) => { if (active) setActivity(result); })
+      .catch((caught) => { if (active) setLoadError(caught instanceof Error ? caught.message : "Activity could not be loaded."); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [search, filter, page, refreshVersion]);
 
-  const visibleEvents = useMemo(() => events.filter((event) => {
-    if (filter === "dns") return event.type === "dns.query" || event.type === "dns.blocked";
-    if (filter === "cache") return event.source === "cache";
-    if (filter === "upstream") return event.source === "upstream";
-    if (filter === "blocked") return event.type === "dns.blocked";
-    if (filter === "system") return event.type !== "dns.query" && event.type !== "dns.blocked";
-    return true;
-  }), [events, filter]);
+  useEffect(() => {
+    if (page !== 1) return undefined;
+    const timer = window.setInterval(() => {
+      void api.events(search, filter, 1, PAGE_SIZE).then(setActivity).catch(() => undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [search, filter, page]);
+
+  const counts = activity.counts;
+  const visibleEvents = activity.items;
+  const firstResult = activity.total === 0 ? 0 : (activity.page - 1) * activity.page_size + 1;
+  const lastResult = Math.min(activity.page * activity.page_size, activity.total);
 
   async function addRule(domain: string, action: "allow" | "block") {
     setBusy(`${action}:${domain}`);
     try {
       if (action === "allow") await api.addAllow(domain);
       else await api.addBlock(domain);
-      await refresh(search);
+      setRefreshVersion((current) => current + 1);
     } finally {
       setBusy(null);
     }
   }
 
   function clearSearch() {
+    setSearchInput("");
     setSearch("");
-    void refresh();
+    setPage(1);
+    setRefreshVersion((current) => current + 1);
+  }
+
+  function selectFilter(nextFilter: EventFilter) {
+    setFilter(nextFilter);
+    setPage(1);
   }
 
   return (
@@ -60,15 +87,17 @@ export function QueryLog({ events, refresh, onDomainSelect, onDeviceSelect }: Qu
           className="activity-search"
           onSubmit={(event) => {
             event.preventDefault();
-            void refresh(search);
+            setSearch(searchInput.trim());
+            setPage(1);
+            setRefreshVersion((current) => current + 1);
           }}
         >
           <Search size={17} />
-          <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search domains, devices, or events" />
-          <button className="clear-search" type="button" disabled={!search} onClick={clearSearch} aria-label="Clear search"><X size={16} /></button>
+          <input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="Search domains, devices, or events" />
+          <button className="clear-search" type="button" disabled={!searchInput && !search} onClick={clearSearch} aria-label="Clear search"><X size={16} /></button>
           <button className="search-submit" type="submit">Search</button>
         </form>
-        <div className="activity-scope"><SlidersHorizontal size={16} /><span>Latest network events</span></div>
+        <div className="activity-scope"><SlidersHorizontal size={16} /><span>Complete retained history</span></div>
       </section>
 
       <section className="activity-summary" aria-label="Activity summary">
@@ -82,17 +111,19 @@ export function QueryLog({ events, refresh, onDomainSelect, onDeviceSelect }: Qu
         <div className="activity-results-toolbar">
           <div className="filter-label"><Filter size={16} /><span>Filter</span></div>
           <div className="event-filter-tabs" role="group" aria-label="Filter activity">
-            <FilterButton active={filter === "all"} label="All" count={counts.all} onClick={() => setFilter("all")} />
-            <FilterButton active={filter === "dns"} label="DNS" count={counts.dns} onClick={() => setFilter("dns")} />
-            <FilterButton active={filter === "cache"} label="Cache" count={counts.cache} onClick={() => setFilter("cache")} />
-            <FilterButton active={filter === "upstream"} label="Upstream" count={counts.upstream} onClick={() => setFilter("upstream")} />
-            <FilterButton active={filter === "blocked"} label="Blocked" count={counts.blocked} onClick={() => setFilter("blocked")} />
-            <FilterButton active={filter === "system"} label="System" count={counts.system} onClick={() => setFilter("system")} />
+            <FilterButton active={filter === "all"} label="All" count={counts.all} onClick={() => selectFilter("all")} />
+            <FilterButton active={filter === "dns"} label="DNS" count={counts.dns} onClick={() => selectFilter("dns")} />
+            <FilterButton active={filter === "cache"} label="Cache" count={counts.cache} onClick={() => selectFilter("cache")} />
+            <FilterButton active={filter === "upstream"} label="Upstream" count={counts.upstream} onClick={() => selectFilter("upstream")} />
+            <FilterButton active={filter === "blocked"} label="Blocked" count={counts.blocked} onClick={() => selectFilter("blocked")} />
+            <FilterButton active={filter === "system"} label="System" count={counts.system} onClick={() => selectFilter("system")} />
           </div>
-          <span className="results-count">Showing {visibleEvents.length} events</span>
+          <span className="results-count">{loading ? "Loading…" : `Showing ${firstResult}–${lastResult} of ${activity.total}`}</span>
         </div>
 
-        {visibleEvents.length === 0 ? (
+        {loadError ? (
+          <EmptyState title="Activity unavailable" body={loadError} />
+        ) : visibleEvents.length === 0 ? (
           <EmptyState title="No matching activity" body="Try another filter or point a device at Faro to begin collecting DNS activity." />
         ) : (
           <div className="activity-table-wrap">
@@ -151,6 +182,16 @@ export function QueryLog({ events, refresh, onDomainSelect, onDeviceSelect }: Qu
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+        {activity.total > 0 && (
+          <div className="activity-pagination" aria-label="Activity pages">
+            <span>{firstResult}–{lastResult} of {activity.total.toLocaleString()} events</span>
+            <div>
+              <button type="button" disabled={loading || page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={16} /> Newer</button>
+              <strong>Page {activity.page} of {Math.max(activity.total_pages, 1)}</strong>
+              <button type="button" disabled={loading || page >= activity.total_pages} onClick={() => setPage((current) => current + 1)}>Older <ChevronRight size={16} /></button>
+            </div>
           </div>
         )}
       </section>

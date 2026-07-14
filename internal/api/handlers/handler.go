@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/derek/faro/internal/auth"
@@ -16,23 +17,26 @@ type CoreDNSManager interface {
 }
 
 type Handler struct {
-	store      *db.Store
-	reloader   CoreDNSManager
-	refresher  blocklists.Refresher
-	faviconDir string
-	metricsURL string
-	startedAt  time.Time
+	store        *db.Store
+	reloader     CoreDNSManager
+	refresher    blocklists.Refresher
+	deviceNames  *deviceNameResolver
+	faviconDir   string
+	faviconLocks [32]sync.Mutex
+	metricsURL   string
+	startedAt    time.Time
 }
 
 func New(store *db.Store, reloader CoreDNSManager) http.Handler {
 	authManager := auth.NewManager(store)
 	handler := &Handler{
-		store:      store,
-		reloader:   reloader,
-		refresher:  blocklists.Refresher{Store: store},
-		faviconDir: env("FARO_FAVICON_DIR", "/data/favicons"),
-		metricsURL: env("FARO_COREDNS_METRICS_URL", "http://coredns:9153/metrics"),
-		startedAt:  time.Now(),
+		store:       store,
+		reloader:    reloader,
+		refresher:   blocklists.Refresher{Store: store},
+		deviceNames: newDeviceNameResolver(),
+		faviconDir:  env("FARO_FAVICON_DIR", "/data/favicons"),
+		metricsURL:  env("FARO_COREDNS_METRICS_URL", "http://coredns:9153/metrics"),
+		startedAt:   time.Now(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handler.health)

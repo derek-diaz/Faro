@@ -2,18 +2,27 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/derek/faro/internal/db"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/derek/faro/internal/db"
 )
+
+const faviconFailureCacheWindow = "-6 hours"
+
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
 
 func (s *Handler) favicon(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -30,9 +39,21 @@ func (s *Handler) favicon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	localPath, err := s.cachedFaviconPath(r.Context(), domain)
-	if err == nil && localPath != "" {
-		http.ServeFile(w, r, localPath)
+	localPath, cached, err := s.cachedFavicon(r.Context(), domain)
+	if err == nil && cached {
+		serveCachedFavicon(w, r, domain, localPath)
+		return
+	}
+
+	lock := s.faviconLock(domain)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// Multiple rows can request the same icon at once. Recheck after taking the
+	// per-domain shard lock so only one request performs network I/O.
+	localPath, cached, err = s.cachedFavicon(r.Context(), domain)
+	if err == nil && cached {
+		serveCachedFavicon(w, r, domain, localPath)
 		return
 	}
 
@@ -44,16 +65,27 @@ func (s *Handler) favicon(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, localPath)
 }
 
-func (s *Handler) cachedFaviconPath(ctx context.Context, domain string) (string, error) {
+func (s *Handler) cachedFavicon(ctx context.Context, domain string) (string, bool, error) {
 	var localPath string
-	err := s.store.DB.QueryRowContext(ctx, `SELECT local_path FROM domain_favicons WHERE domain = ? AND local_path != ''`, domain).Scan(&localPath)
+	var recentlyChecked int
+	err := s.store.DB.QueryRowContext(ctx, `
+		SELECT local_path, COALESCE(last_checked_at >= datetime('now', ?), 0)
+		FROM domain_favicons
+		WHERE domain = ?
+	`, faviconFailureCacheWindow, domain).Scan(&localPath, &recentlyChecked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
 	if err != nil {
-		return "", err
+		return "", false, err
+	}
+	if localPath == "" {
+		return "", recentlyChecked == 1, nil
 	}
 	if _, err := os.Stat(localPath); err != nil {
-		return "", err
+		return "", false, nil
 	}
-	return localPath, nil
+	return localPath, true, nil
 }
 
 func (s *Handler) fetchFavicon(ctx context.Context, domain string) (string, error) {
@@ -64,7 +96,7 @@ func (s *Handler) fetchFavicon(ctx context.Context, domain string) (string, erro
 		"https://" + domain + "/favicon.ico",
 		"https://www." + domain + "/favicon.ico",
 	}
-	client := http.Client{Timeout: 5 * time.Second}
+	client := s.faviconHTTPClient(ctx)
 	for _, candidate := range candidates {
 		reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, candidate, nil)
@@ -115,11 +147,136 @@ func (s *Handler) fetchFavicon(ctx context.Context, domain string) (string, erro
 	return "", errors.New("favicon not found")
 }
 
+func serveCachedFavicon(w http.ResponseWriter, r *http.Request, domain, localPath string) {
+	if localPath == "" {
+		serveFaviconPlaceholder(w, domain)
+		return
+	}
+	http.ServeFile(w, r, localPath)
+}
+
+func (s *Handler) faviconLock(domain string) *sync.Mutex {
+	var hash uint32 = 2166136261
+	for index := range domain {
+		hash ^= uint32(domain[index])
+		hash *= 16777619
+	}
+	return &s.faviconLocks[hash%uint32(len(s.faviconLocks))]
+}
+
+// faviconHTTPClient keeps Faro's own favicon lookups out of the monitored DNS
+// path. Resolving them through the host resolver would create a query-log row,
+// which renders another favicon and can recursively generate www/search labels.
+func (s *Handler) faviconHTTPClient(ctx context.Context) http.Client {
+	resolver := newUpstreamResolver(s.faviconDNSUpstreams(ctx))
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = faviconDialContext(resolver)
+	return http.Client{Transport: transport, Timeout: 5 * time.Second}
+}
+
+func (s *Handler) faviconDNSUpstreams(ctx context.Context) []string {
+	configured := strings.Split(settingValue(ctx, s.store.DB, "upstream_dns"), ",")
+	faroIP := strings.TrimSpace(settingValue(ctx, s.store.DB, "faro_lan_ip"))
+	upstreams := make([]string, 0, len(configured))
+	for _, raw := range configured {
+		address := strings.TrimSpace(raw)
+		if net.ParseIP(address) == nil || address == faroIP {
+			continue
+		}
+		upstreams = append(upstreams, net.JoinHostPort(address, "53"))
+	}
+	if len(upstreams) == 0 {
+		return []string{"1.1.1.1:53", "9.9.9.9:53"}
+	}
+	return upstreams
+}
+
+func newUpstreamResolver(upstreams []string) *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var lastErr error
+			for _, upstream := range upstreams {
+				connection, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, network, upstream)
+				if err == nil {
+					return connection, nil
+				}
+				lastErr = err
+			}
+			if lastErr == nil {
+				lastErr = errors.New("no DNS upstream is configured for favicon fetching")
+			}
+			return nil, lastErr
+		},
+	}
+}
+
+func faviconDialContext(resolver *net.Resolver) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		if parsed, parseErr := netip.ParseAddr(strings.Trim(host, "[]")); parseErr == nil {
+			if !isPublicFaviconIP(parsed) {
+				return nil, fmt.Errorf("favicon address %s is not public", parsed)
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(parsed.String(), port))
+		}
+
+		// The trailing dot makes the lookup absolute, preventing host/Docker DNS
+		// search suffixes from being appended to public domain names.
+		addresses, err := resolver.LookupNetIP(ctx, "ip", strings.TrimSuffix(host, ".")+".")
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		for _, candidate := range addresses {
+			if !isPublicFaviconIP(candidate) {
+				continue
+			}
+			connection, err := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.String(), port))
+			if err == nil {
+				return connection, nil
+			}
+			lastErr = err
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("favicon domain %s did not resolve to a public address", host)
+		}
+		return nil, lastErr
+	}
+}
+
+func isPublicFaviconIP(address netip.Addr) bool {
+	address = address.Unmap()
+	return address.IsValid() && address.IsGlobalUnicast() && !address.IsPrivate() && !sharedAddressSpace.Contains(address)
+}
+
 var publicDomainPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$`)
 
 func isSafeFaviconDomain(domain string) bool {
 	if !publicDomainPattern.MatchString(domain) {
 		return false
+	}
+	if len(domain) > 253 {
+		return false
+	}
+	repeatedLabels := 1
+	labels := strings.Split(domain, ".")
+	for index, label := range labels {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		if index > 0 && label == labels[index-1] {
+			repeatedLabels++
+			if repeatedLabels >= 3 {
+				return false
+			}
+		} else {
+			repeatedLabels = 1
+		}
 	}
 	if strings.HasSuffix(domain, ".home") || strings.HasSuffix(domain, ".local") || strings.HasSuffix(domain, ".lan") {
 		return false

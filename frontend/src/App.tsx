@@ -2,12 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import {
   api,
   type Blocklist,
-  type DNSQuery,
   type DNSRecord,
   type DashboardSummary,
   type DeviceSummary,
   type DomainEntry,
-  type FaroEvent,
   type NotificationsResponse,
   type AuthStatus,
   type Setting
@@ -99,8 +97,6 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
   const [initialRoute] = useState(readRoute);
   const [page, setPageState] = useState<Page>(initialRoute.page);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
-  const [queries, setQueries] = useState<DNSQuery[]>([]);
-  const [events, setEvents] = useState<FaroEvent[]>([]);
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
   const [records, setRecords] = useState<DNSRecord[]>([]);
   const [blocklists, setBlocklists] = useState<Blocklist[]>([]);
@@ -121,11 +117,9 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
     setLoading(true);
     setError(null);
     try {
-      const [nextSummary, nextQueries, nextEvents, nextDevices, nextRecords, nextBlocklists, nextAllowlist, nextBlocks, nextSettings, nextNotifications] =
+      const [nextSummary, nextDevices, nextRecords, nextBlocklists, nextAllowlist, nextBlocks, nextSettings, nextNotifications] =
         await Promise.all([
         api.dashboard(),
-        api.queries(),
-        api.events(),
         api.devices(),
         api.records(),
         api.blocklists(),
@@ -135,8 +129,6 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
         api.notifications()
       ]);
       setSummary(nextSummary);
-      setQueries(nextQueries);
-      setEvents(nextEvents);
       setDevices(nextDevices);
       setRecords(nextRecords);
       setBlocklists(nextBlocklists);
@@ -196,9 +188,6 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
   async function refreshLiveData() {
     try {
       setSummary(await api.dashboard());
-      if (page === "queries") {
-        setEvents(await api.events());
-      }
       if (page === "devices") {
         setDevices(await api.devices());
       }
@@ -206,13 +195,6 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to refresh live data");
     }
-  }
-
-  async function refreshQueries(search = "") {
-    setQueries(await api.queries(search));
-    setEvents(await api.events(search));
-    setSummary(await api.dashboard());
-    setNotifications(await api.notifications());
   }
 
   async function refreshDevices() {
@@ -285,8 +267,6 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
       case "queries":
         return (
           <QueryLog
-            events={events}
-            refresh={refreshQueries}
             onDomainSelect={openDomain}
             onDeviceSelect={openDevice}
           />

@@ -45,15 +45,44 @@ func (s *Handler) events(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	limit := 120
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 500 {
-			limit = parsed
-		}
+	page := positiveInt(r.URL.Query().Get("page"), 1, 1000000)
+	pageSize := positiveInt(r.URL.Query().Get("page_size"), 50, 200)
+	scope := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("scope")))
+	if !validActivityScope(scope) {
+		scope = "all"
 	}
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
-	events := localEvents(r.Context(), s.store.DB, limit, search)
-	writeJSON(w, http.StatusOK, events)
+	counts := activityCounts(r.Context(), s.store.DB, search)
+	total := counts[scope]
+	totalPages := 0
+	if total > 0 {
+		totalPages = (total + pageSize - 1) / pageSize
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":       pagedActivityEvents(r.Context(), s.store.DB, page, pageSize, search, scope),
+		"page":        page,
+		"page_size":   pageSize,
+		"total":       total,
+		"total_pages": totalPages,
+		"counts":      counts,
+	})
+}
+
+func positiveInt(raw string, fallback, maximum int) int {
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed < 1 || parsed > maximum {
+		return fallback
+	}
+	return parsed
+}
+
+func validActivityScope(scope string) bool {
+	switch scope {
+	case "all", "dns", "cache", "upstream", "blocked", "system":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Handler) notifications(w http.ResponseWriter, r *http.Request) {
@@ -118,9 +147,31 @@ func (s *Handler) recordEvent(ctx context.Context, event eventInput) {
 }
 
 func localEvents(ctx context.Context, database *sql.DB, limit int, search string) []map[string]any {
-	events := persistedEvents(ctx, database, limit, search)
-	events = append(events, queryEvents(ctx, database, limit, search)...)
-	events = append(events, firstSeenDeviceEvents(ctx, database, limit, search)...)
+	return activityEvents(ctx, database, limit, search, "all")
+}
+
+func pagedActivityEvents(ctx context.Context, database *sql.DB, page, pageSize int, search, scope string) []map[string]any {
+	end := page * pageSize
+	events := activityEvents(ctx, database, end, search, scope)
+	start := (page - 1) * pageSize
+	if start >= len(events) {
+		return []map[string]any{}
+	}
+	if end > len(events) {
+		end = len(events)
+	}
+	return events[start:end]
+}
+
+func activityEvents(ctx context.Context, database *sql.DB, limit int, search, scope string) []map[string]any {
+	events := []map[string]any{}
+	if scope == "all" || scope == "system" {
+		events = append(events, persistedEvents(ctx, database, limit, search)...)
+		events = append(events, firstSeenDeviceEvents(ctx, database, limit, search)...)
+	}
+	if scope != "system" {
+		events = append(events, queryEvents(ctx, database, limit, search, scope)...)
+	}
 	sortEvents(events)
 	if len(events) > limit {
 		return events[:limit]
@@ -136,7 +187,7 @@ func persistedEvents(ctx context.Context, database *sql.DB, limit int, search st
 		like := "%" + search + "%"
 		args = append(args, like, like, like, like, like)
 	}
-	query += ` ORDER BY timestamp DESC LIMIT ?`
+	query += ` ORDER BY timestamp DESC, id DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -167,20 +218,32 @@ func persistedEvents(ctx context.Context, database *sql.DB, limit int, search st
 	return items
 }
 
-func queryEvents(ctx context.Context, database *sql.DB, limit int, search string) []map[string]any {
+func queryEvents(ctx context.Context, database *sql.DB, limit int, search, scope string) []map[string]any {
 	query := `
 		SELECT q.id, q.timestamp, q.client_ip, q.domain, q.query_type, q.action, q.source, q.upstream, q.latency_ms,
 		       q.rcode, q.decision_reason, q.decision_metadata, COALESCE(a.name, '')
 		FROM dns_queries q
 		LEFT JOIN device_aliases a ON a.client_ip = q.client_ip
 	`
+	clauses := []string{}
 	args := []any{}
 	if search != "" {
-		query += ` WHERE q.domain LIKE ? OR q.client_ip LIKE ? OR q.query_type LIKE ? OR q.action LIKE ? OR q.source LIKE ? OR a.name LIKE ?`
+		clauses = append(clauses, `(q.domain LIKE ? OR q.client_ip LIKE ? OR q.query_type LIKE ? OR q.action LIKE ? OR q.source LIKE ? OR a.name LIKE ?)`)
 		like := "%" + search + "%"
 		args = append(args, like, like, like, like, like, like)
 	}
-	query += ` ORDER BY q.timestamp DESC LIMIT ?`
+	switch scope {
+	case "cache":
+		clauses = append(clauses, `q.source = 'cache'`)
+	case "upstream":
+		clauses = append(clauses, `q.source = 'upstream'`)
+	case "blocked":
+		clauses = append(clauses, `q.action = 'blocked'`)
+	}
+	if len(clauses) > 0 {
+		query += ` WHERE ` + strings.Join(clauses, ` AND `)
+	}
+	query += ` ORDER BY q.timestamp DESC, q.id DESC LIMIT ?`
 	args = append(args, limit)
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -249,13 +312,20 @@ func firstSeenDeviceEvents(ctx context.Context, database *sql.DB, limit int, sea
 		LEFT JOIN device_aliases a ON a.client_ip = q.client_ip
 		GROUP BY q.client_ip
 	`
-	rows, err := database.QueryContext(ctx, query)
+	args := []any{}
+	if search != "" {
+		query += ` HAVING q.client_ip LIKE ? OR COALESCE(a.name, '') LIKE ? OR COALESCE(a.location, '') LIKE ?`
+		like := "%" + search + "%"
+		args = append(args, like, like, like)
+	}
+	query += ` ORDER BY first_seen DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
 		return []map[string]any{}
 	}
 	defer rows.Close()
 	items := []map[string]any{}
-	needle := strings.ToLower(search)
 	for rows.Next() {
 		var clientIP, timestamp, name string
 		var location sql.NullString
@@ -271,9 +341,6 @@ func firstSeenDeviceEvents(ctx context.Context, database *sql.DB, limit int, sea
 		if location.Valid && location.String != "" {
 			description = deviceName + " joined from " + location.String + "."
 		}
-		if needle != "" && !strings.Contains(strings.ToLower(clientIP+" "+deviceName+" "+description), needle) {
-			continue
-		}
 		items = append(items, map[string]any{
 			"id":          "device-first-seen-" + clientIP,
 			"timestamp":   timestamp,
@@ -286,11 +353,65 @@ func firstSeenDeviceEvents(ctx context.Context, database *sql.DB, limit int, sea
 			"metadata":    map[string]any{"device_name": deviceName, "location": nullableString(location)},
 			"source":      "devices",
 		})
-		if len(items) >= limit {
-			break
-		}
 	}
 	return items
+}
+
+func activityCounts(ctx context.Context, database *sql.DB, search string) map[string]int {
+	query := `
+		SELECT COUNT(*),
+		       COALESCE(SUM(CASE WHEN q.source = 'cache' THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN q.source = 'upstream' THEN 1 ELSE 0 END), 0),
+		       COALESCE(SUM(CASE WHEN q.action = 'blocked' THEN 1 ELSE 0 END), 0)
+		FROM dns_queries q
+		LEFT JOIN device_aliases a ON a.client_ip = q.client_ip
+	`
+	args := []any{}
+	if search != "" {
+		query += ` WHERE q.domain LIKE ? OR q.client_ip LIKE ? OR q.query_type LIKE ? OR q.action LIKE ? OR q.source LIKE ? OR a.name LIKE ?`
+		like := "%" + search + "%"
+		args = append(args, like, like, like, like, like, like)
+	}
+	var dns, cache, upstream, blocked int
+	_ = database.QueryRowContext(ctx, query, args...).Scan(&dns, &cache, &upstream, &blocked)
+	system := persistedEventCount(ctx, database, search) + firstSeenDeviceEventCount(ctx, database, search)
+	return map[string]int{
+		"all":      dns + system,
+		"dns":      dns,
+		"cache":    cache,
+		"upstream": upstream,
+		"blocked":  blocked,
+		"system":   system,
+	}
+}
+
+func persistedEventCount(ctx context.Context, database *sql.DB, search string) int {
+	query := `SELECT COUNT(*) FROM events`
+	args := []any{}
+	if search != "" {
+		query += ` WHERE title LIKE ? OR description LIKE ? OR type LIKE ? OR domain LIKE ? OR client_ip LIKE ?`
+		like := "%" + search + "%"
+		args = append(args, like, like, like, like, like)
+	}
+	return scalarInt(ctx, database, query, args...)
+}
+
+func firstSeenDeviceEventCount(ctx context.Context, database *sql.DB, search string) int {
+	query := `
+		SELECT COUNT(*) FROM (
+			SELECT q.client_ip
+			FROM dns_queries q
+			LEFT JOIN device_aliases a ON a.client_ip = q.client_ip
+			GROUP BY q.client_ip
+	`
+	args := []any{}
+	if search != "" {
+		query += ` HAVING q.client_ip LIKE ? OR COALESCE(a.name, '') LIKE ? OR COALESCE(a.location, '') LIKE ?`
+		like := "%" + search + "%"
+		args = append(args, like, like, like)
+	}
+	query += `)`
+	return scalarInt(ctx, database, query, args...)
 }
 
 func sortEvents(events []map[string]any) {

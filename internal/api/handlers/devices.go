@@ -16,7 +16,7 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	start := todayStart()
+	start := todayStart(r)
 	rows, err := s.store.DB.QueryContext(r.Context(), `
 		WITH clients AS (
 			SELECT client_ip FROM dns_queries
@@ -78,13 +78,27 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 
 	items := []map[string]any{}
+	clientIPs := make([]string, 0, len(baseDevices))
 	for _, device := range baseDevices {
+		clientIPs = append(clientIPs, device.clientIP)
+	}
+	discoveredNames := s.discoverDeviceNames(r.Context(), clientIPs)
+	for _, device := range baseDevices {
+		identity := discoveredNames[device.clientIP]
+		if strings.TrimSpace(device.name) != "" {
+			identity.DisplayName = device.name
+			identity.NameSource = "manual"
+		}
+		identity.DeviceType, identity.TypeConfidence = inferDeviceType(r.Context(), s.store.DB, device.clientIP, identity.DisplayName)
 		items = append(items, map[string]any{
 			"client_ip":             device.clientIP,
 			"name":                  device.name,
+			"display_name":          identity.DisplayName,
+			"name_source":           identity.NameSource,
 			"location":              device.location,
 			"notes":                 device.notes,
-			"device_type":           inferDeviceType(r.Context(), s.store.DB, device.clientIP, device.name),
+			"device_type":           identity.DeviceType,
+			"type_confidence":       identity.TypeConfidence,
 			"total_queries_today":   device.total,
 			"blocked_queries_today": device.blocked,
 			"block_percentage":      percentage(device.blocked, device.total),
@@ -131,7 +145,7 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, errors.New("invalid client ip"))
 		return
 	}
-	start := todayStart()
+	start := todayStart(r)
 	var name string
 	var location, notes sql.NullString
 	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT name, location, notes FROM device_aliases WHERE client_ip = ?`, clientIP).Scan(&name, &location, &notes)
@@ -139,12 +153,21 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 	blocked := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? AND action = 'blocked'`, clientIP, start)
 	var firstSeen, lastSeen sql.NullString
 	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT MIN(timestamp), MAX(timestamp) FROM dns_queries WHERE client_ip = ?`, clientIP).Scan(&firstSeen, &lastSeen)
+	identity := s.discoverDeviceNames(r.Context(), []string{clientIP})[clientIP]
+	if strings.TrimSpace(name) != "" {
+		identity.DisplayName = name
+		identity.NameSource = "manual"
+	}
+	identity.DeviceType, identity.TypeConfidence = inferDeviceType(r.Context(), s.store.DB, clientIP, identity.DisplayName)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"client_ip":             clientIP,
 		"name":                  name,
+		"display_name":          identity.DisplayName,
+		"name_source":           identity.NameSource,
 		"location":              nullableString(location),
 		"notes":                 nullableString(notes),
-		"device_type":           inferDeviceType(r.Context(), s.store.DB, clientIP, name),
+		"device_type":           identity.DeviceType,
+		"type_confidence":       identity.TypeConfidence,
 		"total_queries_today":   total,
 		"blocked_queries_today": blocked,
 		"block_percentage":      percentage(blocked, total),
@@ -386,29 +409,6 @@ func (s *Handler) deviceAlias(w http.ResponseWriter, r *http.Request, clientIP s
 		Source:      "devices",
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func inferDeviceType(ctx context.Context, database *sql.DB, clientIP, name string) string {
-	probe := strings.ToLower(name + " " + clientIP + " " + strings.Join(topLabels(ctx, database, `SELECT domain, COUNT(*) FROM dns_queries WHERE client_ip = ? GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 12`, clientIP), " "))
-	switch {
-	case strings.Contains(probe, "tesla"):
-		return "Tesla"
-	case strings.Contains(probe, "synology") || strings.Contains(probe, "nas") || strings.Contains(probe, "plex"):
-		return "NAS"
-	case strings.Contains(probe, "android") || strings.Contains(probe, "googleapis"):
-		return "Android Phone"
-	case strings.Contains(probe, "apple") || strings.Contains(probe, "icloud") || strings.Contains(probe, "itunes"):
-		if strings.Contains(probe, "tv") {
-			return "Apple TV"
-		}
-		return "Mac"
-	case strings.Contains(probe, "windows") || strings.Contains(probe, "microsoft"):
-		return "Windows PC"
-	case strings.Contains(probe, "ubuntu") || strings.Contains(probe, "debian") || strings.Contains(probe, "docker") || clientIP == "127.0.0.1":
-		return "Linux Server"
-	default:
-		return "Unknown"
-	}
 }
 
 func displayDeviceName(ctx context.Context, database *sql.DB, clientIP string) string {

@@ -68,9 +68,12 @@ export type DNSDecision = {
 export type DeviceSummary = {
   client_ip: string;
   name: string;
+  display_name?: string;
+  name_source?: "manual" | "local_dns" | "reverse_dns" | string;
   location?: string | null;
   notes?: string | null;
   device_type: string;
+  type_confidence?: "high" | "medium" | "unknown" | string;
   total_queries_today: number;
   blocked_queries_today: number;
   block_percentage: number;
@@ -145,6 +148,24 @@ export type FaroEvent = {
   domain?: string | null;
   metadata: Record<string, unknown>;
   source: string;
+};
+
+export type ActivityCounts = {
+  all: number;
+  dns: number;
+  cache: number;
+  upstream: number;
+  blocked: number;
+  system: number;
+};
+
+export type ActivityPage = {
+  items: FaroEvent[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+  counts: ActivityCounts;
 };
 
 export type HealthCard = {
@@ -293,10 +314,11 @@ export type AuthStatus = {
 };
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+const BROWSER_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: { "Content-Type": "application/json", "X-Faro-Timezone": BROWSER_TIMEZONE, ...(init?.headers ?? {}) },
     ...init
   });
   if (response.status === 401) {
@@ -318,7 +340,8 @@ export const api = {
     request<{ ok: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) }),
   dashboard: () => request<DashboardSummary>("/api/dashboard"),
   queries: (search = "") => request<DNSQuery[]>(`/api/queries?search=${encodeURIComponent(search)}`),
-  events: (search = "") => request<FaroEvent[]>(`/api/events?search=${encodeURIComponent(search)}`),
+  events: (search = "", scope = "all", page = 1, pageSize = 50) =>
+    request<ActivityPage>(`/api/events?search=${encodeURIComponent(search)}&scope=${encodeURIComponent(scope)}&page=${page}&page_size=${pageSize}`),
   notifications: () => request<NotificationsResponse>("/api/notifications"),
   probeUpstreams: (addresses: string[]) => request<UpstreamProbeResponse>("/api/upstreams/probe", { method: "POST", body: JSON.stringify({ addresses }) }),
   devices: () => request<DeviceSummary[]>("/api/devices"),

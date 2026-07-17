@@ -60,6 +60,16 @@ export const upstreamProviders: ResolverProvider[] = [
       { id: "adguard-unfiltered", name: "Non-filtering", description: "AdGuard infrastructure without content filtering.", addresses: ["94.140.14.140", "94.140.14.141"], mode: "none", badges: ["Unfiltered"] },
       { id: "adguard-family", name: "Family protection", description: "Blocks ads, trackers, adult content, and enables Safe Search where possible.", addresses: ["94.140.14.15", "94.140.15.16"], mode: "family", badges: ["Ads", "Family", "Safe Search"] }
     ]
+  },
+  {
+    id: "opendns",
+    name: "OpenDNS",
+    domain: "opendns.com",
+    description: "Cisco-backed public DNS with security features and a preconfigured family-filtering option.",
+    profiles: [
+      { id: "opendns-standard", name: "Standard", description: "Public DNS with basic security and optional account-based filtering.", addresses: ["208.67.222.222", "208.67.220.220"], mode: "security", badges: ["Security", "Customizable"], recommended: true },
+      { id: "opendns-familyshield", name: "FamilyShield", description: "Preconfigured to block adult content without requiring an OpenDNS account.", addresses: ["208.67.222.123", "208.67.220.123"], mode: "family", badges: ["Security", "Family"] }
+    ]
   }
 ];
 

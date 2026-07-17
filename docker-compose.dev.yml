@@ -1,56 +1,69 @@
-name: faro
+name: faro-dev
 
 services:
   api:
-    image: ${FARO_IMAGE_NAMESPACE:-tabierto}/faro-api:${FARO_VERSION:-latest}
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend.dev
+    init: true
     environment:
       FARO_DB_PATH: /data/faro.db
       FARO_COREDNS_CONFIG_DIR: /coredns
       FARO_COREDNS_LOG_PATH: /var/log/coredns/query.log
       FARO_COREDNS_METRICS_URL: http://dns:9153/metrics
     volumes:
+      - .:/app
       - faro-data:/data
       - coredns-config:/coredns
       - coredns-logs:/var/log/coredns
+      - go-build-cache:/root/.cache/go-build
     expose:
       - "8080"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
-      interval: 10s
+      interval: 5s
       timeout: 3s
-      retries: 5
-      start_period: 10s
+      retries: 10
+      start_period: 30s
     logging:
       driver: json-file
       options:
         max-size: "${FARO_DOCKER_LOG_MAX_SIZE:-10m}"
         max-file: "${FARO_DOCKER_LOG_BACKUPS:-3}"
-    restart: unless-stopped
 
   ui:
-    image: ${FARO_IMAGE_NAMESPACE:-tabierto}/faro-ui:${FARO_VERSION:-latest}
-    pull_policy: always
+    image: node:24-alpine
+    init: true
+    working_dir: /app
+    command: ["sh", "-c", "npm ci && npm run dev"]
+    environment:
+      VITE_API_PROXY_TARGET: http://api:8080
+      VITE_USE_POLLING: "true"
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+      - frontend-npm-cache:/root/.npm
     depends_on:
       api:
         condition: service_healthy
     ports:
-      - "${FARO_BIND_ADDRESS:-0.0.0.0}:${FARO_UI_PORT:-1787}:80"
+      - "${FARO_BIND_ADDRESS:-0.0.0.0}:${FARO_UI_PORT:-1787}:5173"
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
-      interval: 10s
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5173/"]
+      interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+      start_period: 60s
     logging:
       driver: json-file
       options:
         max-size: "${FARO_DOCKER_LOG_MAX_SIZE:-10m}"
         max-file: "${FARO_DOCKER_LOG_BACKUPS:-3}"
-    restart: unless-stopped
 
   dns:
-    image: ${FARO_IMAGE_NAMESPACE:-tabierto}/faro-dns:${FARO_VERSION:-latest}
-    pull_policy: always
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.coredns
     environment:
       FARO_QUERY_LOG_MAX_BYTES: ${FARO_QUERY_LOG_MAX_BYTES:-10485760}
       FARO_QUERY_LOG_BACKUPS: ${FARO_QUERY_LOG_BACKUPS:-2}
@@ -61,11 +74,11 @@ services:
       - coredns-config:/etc/coredns
       - coredns-logs:/var/log/coredns
     ports:
-      - "${FARO_BIND_ADDRESS:-0.0.0.0}:${FARO_DNS_PORT:-53}:53/udp"
-      - "${FARO_BIND_ADDRESS:-0.0.0.0}:${FARO_DNS_PORT:-53}:53/tcp"
+      - "${FARO_BIND_ADDRESS:-0.0.0.0}:${FARO_DEV_DNS_PORT:-5354}:53/udp"
+      - "${FARO_BIND_ADDRESS:-0.0.0.0}:${FARO_DEV_DNS_PORT:-5354}:53/tcp"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9153/metrics"]
-      interval: 15s
+      interval: 10s
       timeout: 3s
       retries: 5
       start_period: 10s
@@ -74,9 +87,11 @@ services:
       options:
         max-size: "${FARO_DOCKER_LOG_MAX_SIZE:-10m}"
         max-file: "${FARO_DOCKER_LOG_BACKUPS:-3}"
-    restart: unless-stopped
 
 volumes:
   faro-data:
   coredns-config:
   coredns-logs:
+  go-build-cache:
+  frontend-node-modules:
+  frontend-npm-cache:

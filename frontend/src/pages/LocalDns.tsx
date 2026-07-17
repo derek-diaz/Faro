@@ -99,7 +99,6 @@ export function LocalDns({ records, refresh }: LocalDnsProps) {
             <select value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value as DNSRecord["type"] })}>
               <option>A</option>
               <option>AAAA</option>
-              <option>CNAME</option>
             </select>
           </label>
           <label>

@@ -11,6 +11,11 @@ Faro reads optional deployment settings from a `.env` file beside `docker-compos
 | `FARO_BIND_ADDRESS` | `0.0.0.0` | Host address used for published ports |
 | `FARO_UI_PORT` | `1787` | Faro web interface port |
 | `FARO_DNS_PORT` | `53` | DNS port published over TCP and UDP |
+| `FARO_DEV_DNS_PORT` | `5354` | Host DNS port used by `docker-compose.dev.yml` |
+| `FARO_QUERY_LOG_MAX_BYTES` | `10485760` | Maximum size of each raw CoreDNS query-log file |
+| `FARO_QUERY_LOG_BACKUPS` | `2` | Number of rotated raw query-log files retained |
+| `FARO_DOCKER_LOG_MAX_SIZE` | `10m` | Maximum size of each Docker stdout/stderr log file |
+| `FARO_DOCKER_LOG_BACKUPS` | `3` | Number of rotated Docker log files retained per container |
 | `FARO_IMAGE_NAMESPACE` | `tabierto` | Docker Hub image namespace |
 | `FARO_VERSION` | `latest` | Image tag used by all Faro services |
 
@@ -20,6 +25,11 @@ Example:
 FARO_BIND_ADDRESS=0.0.0.0
 FARO_UI_PORT=1787
 FARO_DNS_PORT=53
+FARO_DEV_DNS_PORT=5354
+FARO_QUERY_LOG_MAX_BYTES=10485760
+FARO_QUERY_LOG_BACKUPS=2
+FARO_DOCKER_LOG_MAX_SIZE=10m
+FARO_DOCKER_LOG_BACKUPS=3
 FARO_VERSION=latest
 ```
 
@@ -79,11 +89,25 @@ Faro stores state in named Docker volumes:
 
 - `faro-data`: SQLite database and cached domain icons
 - `coredns-config`: generated CoreDNS configuration
-- `coredns-logs`: DNS query logs consumed by Faro
+- `coredns-logs`: bounded DNS query-log buffer consumed by Faro; retained history is stored in `faro-data`
 
-Back up these volumes as part of the Docker host's normal backup process.
+For routine Faro backups, open **Settings → Health & data → Encrypted backup & restore**. Faro downloads a portable `.faro-backup` file containing the SQLite database, including DNS settings, local records, rules, blocklists, account data, and retained history. The file is protected with a passphrase-derived key using Argon2id and AES-256-GCM.
+
+Keep the backup passphrase separately: Faro cannot recover it. Restoring replaces the live database atomically, reloads CoreDNS, and signs out every browser session. Active login sessions, cached favicon files, and the bounded raw query-log buffer are deliberately excluded; Faro recreates those operational files as needed.
+
+Volume-level backups are still useful for full host disaster recovery, especially if you also want cached favicons and generated runtime files. Back up the three volumes above as part of the Docker host's normal backup process.
 
 ## Troubleshooting
+
+### Docker reports `no space left on device`
+
+Check Docker's virtual-disk usage rather than only the Faro volumes:
+
+```sh
+docker system df -v
+```
+
+Faro bounds both its raw query-log volume and the stdout/stderr logs captured by Docker. It also automatically reclaims legacy oversized query-log files. If Docker's overall disk is full, Faro keeps DNS running and temporarily pauses raw query-log persistence until space becomes available. Log-driver limits apply when containers are created, so recreate older Faro containers after upgrading. Reclaim unused Docker build cache with `docker builder prune` or increase Docker Desktop's virtual-disk limit. Review the prune prompt carefully because build cache is shared by every local project.
 
 ### Port 53 is already in use
 
@@ -113,7 +137,14 @@ sudo systemctl disable --now dns.service
 docker compose up -d --force-recreate
 ```
 
-For local testing only, `FARO_DNS_PORT=1053` avoids the conflict. Router-wide DNS normally requires port `53`.
+On macOS, Internet Sharing and DNS-filtering apps may own port `53`. Identify a privileged listener with:
+
+```sh
+sudo lsof -nP -iTCP:53 -sTCP:LISTEN
+sudo lsof -nP -iUDP:53
+```
+
+Development Compose publishes DNS on port `5354` by default, so test it with `dig @127.0.0.1 -p 5354 example.com`. Override `FARO_DEV_DNS_PORT` if needed. Production and router-wide DNS still require the standard port `53`.
 
 ### The DNS container is healthy but has no published port
 
@@ -161,6 +192,18 @@ Clone the repository:
 git clone https://github.com/derek-diaz/Faro.git
 cd Faro
 ```
+
+To run the full development stack in containers with hot reload:
+
+```sh
+docker compose -f docker-compose.dev.yml up --build
+```
+
+Open `http://localhost:1787`. Vite applies frontend edits with hot module replacement, while Air rebuilds and restarts the Go API after Go source changes. The Compose file uses polling for reliable file watching through Docker Desktop bind mounts. Stop the stack with `Ctrl-C`, or run `make dev-down` from another terminal.
+
+Development DNS is published on host port `5354` by default to avoid privileged/system DNS listeners. Test it with `dig @127.0.0.1 -p 5354 example.com`, or set `FARO_DEV_DNS_PORT` to another available port. You can also use `make dev` as a shortcut for the command above.
+
+To run the API and frontend directly on the host instead, use the following commands.
 
 Run the API:
 

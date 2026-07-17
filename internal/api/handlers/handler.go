@@ -8,8 +8,10 @@ import (
 	"time"
 
 	"github.com/derek/faro/internal/auth"
+	farobackup "github.com/derek/faro/internal/backup"
 	"github.com/derek/faro/internal/blocklists"
 	"github.com/derek/faro/internal/db"
+	"github.com/derek/faro/internal/upstreamhealth"
 )
 
 type CoreDNSManager interface {
@@ -24,10 +26,12 @@ type Handler struct {
 	faviconDir   string
 	faviconLocks [32]sync.Mutex
 	metricsURL   string
+	upstreams    *upstreamhealth.Monitor
+	backups      *farobackup.Service
 	startedAt    time.Time
 }
 
-func New(store *db.Store, reloader CoreDNSManager) http.Handler {
+func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Monitor) http.Handler {
 	authManager := auth.NewManager(store)
 	handler := &Handler{
 		store:       store,
@@ -36,6 +40,8 @@ func New(store *db.Store, reloader CoreDNSManager) http.Handler {
 		deviceNames: newDeviceNameResolver(),
 		faviconDir:  env("FARO_FAVICON_DIR", "/data/favicons"),
 		metricsURL:  env("FARO_COREDNS_METRICS_URL", "http://coredns:9153/metrics"),
+		upstreams:   upstreams,
+		backups:     farobackup.NewService(store),
 		startedAt:   time.Now(),
 	}
 	mux := http.NewServeMux()
@@ -57,6 +63,7 @@ func New(store *db.Store, reloader CoreDNSManager) http.Handler {
 	mux.HandleFunc("/api/queries", handler.queries)
 	mux.HandleFunc("/api/events", handler.events)
 	mux.HandleFunc("/api/notifications", handler.notifications)
+	mux.HandleFunc("/api/notifications/", handler.notificationState)
 	mux.HandleFunc("/api/upstreams/probe", handler.upstreamProbes)
 	mux.HandleFunc("/api/devices", handler.devices)
 	mux.HandleFunc("/api/devices/", handler.device)
@@ -66,6 +73,8 @@ func New(store *db.Store, reloader CoreDNSManager) http.Handler {
 	mux.HandleFunc("/api/favicons/", handler.favicon)
 	mux.HandleFunc("/api/settings", handler.settings)
 	mux.HandleFunc("/api/maintenance", handler.maintenance)
+	mux.HandleFunc("/api/backups", handler.backupExport)
+	mux.HandleFunc("/api/backups/restore", handler.backupRestore)
 	mux.HandleFunc("/api/reload", handler.reload)
 	return cors(authManager.Require(mux))
 }

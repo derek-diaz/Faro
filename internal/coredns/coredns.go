@@ -168,7 +168,6 @@ func (m *Manager) localHosts(ctx context.Context) (string, error) {
 		if typ == "A" || typ == "AAAA" {
 			fmt.Fprintf(&b, "%s %s\n", value, host)
 		}
-		// TODO: Render CNAME records through a CoreDNS plugin that supports aliases safely.
 	}
 	return b.String(), rows.Err()
 }

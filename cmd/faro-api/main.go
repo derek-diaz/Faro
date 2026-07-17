@@ -15,6 +15,7 @@ import (
 	"github.com/derek/faro/internal/db"
 	"github.com/derek/faro/internal/querylog"
 	"github.com/derek/faro/internal/retention"
+	"github.com/derek/faro/internal/upstreamhealth"
 )
 
 func main() {
@@ -45,10 +46,12 @@ func main() {
 	go tailer.Run(ctx)
 	retentionManager := retention.NewManager(store)
 	go retentionManager.Run(ctx)
+	upstreamMonitor := upstreamhealth.NewMonitor(store, upstreamhealth.DefaultInterval, nil)
+	go upstreamMonitor.Run(ctx)
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           api.NewServer(store, reloader),
+		Handler:           api.NewServer(store, reloader, upstreamMonitor),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

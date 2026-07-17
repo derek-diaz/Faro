@@ -4,6 +4,7 @@ const providerAssets: Record<string, string> = {
   adguard: "/providers/adguard.ico",
   cloudflare: "/providers/cloudflare.ico",
   google: "/providers/google.ico",
+  opendns: "/providers/opendns.svg",
   quad9: "/providers/quad9.svg"
 };
 

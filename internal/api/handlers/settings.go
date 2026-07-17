@@ -105,6 +105,9 @@ func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
 				Metadata:    map[string]any{"from": oldUpstream, "to": nextUpstream},
 				Source:      "settings",
 			})
+			if s.upstreams != nil {
+				s.upstreams.Trigger()
+			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	default:

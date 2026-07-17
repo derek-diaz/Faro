@@ -157,6 +157,16 @@ func (s *Store) migrate(ctx context.Context) error {
 			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at ON auth_sessions(expires_at);`,
+		`CREATE TABLE IF NOT EXISTS notification_states (
+			user_id INTEGER NOT NULL,
+			event_key TEXT NOT NULL,
+			read_at TEXT,
+			dismissed_at TEXT,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(user_id, event_key),
+			FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_notification_states_updated_at ON notification_states(updated_at);`,
 	}
 	for _, stmt := range schema {
 		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
@@ -193,6 +203,9 @@ func (s *Store) seed(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.removeLegacyDemoRecords(ctx); err != nil {
+		return err
+	}
 	if err := s.removeLegacyDemoQueries(ctx); err != nil {
 		return err
 	}
@@ -200,29 +213,38 @@ func (s *Store) seed(ctx context.Context) error {
 		return err
 	}
 
-	var count int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM dns_records`).Scan(&count); err != nil {
-		return err
-	}
-	if count == 0 {
-		records := []struct {
-			host, typ, value, description string
-		}{
-			{"router.home", "A", "192.168.7.1", "Home gateway"},
-			{"plex.home", "A", "192.168.7.50", "Media server"},
-			{"nas.home", "A", "192.168.7.20", "Storage"},
-		}
-		for _, record := range records {
-			if _, err := s.DB.ExecContext(ctx, `INSERT INTO dns_records(hostname, type, value, description) VALUES(?, ?, ?, ?)`, record.host, record.typ, record.value, record.description); err != nil {
-				return err
-			}
-		}
-	}
-
 	if os.Getenv("FARO_SEED_DEMO_QUERIES") == "true" {
 		return s.seedDemoQueries(ctx)
 	}
 	return nil
+}
+
+func (s *Store) removeLegacyDemoRecords(ctx context.Context) error {
+	var marker string
+	err := s.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'legacy_demo_records_removed'`).Scan(&marker)
+	if err == nil && marker == "true" {
+		return nil
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM dns_records
+		WHERE (hostname = 'router.home' AND type = 'A' AND value = '192.168.7.1' AND description = 'Home gateway')
+		   OR (hostname = 'plex.home' AND type = 'A' AND value = '192.168.7.50' AND description = 'Media server')
+		   OR (hostname = 'nas.home' AND type = 'A' AND value = '192.168.7.20' AND description = 'Storage')
+	`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value, updated_at) VALUES('legacy_demo_records_removed', 'true', CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) removeLegacyDemoRules(ctx context.Context) error {
@@ -313,7 +335,7 @@ func NormalizeRecord(hostname, typ, value string) (string, string, string, error
 		recordType = "A"
 	}
 	switch recordType {
-	case "A", "AAAA", "CNAME":
+	case "A", "AAAA":
 	default:
 		return "", "", "", fmt.Errorf("unsupported record type %q", recordType)
 	}
@@ -321,15 +343,8 @@ func NormalizeRecord(hostname, typ, value string) (string, string, string, error
 	if recordValue == "" {
 		return "", "", "", errors.New("record value is required")
 	}
-	if recordType == "A" || recordType == "AAAA" {
-		if net.ParseIP(recordValue) == nil {
-			return "", "", "", errors.New("A and AAAA records require an IP address")
-		}
-	}
-	if recordType == "CNAME" {
-		if _, err := NormalizeDomain(recordValue); err != nil {
-			return "", "", "", errors.New("CNAME records require a valid target hostname")
-		}
+	if net.ParseIP(recordValue) == nil {
+		return "", "", "", errors.New("A and AAAA records require an IP address")
 	}
 	return host, recordType, recordValue, nil
 }

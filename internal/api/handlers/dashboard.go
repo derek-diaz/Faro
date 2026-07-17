@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/derek/faro/internal/upstreamhealth"
 )
 
 func (s *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
@@ -30,6 +32,10 @@ func (s *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 	cacheLatency := scalarFloat(r.Context(), s.store.DB, `SELECT COALESCE(AVG(latency_ms), 0) FROM dns_queries WHERE timestamp >= ? AND source = 'cache'`, start)
 	upstreamLatency := scalarFloat(r.Context(), s.store.DB, `SELECT COALESCE(AVG(latency_ms), 0) FROM dns_queries WHERE timestamp >= ? AND source = 'upstream'`, start)
 	liveCache := s.coreDNSCacheMetrics(r.Context())
+	upstreamSnapshot := upstreamhealth.Snapshot{Status: "unknown", Summary: "Upstream health has not been checked yet.", Items: []upstreamhealth.Probe{}}
+	if s.upstreams != nil {
+		upstreamSnapshot = s.upstreams.Snapshot()
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"total_queries_today":   total,
@@ -50,17 +56,19 @@ func (s *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 			"average_cache_latency_ms":    cacheLatency,
 			"average_upstream_latency_ms": upstreamLatency,
 		},
-		"network_summary":          networkSummary(r.Context(), s.store.DB, start, blocked, topClients, topBlocked),
-		"health_cards":             healthCards(r.Context(), s.store.DB, total, blocked, enabledBlocklists, blockEntries, deviceCount, reloadFailures),
-		"stories":                  dashboardStories(r.Context(), s.store.DB, start, blocked, topClients, topBlocked, reloadFailures),
+		"network_summary":          networkSummary(r.Context(), s.store.DB, start, blocked, topClients, topBlocked, upstreamSnapshot, liveCache.available),
+		"health_cards":             healthCards(r.Context(), s.store.DB, total, blocked, enabledBlocklists, blockEntries, deviceCount, reloadFailures, upstreamSnapshot, liveCache.available),
+		"stories":                  dashboardStories(r.Context(), s.store.DB, start, blocked, topClients, topBlocked, reloadFailures, upstreamSnapshot, liveCache.available),
 		"whats_new":                whatsNew(r.Context(), s.store.DB, start),
 		"sparklines":               dashboardSparklines(r.Context(), s.store.DB),
 		"top_queried_domains":      grouped(r.Context(), s.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start),
 		"top_blocked_domains":      topBlocked,
 		"top_clients":              topClients,
 		"recent_activity":          recentQueries(r.Context(), s.store.DB),
-		"upstream_health":          "Not checked yet",
-		"upstream_health_status":   "placeholder",
+		"upstream_health":          upstreamSnapshot.Summary,
+		"upstream_health_status":   upstreamSnapshot.Status,
+		"upstream_checked_at":      upstreamSnapshot.CheckedAt,
+		"upstream_probes":          upstreamSnapshot.Items,
 		"favicon_fetching_enabled": settingValue(r.Context(), s.store.DB, "favicon_fetching_enabled"),
 	})
 }
@@ -119,10 +127,22 @@ func (s *Handler) coreDNSCacheMetrics(ctx context.Context) cacheMetrics {
 	return result
 }
 
-func networkSummary(ctx context.Context, database *sql.DB, start string, blocked int, topClients, topBlocked []map[string]any) map[string]any {
+func networkSummary(ctx context.Context, database *sql.DB, start string, blocked int, topClients, topBlocked []map[string]any, upstreams upstreamhealth.Snapshot, dnsMetricsAvailable bool) map[string]any {
 	headline := "Everything looks normal."
 	messages := []string{}
-	if blocked > 0 {
+	if !dnsMetricsAvailable {
+		headline = "The DNS engine health check is unavailable."
+		messages = append(messages, "Faro could not reach the CoreDNS metrics endpoint.")
+	} else if upstreams.Status == "critical" {
+		headline = "All configured upstream resolvers are unavailable."
+		messages = append(messages, upstreams.Summary)
+	} else if upstreams.Status == "degraded" {
+		headline = "Upstream DNS is degraded."
+		messages = append(messages, upstreams.Summary)
+	} else if upstreams.Status == "unknown" {
+		headline = "Checking upstream DNS health."
+		messages = append(messages, upstreams.Summary)
+	} else if blocked > 0 {
 		headline = fmt.Sprintf("Faro blocked %d requests today.", blocked)
 		messages = append(messages, headline)
 	} else {
@@ -156,9 +176,15 @@ func networkSummary(ctx context.Context, database *sql.DB, start string, blocked
 	return map[string]any{"headline": headline, "messages": messages}
 }
 
-func dashboardStories(ctx context.Context, database *sql.DB, start string, blocked int, topClients, topBlocked []map[string]any, reloadFailures int) []map[string]any {
+func dashboardStories(ctx context.Context, database *sql.DB, start string, blocked int, topClients, topBlocked []map[string]any, reloadFailures int, upstreams upstreamhealth.Snapshot, dnsMetricsAvailable bool) []map[string]any {
 	stories := []map[string]any{}
-	if reloadFailures == 0 {
+	if !dnsMetricsAvailable {
+		stories = append(stories, story("DNS engine health is unavailable.", "Faro could not reach CoreDNS metrics.", "critical"))
+	} else if upstreams.Status == "critical" {
+		stories = append(stories, story("Upstream DNS is unavailable.", upstreams.Summary, "critical"))
+	} else if upstreams.Status == "degraded" {
+		stories = append(stories, story("Upstream DNS is degraded.", upstreams.Summary, "warning"))
+	} else if reloadFailures == 0 {
 		stories = append(stories, story("Everything looks healthy today.", "No DNS reload failures detected.", "success"))
 	} else {
 		stories = append(stories, story("DNS needs attention.", fmt.Sprintf("%d reload failures detected today.", reloadFailures), "critical"))
@@ -191,24 +217,51 @@ func firstLabelSentence(prefix string, items []map[string]any) string {
 	return prefix + ": " + label + "."
 }
 
-func healthCards(ctx context.Context, database *sql.DB, total, blocked, enabledBlocklists, blockEntries, deviceCount, reloadFailures int) []map[string]any {
-	upstreams := strings.Split(settingValue(ctx, database, "upstream_dns"), ",")
-	upstreamCount := 0
-	for _, upstream := range upstreams {
-		if strings.TrimSpace(upstream) != "" {
-			upstreamCount++
-		}
-	}
+func healthCards(ctx context.Context, database *sql.DB, total, blocked, enabledBlocklists, blockEntries, deviceCount, reloadFailures int, upstreams upstreamhealth.Snapshot, dnsMetricsAvailable bool) []map[string]any {
 	cacheAnswers := scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'cache'`)
 	forwardedAnswers := scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'upstream'`)
 	return []map[string]any{
-		{"label": "DNS", "value": ternary(reloadFailures == 0, "Healthy", "Needs attention"), "detail": ternary(reloadFailures == 0, "Engine running", "Reload failures detected"), "status": ternary(reloadFailures == 0, "healthy", "critical")},
-		{"label": "Upstreams", "value": fmt.Sprintf("%d configured", upstreamCount), "detail": "Ready for resolution", "status": "healthy"},
+		dnsHealthCard(dnsMetricsAvailable, reloadFailures),
+		upstreamHealthCard(upstreams),
 		{"label": "Devices", "value": fmt.Sprintf("%d observed", deviceCount), "detail": "From local query data", "status": "healthy"},
 		{"label": "Filtering", "value": fmt.Sprintf("%d domains", blockEntries), "detail": fmt.Sprintf("%d enabled lists", enabledBlocklists), "status": ternary(blockEntries > 0, "healthy", "warning")},
 		{"label": "Cache", "value": fmt.Sprintf("%.1f%% hit rate", percentage(cacheAnswers, cacheAnswers+forwardedAnswers)), "detail": fmt.Sprintf("%d upstream calls avoided", cacheAnswers), "status": "info"},
 		{"label": "Blocked", "value": fmt.Sprintf("%d today", blocked), "detail": fmt.Sprintf("%.1f%% of activity", percentage(blocked, total)), "status": ternary(blocked > 0, "warning", "healthy")},
 	}
+}
+
+func dnsHealthCard(metricsAvailable bool, reloadFailures int) map[string]any {
+	if !metricsAvailable {
+		return map[string]any{"label": "DNS", "value": "Unavailable", "detail": "CoreDNS metrics could not be reached", "status": "critical"}
+	}
+	return map[string]any{
+		"label":  "DNS",
+		"value":  ternary(reloadFailures == 0, "Healthy", "Needs attention"),
+		"detail": ternary(reloadFailures == 0, "Engine running", "Reload failures detected"),
+		"status": ternary(reloadFailures == 0, "healthy", "critical"),
+	}
+}
+
+func upstreamHealthCard(snapshot upstreamhealth.Snapshot) map[string]any {
+	online := 0
+	for _, item := range snapshot.Items {
+		if item.Status == "online" {
+			online++
+		}
+	}
+	value := "Checking"
+	detail := snapshot.Summary
+	status := snapshot.Status
+	if snapshot.Status == "healthy" {
+		value = fmt.Sprintf("%d online", online)
+	} else if snapshot.Status == "degraded" {
+		value = fmt.Sprintf("%d of %d online", online, len(snapshot.Items))
+	} else if snapshot.Status == "critical" {
+		value = "Unavailable"
+	} else {
+		status = "info"
+	}
+	return map[string]any{"label": "Upstreams", "value": value, "detail": detail, "status": status}
 }
 
 func whatsNew(ctx context.Context, database *sql.DB, start string) map[string]any {

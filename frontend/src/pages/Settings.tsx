@@ -1,4 +1,4 @@
-import { Check, CheckCircle2, Clock3, Cpu, Database, Eye, EyeOff, Gauge, Globe2, HardDrive, Image, KeyRound, LockKeyhole, Network, RefreshCw, RotateCw, Save, Server, Trash2, UserRound } from "lucide-react";
+import { AlertTriangle, Check, CheckCircle2, Clock3, Cpu, Database, Download, Eye, EyeOff, FileArchive, Gauge, Globe2, HardDrive, Image, KeyRound, LockKeyhole, Network, RefreshCw, RotateCw, Save, Server, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { api, type MaintenanceStatus, type PruneResult, type Setting } from "../api/client";
 
@@ -267,6 +267,70 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
   result: PruneResult | null;
 }) {
   const storage = maintenance?.storage;
+  const [backupPassphrase, setBackupPassphrase] = useState("");
+  const [backupConfirmation, setBackupConfirmation] = useState("");
+  const [restorePassphrase, setRestorePassphrase] = useState("");
+  const [restoreFile, setRestoreFile] = useState<File | null>(null);
+  const [restoreConfirmed, setRestoreConfirmed] = useState(false);
+  const [backupBusy, setBackupBusy] = useState<"export" | "restore" | null>(null);
+  const [backupMessage, setBackupMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
+
+  async function exportBackup() {
+    if (backupPassphrase.length < 12) {
+      setBackupMessage({ tone: "error", text: "Use a backup passphrase with at least 12 characters." });
+      return;
+    }
+    if (backupPassphrase !== backupConfirmation) {
+      setBackupMessage({ tone: "error", text: "The backup passphrases do not match." });
+      return;
+    }
+    setBackupBusy("export");
+    setBackupMessage(null);
+    try {
+      const { blob, filename } = await api.exportBackup(backupPassphrase);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      setBackupPassphrase("");
+      setBackupConfirmation("");
+      setBackupMessage({ tone: "success", text: "Encrypted backup downloaded. Keep its passphrase somewhere safe—Faro cannot recover it." });
+    } catch (caught) {
+      setBackupMessage({ tone: "error", text: caught instanceof Error ? caught.message : "The backup could not be created." });
+    } finally {
+      setBackupBusy(null);
+    }
+  }
+
+  async function restoreBackup() {
+    if (!restoreFile) {
+      setBackupMessage({ tone: "error", text: "Select a .faro-backup file to restore." });
+      return;
+    }
+    if (restorePassphrase.length < 12) {
+      setBackupMessage({ tone: "error", text: "Enter the backup passphrase." });
+      return;
+    }
+    if (!restoreConfirmed) {
+      setBackupMessage({ tone: "error", text: "Confirm that the current Faro database will be replaced." });
+      return;
+    }
+    setBackupBusy("restore");
+    setBackupMessage(null);
+    try {
+      const restored = await api.restoreBackup(restoreFile, restorePassphrase);
+      setBackupMessage({ tone: restored.warning ? "error" : "success", text: restored.warning || "Backup restored. Sign in with the account credentials stored in that backup." });
+      window.setTimeout(() => window.dispatchEvent(new Event("faro:unauthorized")), 1800);
+    } catch (caught) {
+      setBackupMessage({ tone: "error", text: caught instanceof Error ? caught.message : "The backup could not be restored." });
+      setBackupBusy(null);
+    }
+  }
+
   return (
     <div className="maintenance-layout">
       <section className="panel maintenance-health-panel">
@@ -306,6 +370,28 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
           </div>
         </section>
       </div>
+
+      <section className="panel backup-panel">
+        <div className="maintenance-section-heading"><ShieldCheck size={20} /><div><h2>Encrypted backup & restore</h2><p>Download a portable copy of Faro's configuration, account, rules, records, and database history.</p></div></div>
+        <div className="backup-security-note"><LockKeyhole size={16} /><span>Backups use Argon2id and AES-256-GCM. Active login sessions, cached favicon files, and the raw query-log buffer are excluded.</span></div>
+        {backupMessage && <div className={`backup-message ${backupMessage.tone}`} role="status">{backupMessage.tone === "error" ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}<span>{backupMessage.text}</span></div>}
+        <div className="backup-actions-grid">
+          <div className="backup-action-card">
+            <div className="backup-card-heading"><FileArchive size={19} /><div><strong>Create encrypted backup</strong><span>Choose a unique passphrase. It is required to restore the file.</span></div></div>
+            <label><span>Backup passphrase</span><input type="password" minLength={12} autoComplete="new-password" value={backupPassphrase} onChange={(event) => setBackupPassphrase(event.target.value)} placeholder="At least 12 characters" /></label>
+            <label><span>Confirm passphrase</span><input type="password" minLength={12} autoComplete="new-password" value={backupConfirmation} onChange={(event) => setBackupConfirmation(event.target.value)} /></label>
+            <button type="button" className="secondary icon-text-button" onClick={() => void exportBackup()} disabled={busy || backupBusy !== null}><Download size={16} /><span>{backupBusy === "export" ? "Encrypting backup" : "Download backup"}</span></button>
+          </div>
+
+          <div className="backup-action-card restore-card">
+            <div className="backup-card-heading"><Upload size={19} /><div><strong>Restore encrypted backup</strong><span>This replaces the live database and reloads DNS configuration.</span></div></div>
+            <label><span>Backup file</span><input type="file" accept=".faro-backup,application/octet-stream" onChange={(event) => setRestoreFile(event.target.files?.[0] ?? null)} /></label>
+            <label><span>Backup passphrase</span><input type="password" minLength={12} autoComplete="off" value={restorePassphrase} onChange={(event) => setRestorePassphrase(event.target.value)} /></label>
+            <label className="restore-confirmation"><input type="checkbox" checked={restoreConfirmed} onChange={(event) => setRestoreConfirmed(event.target.checked)} /><span>I understand this replaces current data and signs out every session.</span></label>
+            <button type="button" className="danger-outline icon-text-button" onClick={() => void restoreBackup()} disabled={busy || backupBusy !== null || !restoreConfirmed}><Upload size={16} /><span>{backupBusy === "restore" ? "Validating and restoring" : "Restore backup"}</span></button>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

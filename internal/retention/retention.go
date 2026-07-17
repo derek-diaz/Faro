@@ -104,6 +104,9 @@ func Prune(ctx context.Context, store *db.Store, days int, compact bool) (Result
 	if err != nil {
 		return Result{}, err
 	}
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM notification_states WHERE event_key <> '*' AND datetime(updated_at) < datetime(?)`, cutoff.Format(time.RFC3339)); err != nil {
+		return Result{}, err
+	}
 	queriesDeleted, _ := queryResult.RowsAffected()
 	eventsDeleted, _ := eventResult.RowsAffected()
 	completedAt := time.Now().UTC().Format(time.RFC3339)

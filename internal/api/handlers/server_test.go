@@ -3,8 +3,8 @@ package handlers
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -30,7 +30,7 @@ func newTestServer(t *testing.T) (http.Handler, *testReloader) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	reloader := &testReloader{}
-	handler := New(store, reloader)
+	handler := New(store, reloader, nil)
 	setup := httptest.NewRequest(http.MethodPost, "/api/auth/setup", bytes.NewBufferString(`{"username":"test-admin","password":"correct-horse-battery-staple"}`))
 	setup.Header.Set("Content-Type", "application/json")
 	setupResponse := httptest.NewRecorder()
@@ -71,6 +71,57 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestEncryptedBackupExportAndRestore(t *testing.T) {
+	handler, reloader := newTestServer(t)
+	passphrase := "correct horse backup staple"
+	exportRequest := httptest.NewRequest(http.MethodPost, "/api/backups", bytes.NewBufferString(`{"passphrase":"`+passphrase+`"}`))
+	exportRequest.Header.Set("Content-Type", "application/json")
+	exportResponse := httptest.NewRecorder()
+	handler.ServeHTTP(exportResponse, exportRequest)
+	if exportResponse.Code != http.StatusOK {
+		t.Fatalf("export status = %d, body = %s", exportResponse.Code, exportResponse.Body.String())
+	}
+	if contentType := exportResponse.Header().Get("Content-Type"); contentType != "application/octet-stream" {
+		t.Fatalf("export content type = %q", contentType)
+	}
+	if !bytes.HasPrefix(exportResponse.Body.Bytes(), []byte("FAROBKP1")) {
+		t.Fatal("export did not return a Faro encrypted backup")
+	}
+
+	var restoreBody bytes.Buffer
+	writer := multipart.NewWriter(&restoreBody)
+	if err := writer.WriteField("passphrase", passphrase); err != nil {
+		t.Fatal(err)
+	}
+	file, err := writer.CreateFormFile("backup", "backup.faro-backup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(exportResponse.Body.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restoreRequest := httptest.NewRequest(http.MethodPost, "/api/backups/restore", &restoreBody)
+	restoreRequest.Header.Set("Content-Type", writer.FormDataContentType())
+	restoreResponse := httptest.NewRecorder()
+	handler.ServeHTTP(restoreResponse, restoreRequest)
+	if restoreResponse.Code != http.StatusOK {
+		t.Fatalf("restore status = %d, body = %s", restoreResponse.Code, restoreResponse.Body.String())
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(restoreResponse.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["ok"] != true || payload["requires_login"] != true || payload["dns_reloaded"] != true {
+		t.Fatalf("unexpected restore payload: %#v", payload)
+	}
+	if reloader.calls != 1 {
+		t.Fatalf("DNS reload calls = %d, want 1", reloader.calls)
+	}
+}
+
 func TestAllowlistLifecycle(t *testing.T) {
 	handler, reloader := newTestServer(t)
 	create := httptest.NewRequest(http.MethodPost, "/api/allowlist", bytes.NewBufferString(`{"domain":" Example.COM. "}`))
@@ -98,21 +149,82 @@ func TestAllowlistLifecycle(t *testing.T) {
 	}
 }
 
-func TestDNSProbeQuery(t *testing.T) {
-	const id = uint16(0x4a3c)
-	packet := dnsProbeQuery(id, "example.com")
-	if len(packet) < 12 {
-		t.Fatalf("packet too short: %d", len(packet))
+func TestNotificationReadDismissAndReadAllLifecycle(t *testing.T) {
+	handler, _ := newTestServer(t)
+	update := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewBufferString(`{"upstream_dns":"8.8.8.8"}`))
+	update.Header.Set("Content-Type", "application/json")
+	updateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(updateResponse, update)
+	if updateResponse.Code != http.StatusOK {
+		t.Fatalf("update settings: status = %d, body = %s", updateResponse.Code, updateResponse.Body.String())
 	}
-	if got := binary.BigEndian.Uint16(packet[:2]); got != id {
-		t.Fatalf("query id = %#x, want %#x", got, id)
+
+	readNotifications := func() struct {
+		Attention int `json:"attention_count"`
+		Unread    int `json:"unread_count"`
+		Items     []struct {
+			ID     string `json:"id"`
+			IsRead bool   `json:"is_read"`
+		} `json:"items"`
+	} {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/notifications", nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("get notifications: status = %d, body = %s", response.Code, response.Body.String())
+		}
+		var payload struct {
+			Attention int `json:"attention_count"`
+			Unread    int `json:"unread_count"`
+			Items     []struct {
+				ID     string `json:"id"`
+				IsRead bool   `json:"is_read"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload
 	}
-	if got := binary.BigEndian.Uint16(packet[4:6]); got != 1 {
-		t.Fatalf("question count = %d, want 1", got)
+
+	payload := readNotifications()
+	if payload.Attention != 0 || payload.Unread != 1 || len(payload.Items) != 1 || payload.Items[0].IsRead {
+		t.Fatalf("unexpected initial notifications: %#v", payload)
 	}
-	wantQuestion := []byte{7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0}
-	if !bytes.Contains(packet, wantQuestion) {
-		t.Fatalf("query does not contain encoded hostname: %v", packet)
+	notificationID := payload.Items[0].ID
+	markRead := httptest.NewRecorder()
+	handler.ServeHTTP(markRead, httptest.NewRequest(http.MethodPut, "/api/notifications/"+notificationID+"/read", nil))
+	if markRead.Code != http.StatusOK {
+		t.Fatalf("mark read: status = %d, body = %s", markRead.Code, markRead.Body.String())
+	}
+	payload = readNotifications()
+	if payload.Unread != 0 || len(payload.Items) != 1 || !payload.Items[0].IsRead {
+		t.Fatalf("notification was not marked read: %#v", payload)
+	}
+
+	dismiss := httptest.NewRecorder()
+	handler.ServeHTTP(dismiss, httptest.NewRequest(http.MethodDelete, "/api/notifications/"+notificationID, nil))
+	if dismiss.Code != http.StatusOK {
+		t.Fatalf("dismiss: status = %d, body = %s", dismiss.Code, dismiss.Body.String())
+	}
+	if payload = readNotifications(); len(payload.Items) != 0 || payload.Unread != 0 {
+		t.Fatalf("notification was not dismissed: %#v", payload)
+	}
+
+	secondUpdate := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewBufferString(`{"upstream_dns":"1.1.1.1"}`))
+	secondUpdate.Header.Set("Content-Type", "application/json")
+	secondUpdateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(secondUpdateResponse, secondUpdate)
+	if secondUpdateResponse.Code != http.StatusOK {
+		t.Fatalf("second settings update: status = %d, body = %s", secondUpdateResponse.Code, secondUpdateResponse.Body.String())
+	}
+	markAll := httptest.NewRecorder()
+	handler.ServeHTTP(markAll, httptest.NewRequest(http.MethodPost, "/api/notifications/read-all", nil))
+	if markAll.Code != http.StatusOK {
+		t.Fatalf("mark all read: status = %d, body = %s", markAll.Code, markAll.Body.String())
+	}
+	if payload = readNotifications(); payload.Unread != 0 || len(payload.Items) != 1 || !payload.Items[0].IsRead {
+		t.Fatalf("mark all did not update notifications: %#v", payload)
 	}
 }
 

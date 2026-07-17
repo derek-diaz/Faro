@@ -1,4 +1,4 @@
-import { Activity, CheckCircle2, Database, Gauge, ListFilter, MonitorSmartphone, RadioTower, RefreshCw, Server, ShieldX } from "lucide-react";
+import { Activity, AlertTriangle, CheckCircle2, Database, Gauge, ListFilter, MonitorSmartphone, RadioTower, RefreshCw, Server, ShieldX } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, type DashboardSummary, type Setting, type UpstreamProbe } from "../api/client";
 import { DomainFavicon } from "../components/DomainFavicon";
@@ -25,33 +25,13 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
   const [probingUpstreams, setProbingUpstreams] = useState(false);
   const [probeCheckedAt, setProbeCheckedAt] = useState<string | null>(null);
   const [upstreamProbeError, setUpstreamProbeError] = useState("");
-  const upstreamKey = upstreams.join(",");
+  const serverProbeKey = (summary?.upstream_probes ?? []).map((probe) => `${probe.address}:${probe.status}:${probe.latency_ms ?? ""}`).join("|");
 
   useEffect(() => {
-    if (!upstreams.length) return undefined;
-    let cancelled = false;
-    async function runProbe() {
-      setProbingUpstreams(true);
-      setUpstreamProbeError("");
-      try {
-        const response = await api.probeUpstreams(upstreams);
-        if (!cancelled) {
-          setUpstreamProbes(Object.fromEntries(response.items.map((probe) => [probe.address, probe])));
-          setProbeCheckedAt(response.items[0]?.checked_at ?? new Date().toISOString());
-        }
-      } catch {
-        if (!cancelled) setUpstreamProbeError("Latency check unavailable");
-      } finally {
-        if (!cancelled) setProbingUpstreams(false);
-      }
-    }
-    void runProbe();
-    const timer = window.setInterval(() => void runProbe(), 15000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [upstreamKey]);
+    const probes = summary?.upstream_probes ?? [];
+    setUpstreamProbes(Object.fromEntries(probes.map((probe) => [probe.address, probe])));
+    setProbeCheckedAt(summary?.upstream_checked_at ?? probes[0]?.checked_at ?? null);
+  }, [serverProbeKey, summary?.upstream_checked_at]);
 
   async function refreshUpstreamLatency() {
     if (!upstreams.length) return;
@@ -73,6 +53,18 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
   }
 
   const bestUpstream = bestDashboardProbe(upstreams, upstreamProbes);
+  const onlineUpstreams = upstreams.filter((address) => upstreamProbes[address]?.status === "online").length;
+  const dnsHealth = summary.health_cards?.find((card) => card.label === "DNS");
+  const networkHealthStatus = dnsHealth?.status === "critical" ? "critical" : summary.upstream_health_status;
+  const networkStatusLabel = dnsHealth?.status === "critical"
+    ? "DNS needs attention"
+    : summary.upstream_health_status === "critical"
+      ? "Upstreams unavailable"
+      : summary.upstream_health_status === "degraded"
+        ? "Network degraded"
+        : summary.upstream_health_status === "healthy"
+          ? "Network healthy"
+          : "Checking network";
   const activity = summary.sparklines?.activity ?? [];
   const blocked = summary.sparklines?.blocked ?? [];
   const deviceHealth = summary.health_cards?.find((card) => card.label.toLowerCase().includes("device"));
@@ -80,17 +72,17 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
 
   return (
     <div className="observability-dashboard">
-      <section className="dashboard-status-strip" aria-label="Network status">
+      <section className={`dashboard-status-strip ${networkHealthStatus}`} aria-label="Network status">
         <div className="status-primary">
           <span className="status-dot" />
           <div>
-            <strong>Network healthy</strong>
+            <strong>{networkStatusLabel}</strong>
             <span>{summary.network_summary?.headline ?? "Everything looks normal."}</span>
           </div>
         </div>
         <div className="status-facts">
-          <span><RadioTower size={15} /> DNS online</span>
-          <span><CheckCircle2 size={15} /> {upstreams.length} upstream{upstreams.length === 1 ? "" : "s"}</span>
+          <span>{summary.cache.metrics_available ? <RadioTower size={15} /> : <AlertTriangle size={15} />} {summary.cache.metrics_available ? "DNS online" : "DNS status unavailable"}</span>
+          <span>{summary.upstream_health_status === "healthy" ? <CheckCircle2 size={15} /> : summary.upstream_health_status === "unknown" ? <RefreshCw size={15} /> : <AlertTriangle size={15} />} {summary.upstream_health_status === "unknown" ? "Checking upstreams" : `${onlineUpstreams} of ${upstreams.length} upstreams online`}</span>
           <span><Gauge size={15} /> {bestUpstream?.latency_ms !== null && bestUpstream?.latency_ms !== undefined ? `${formatLatency(bestUpstream.latency_ms)} ms fastest` : probingUpstreams ? "Testing latency" : "Latency unavailable"}</span>
           <span><ListFilter size={15} /> {summary.enabled_blocklists} active list{summary.enabled_blocklists === 1 ? "" : "s"}</span>
         </div>
@@ -125,7 +117,7 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
               <p>Live response time · {formatNumber(summary.cache.upstream_queries_today)} calls · {formatLatency(summary.cache.average_upstream_latency_ms)} ms avg</p>
             </div>
             <div className="dashboard-upstream-actions">
-              <span className="service-state"><span /> {probingUpstreams ? "Testing" : "Live"}</span>
+              <span className={`service-state ${summary.upstream_health_status}`}><span /> {probingUpstreams ? "Testing" : summary.upstream_health_status === "healthy" ? "Healthy" : summary.upstream_health_status === "degraded" ? "Degraded" : summary.upstream_health_status === "critical" ? "Unavailable" : "Checking"}</span>
               <button className="icon-button" type="button" onClick={() => void refreshUpstreamLatency()} disabled={probingUpstreams} aria-label="Refresh dashboard upstream latency"><RefreshCw className={probingUpstreams ? "spinning" : ""} size={15} /></button>
             </div>
           </div>
@@ -139,7 +131,7 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
               </div>;
             })}
           </div>
-          <div className="dashboard-upstream-footer"><span className={upstreamProbeError ? "dashboard-upstream-error" : ""}>{upstreamProbeError || (probeCheckedAt ? `Updated ${new Date(probeCheckedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Starting latency check")}</span><button className="text-action" type="button" onClick={onManageUpstreams}>Compare providers</button></div>
+          <div className="dashboard-upstream-footer"><span className={upstreamProbeError ? "dashboard-upstream-error" : ""}>{upstreamProbeError || (probeCheckedAt ? `Server checked ${new Date(probeCheckedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}` : "Server health check starting")}</span><button className="text-action" type="button" onClick={onManageUpstreams}>Compare providers</button></div>
         </section>
       </div>
 

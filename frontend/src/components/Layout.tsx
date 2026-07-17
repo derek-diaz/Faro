@@ -91,7 +91,7 @@ export function Layout({ page, setPage, children, apiState, onOpenSearch, notifi
             </div>
             <button className="icon-button notification-button" type="button" onClick={onOpenNotifications} aria-label="Network updates">
               <Bell size={18} />
-              {notifications.attention_count > 0 && <span>{Math.min(notifications.attention_count, 9)}</span>}
+              {notifications.unread_count > 0 && <span>{Math.min(notifications.unread_count, 9)}</span>}
             </button>
             <details className="account-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute("open"); }} onKeyDown={(event) => { if (event.key === "Escape") { event.currentTarget.removeAttribute("open"); event.currentTarget.querySelector("summary")?.focus(); } }}>
               <summary aria-label={`Account menu for ${username}`}><UserBadge username={username} /><ChevronDown size={14} /></summary>

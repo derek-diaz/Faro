@@ -210,6 +210,41 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
     }
   }
 
+  function refreshNotifications() {
+    void api.notifications().then(setNotifications).catch(() => undefined);
+  }
+
+  function markNotificationRead(id: string) {
+    setNotifications((current) => {
+      const item = current.items.find((event) => event.id === id);
+      return {
+        ...current,
+        unread_count: item && !item.is_read ? Math.max(0, current.unread_count - 1) : current.unread_count,
+        items: current.items.map((event) => event.id === id ? { ...event, is_read: true } : event)
+      };
+    });
+    void api.markNotificationRead(id).then(refreshNotifications).catch(refreshNotifications);
+  }
+
+  function dismissNotification(id: string) {
+    setNotifications((current) => {
+      const item = current.items.find((event) => event.id === id);
+      const needsAttention = item?.severity === "warning" || item?.severity === "critical";
+      return {
+        ...current,
+        unread_count: item && !item.is_read ? Math.max(0, current.unread_count - 1) : current.unread_count,
+        attention_count: needsAttention ? Math.max(0, current.attention_count - 1) : current.attention_count,
+        items: current.items.filter((event) => event.id !== id)
+      };
+    });
+    void api.dismissNotification(id).then(refreshNotifications).catch(refreshNotifications);
+  }
+
+  function markAllNotificationsRead() {
+    setNotifications((current) => ({ ...current, unread_count: 0, items: current.items.map((event) => ({ ...event, is_read: true })) }));
+    void api.markAllNotificationsRead().then(refreshNotifications).catch(refreshNotifications);
+  }
+
   function navigateToPage(nextPage: Page) {
     setPageState(nextPage);
     setSelectedDomain(null);
@@ -327,7 +362,11 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
         open={notificationOpen}
         notifications={notifications.items}
         attentionCount={notifications.attention_count}
+        unreadCount={notifications.unread_count}
         onClose={() => setNotificationOpen(false)}
+        onMarkRead={markNotificationRead}
+        onDismiss={dismissNotification}
+        onMarkAllRead={markAllNotificationsRead}
         onDomainSelect={openDomain}
         onDeviceSelect={openDevice}
         setPage={navigateToPage}

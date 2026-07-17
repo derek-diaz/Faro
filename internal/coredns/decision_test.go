@@ -53,6 +53,9 @@ func TestExplainDomainCapturesLocalRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	if _, err := store.DB.Exec(`INSERT INTO dns_records(hostname, type, value, description) VALUES('plex.home', 'A', '192.168.7.50', 'Media server')`); err != nil {
+		t.Fatal(err)
+	}
 
 	decision := ExplainDomain(context.Background(), store, "plex.home")
 	if decision.Action != "allowed" || decision.LocalRecord == nil {

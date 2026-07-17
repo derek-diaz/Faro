@@ -6,8 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/derek/faro/internal/auth"
 )
 
 func (s *Handler) queries(w http.ResponseWriter, r *http.Request) {
@@ -90,28 +94,166 @@ func (s *Handler) notifications(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	allEvents := localEvents(r.Context(), s.store.DB, 80, "")
+	userID, ok := auth.UserID(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+	allEvents := notificationCandidates(r.Context(), s.store.DB, 1000)
+	states, readAllAt, err := loadNotificationStates(r.Context(), s.store.DB, userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	notifications := []map[string]any{}
 	attentionCount := 0
+	unreadCount := 0
 	for _, event := range allEvents {
 		eventType, _ := event["type"].(string)
 		severity, _ := event["severity"].(string)
 		if !isUsefulNotification(eventType, severity) {
 			continue
 		}
-		notifications = append(notifications, event)
+		eventKey, _ := event["id"].(string)
+		state := states[eventKey]
+		if state.dismissed {
+			continue
+		}
+		isRead := state.read || eventAtOrBefore(event, readAllAt)
 		if severity == "warning" || severity == "critical" {
 			attentionCount++
 		}
-		if len(notifications) == 10 {
-			break
+		if !isRead {
+			unreadCount++
+		}
+		if len(notifications) < 10 {
+			event["is_read"] = isRead
+			notifications = append(notifications, event)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"attention_count": attentionCount,
-		"unread_count":    attentionCount,
+		"unread_count":    unreadCount,
 		"items":           notifications,
 	})
+}
+
+type storedNotificationState struct {
+	read      bool
+	dismissed bool
+}
+
+func (s *Handler) notificationState(w http.ResponseWriter, r *http.Request) {
+	userID, ok := auth.UserID(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
+		return
+	}
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/notifications/"), "/")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if path == "read-all" {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		_, err := s.store.DB.ExecContext(r.Context(), `
+			INSERT INTO notification_states(user_id, event_key, read_at, updated_at) VALUES(?, '*', ?, ?)
+			ON CONFLICT(user_id, event_key) DO UPDATE SET read_at = excluded.read_at, updated_at = excluded.updated_at
+		`, userID, now, now)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+
+	markRead := strings.HasSuffix(path, "/read")
+	rawKey := strings.TrimSuffix(path, "/read")
+	eventKey, err := url.PathUnescape(strings.Trim(rawKey, "/"))
+	if err != nil || !validNotificationKey(eventKey) {
+		writeBadRequest(w, fmt.Errorf("invalid notification id"))
+		return
+	}
+	if markRead {
+		if r.Method != http.MethodPut {
+			methodNotAllowed(w)
+			return
+		}
+		_, err = s.store.DB.ExecContext(r.Context(), `
+			INSERT INTO notification_states(user_id, event_key, read_at, updated_at) VALUES(?, ?, ?, ?)
+			ON CONFLICT(user_id, event_key) DO UPDATE SET read_at = excluded.read_at, updated_at = excluded.updated_at
+		`, userID, eventKey, now, now)
+	} else {
+		if r.Method != http.MethodDelete {
+			methodNotAllowed(w)
+			return
+		}
+		_, err = s.store.DB.ExecContext(r.Context(), `
+			INSERT INTO notification_states(user_id, event_key, read_at, dismissed_at, updated_at) VALUES(?, ?, ?, ?, ?)
+			ON CONFLICT(user_id, event_key) DO UPDATE SET
+				read_at = COALESCE(notification_states.read_at, excluded.read_at),
+				dismissed_at = excluded.dismissed_at,
+				updated_at = excluded.updated_at
+		`, userID, eventKey, now, now, now)
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func notificationCandidates(ctx context.Context, database *sql.DB, limit int) []map[string]any {
+	events := persistedEvents(ctx, database, limit, "")
+	events = append(events, firstSeenDeviceEvents(ctx, database, limit, "")...)
+	sortEvents(events)
+	return events
+}
+
+func loadNotificationStates(ctx context.Context, database *sql.DB, userID int64) (map[string]storedNotificationState, time.Time, error) {
+	rows, err := database.QueryContext(ctx, `SELECT event_key, read_at, dismissed_at FROM notification_states WHERE user_id = ?`, userID)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	defer rows.Close()
+	states := map[string]storedNotificationState{}
+	var readAllAt time.Time
+	for rows.Next() {
+		var eventKey string
+		var readAt, dismissedAt sql.NullString
+		if err := rows.Scan(&eventKey, &readAt, &dismissedAt); err != nil {
+			return nil, time.Time{}, err
+		}
+		if eventKey == "*" {
+			readAllAt = parseNotificationTime(readAt.String)
+			continue
+		}
+		states[eventKey] = storedNotificationState{read: readAt.Valid, dismissed: dismissedAt.Valid}
+	}
+	return states, readAllAt, rows.Err()
+}
+
+func eventAtOrBefore(event map[string]any, watermark time.Time) bool {
+	if watermark.IsZero() {
+		return false
+	}
+	timestamp, _ := event["timestamp"].(string)
+	eventTime := parseNotificationTime(timestamp)
+	return !eventTime.IsZero() && !eventTime.After(watermark)
+}
+
+func parseNotificationTime(value string) time.Time {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
+func validNotificationKey(value string) bool {
+	return len(value) > 0 && len(value) <= 512 && (strings.HasPrefix(value, "event-") || strings.HasPrefix(value, "device-first-seen-"))
 }
 
 func isUsefulNotification(eventType, severity string) bool {

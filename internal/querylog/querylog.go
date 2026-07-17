@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,6 +34,11 @@ type Tailer struct {
 	Path  string
 }
 
+type logCursor struct {
+	info   os.FileInfo
+	offset int64
+}
+
 func NewTailer(store *db.Store, path string) *Tailer {
 	return &Tailer{Store: store, Path: path}
 }
@@ -41,46 +47,87 @@ func (t *Tailer) Run(ctx context.Context) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	offset := currentSize(t.Path)
+	cursor := cursorAtEnd(t.Path)
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			next, err := t.readFrom(ctx, offset)
+			next, err := t.readAvailable(ctx, cursor)
 			if err != nil {
 				if !os.IsNotExist(err) {
 					log.Printf("query log read failed: %v", err)
 				}
 				continue
 			}
-			offset = next
+			cursor = next
 		}
 	}
 }
 
-func currentSize(path string) int64 {
+func cursorAtEnd(path string) logCursor {
 	stat, err := os.Stat(path)
 	if err != nil {
-		return 0
+		return logCursor{}
 	}
-	return stat.Size()
+	return logCursor{info: stat, offset: stat.Size()}
 }
 
-func (t *Tailer) readFrom(ctx context.Context, offset int64) (int64, error) {
+func (t *Tailer) readAvailable(ctx context.Context, cursor logCursor) (logCursor, error) {
 	file, err := os.Open(t.Path)
+	if err != nil {
+		return cursor, err
+	}
+	defer file.Close()
+
+	currentInfo, err := file.Stat()
+	if err != nil {
+		return cursor, err
+	}
+
+	if cursor.info == nil || os.SameFile(cursor.info, currentInfo) {
+		offset := cursor.offset
+		if currentInfo.Size() < offset {
+			offset = 0
+		}
+		position, err := t.readOpenFile(ctx, file, offset)
+		if err != nil {
+			return cursor, err
+		}
+		return logCursor{info: currentInfo, offset: position}, nil
+	}
+
+	rotatedIndex := findRotatedIndex(t.Path, cursor.info)
+	if rotatedIndex > 0 {
+		if _, err := t.readPath(ctx, rotatedPath(t.Path, rotatedIndex), cursor.offset); err != nil {
+			return cursor, err
+		}
+		for index := rotatedIndex - 1; index >= 1; index-- {
+			if _, err := t.readPath(ctx, rotatedPath(t.Path, index), 0); err != nil {
+				return cursor, err
+			}
+		}
+	} else {
+		log.Printf("query log rotated beyond retained backups; some raw entries may have been skipped")
+	}
+
+	position, err := t.readOpenFile(ctx, file, 0)
+	if err != nil {
+		return cursor, err
+	}
+	return logCursor{info: currentInfo, offset: position}, nil
+}
+
+func (t *Tailer) readPath(ctx context.Context, path string, offset int64) (int64, error) {
+	file, err := os.Open(path)
 	if err != nil {
 		return offset, err
 	}
 	defer file.Close()
+	return t.readOpenFile(ctx, file, offset)
+}
 
-	stat, err := file.Stat()
-	if err != nil {
-		return offset, err
-	}
-	if stat.Size() < offset {
-		offset = 0
-	}
+func (t *Tailer) readOpenFile(ctx context.Context, file *os.File, offset int64) (int64, error) {
 	if _, err := file.Seek(offset, 0); err != nil {
 		return offset, err
 	}
@@ -97,6 +144,28 @@ func (t *Tailer) readFrom(ctx context.Context, offset int64) (int64, error) {
 		return offset, err
 	}
 	return position, nil
+}
+
+func findRotatedIndex(path string, info os.FileInfo) int {
+	matches, err := filepath.Glob(path + ".*")
+	if err != nil {
+		return 0
+	}
+	for _, match := range matches {
+		index, err := strconv.Atoi(strings.TrimPrefix(match, path+"."))
+		if err != nil || index < 1 {
+			continue
+		}
+		candidate, err := os.Stat(match)
+		if err == nil && os.SameFile(info, candidate) {
+			return index
+		}
+	}
+	return 0
+}
+
+func rotatedPath(path string, index int) string {
+	return path + "." + strconv.Itoa(index)
 }
 
 func (t *Tailer) insert(ctx context.Context, line string) {

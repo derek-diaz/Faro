@@ -1,7 +1,7 @@
 export type DNSRecord = {
   id: number;
   hostname: string;
-  type: "A" | "AAAA" | "CNAME";
+  type: "A" | "AAAA";
   value: string;
   description: string;
   created_at?: string;
@@ -148,6 +148,7 @@ export type FaroEvent = {
   domain?: string | null;
   metadata: Record<string, unknown>;
   source: string;
+  is_read?: boolean;
 };
 
 export type ActivityCounts = {
@@ -211,6 +212,8 @@ export type DashboardSummary = {
   recent_activity: DNSQuery[];
   upstream_health: string;
   upstream_health_status: string;
+  upstream_checked_at?: string;
+  upstream_probes?: UpstreamProbe[];
   favicon_fetching_enabled: string;
 };
 
@@ -306,6 +309,15 @@ export type PruneResult = {
   completed_at: string;
 };
 
+export type BackupRestoreResult = {
+  ok: boolean;
+  restored_at: string;
+  backup_created: string;
+  dns_reloaded: boolean;
+  warning?: string;
+  requires_login: boolean;
+};
+
 export type AuthStatus = {
   configured: boolean;
   authenticated: boolean;
@@ -331,6 +343,19 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function backupRequest(path: string, init: RequestInit): Promise<Response> {
+  const response = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: { "X-Faro-Timezone": BROWSER_TIMEZONE, ...(init.headers ?? {}) }
+  });
+  if (response.status === 401) window.dispatchEvent(new Event("faro:unauthorized"));
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(body.error ?? response.statusText);
+  }
+  return response;
+}
+
 export const api = {
   authStatus: () => request<AuthStatus>("/api/auth/status"),
   setupAuth: (username: string, password: string) => request<{ ok: boolean; username: string }>("/api/auth/setup", { method: "POST", body: JSON.stringify({ username, password }) }),
@@ -343,6 +368,9 @@ export const api = {
   events: (search = "", scope = "all", page = 1, pageSize = 50) =>
     request<ActivityPage>(`/api/events?search=${encodeURIComponent(search)}&scope=${encodeURIComponent(scope)}&page=${page}&page_size=${pageSize}`),
   notifications: () => request<NotificationsResponse>("/api/notifications"),
+  markNotificationRead: (id: string) => request<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}/read`, { method: "PUT" }),
+  dismissNotification: (id: string) => request<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  markAllNotificationsRead: () => request<{ ok: boolean }>("/api/notifications/read-all", { method: "POST" }),
   probeUpstreams: (addresses: string[]) => request<UpstreamProbeResponse>("/api/upstreams/probe", { method: "POST", body: JSON.stringify({ addresses }) }),
   devices: () => request<DeviceSummary[]>("/api/devices"),
   device: (clientIP: string) => request<DeviceSummary>(`/api/devices/${encodeURIComponent(clientIP)}`),
@@ -378,5 +406,22 @@ export const api = {
   maintenance: () => request<MaintenanceStatus>("/api/maintenance"),
   prune: (retentionDays: number, compact: boolean) =>
     request<PruneResult>("/api/maintenance", { method: "POST", body: JSON.stringify({ retention_days: retentionDays, compact }) }),
+  exportBackup: async (passphrase: string) => {
+    const response = await backupRequest("/api/backups", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ passphrase })
+    });
+    const disposition = response.headers.get("Content-Disposition") ?? "";
+    const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? "faro-backup.faro-backup";
+    return { blob: await response.blob(), filename };
+  },
+  restoreBackup: async (file: File, passphrase: string) => {
+    const body = new FormData();
+    body.append("passphrase", passphrase);
+    body.append("backup", file);
+    const response = await backupRequest("/api/backups/restore", { method: "POST", body });
+    return response.json() as Promise<BackupRestoreResult>;
+  },
   reload: () => request<{ ok: boolean }>("/api/reload", { method: "POST" })
 };

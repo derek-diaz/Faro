@@ -28,6 +28,7 @@ Faro pairs CoreDNS with an approachable web app so you can understand and contro
 - DNS cache and upstream-resolution visibility
 - Clear explanations for why requests were allowed or blocked
 - Configurable retention, database pruning, and health metrics
+- Downloadable, passphrase-encrypted database backups with in-app restore
 
 ## Run Faro
 
@@ -67,6 +68,12 @@ docker compose up -d
 ```
 
 For port customization, verification, troubleshooting, backups, local development, architecture, and release publishing, see the [technical and deployment guide](docs/README.md).
+
+## License
+
+Copyright 2026 Derek Diaz Correa.
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full license text.
 
 <p align="center">
   Made in Puerto Rico.

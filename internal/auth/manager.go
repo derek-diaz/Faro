@@ -61,6 +61,11 @@ type contextKey string
 
 const userContextKey contextKey = "authenticated-user"
 
+func UserID(ctx context.Context) (int64, bool) {
+	user, ok := ctx.Value(userContextKey).(sessionUser)
+	return user.ID, ok && user.ID > 0
+}
+
 func NewManager(store *db.Store) *Manager {
 	dummyHash, _ := bcrypt.GenerateFromPassword([]byte("faro-invalid-login-comparison"), bcrypt.DefaultCost)
 	return &Manager{store: store, now: time.Now, dummyHash: dummyHash, failures: map[string]failureState{}}

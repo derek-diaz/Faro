@@ -3,6 +3,7 @@ package querylog
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -98,5 +99,62 @@ func TestInsertPersistsDecisionSnapshot(t *testing.T) {
 	}
 	if snapshot.Confidence != "configuration_snapshot" || snapshot.CapturedAt == "" {
 		t.Fatalf("missing provenance metadata: %#v", snapshot)
+	}
+}
+
+func TestTailerFinishesRotatedLogBeforeReadingCurrentLog(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	logPath := filepath.Join(t.TempDir(), "query.log")
+	oldLine := "[INFO] FARO|192.168.7.20|A|already-seen.example.|NOERROR|1ms|udp://1.1.1.1:53\n"
+	if err := os.WriteFile(logPath, []byte(oldLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cursor := cursorAtEnd(logPath)
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newOldLine := "[INFO] FARO|192.168.7.20|A|before-rotation.example.|NOERROR|2ms|udp://1.1.1.1:53\n"
+	if _, err := file.WriteString(newOldLine); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(logPath, logPath+".2"); err != nil {
+		t.Fatal(err)
+	}
+	intermediateLine := "[INFO] FARO|192.168.7.20|A|between-rotations.example.|NOERROR|2.5ms|udp://1.1.1.1:53\n"
+	if err := os.WriteFile(logPath+".1", []byte(intermediateLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	currentLine := "[INFO] FARO|192.168.7.20|A|after-rotation.example.|NOERROR|3ms|udp://1.1.1.1:53\n"
+	if err := os.WriteFile(logPath, []byte(currentLine), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tailer := NewTailer(store, logPath)
+	if _, err := tailer.readAvailable(context.Background(), cursor); err != nil {
+		t.Fatal(err)
+	}
+
+	var count int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM dns_queries`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("ingested query count = %d, want 3", count)
+	}
+	var skipped int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM dns_queries WHERE domain = 'already-seen.example'`).Scan(&skipped); err != nil {
+		t.Fatal(err)
+	}
+	if skipped != 0 {
+		t.Fatal("tailer re-ingested data from before its saved offset")
 	}
 }

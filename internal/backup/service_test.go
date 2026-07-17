@@ -1,0 +1,135 @@
+package backup
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/derek/faro/internal/db"
+)
+
+const testPassphrase = "correct horse backup staple"
+
+func TestEncryptedBackupRestoreLifecycle(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB.Exec(`INSERT INTO users(username, password_hash) VALUES('backup-admin', 'secret-hash')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`INSERT INTO auth_sessions(user_id, token_hash, expires_at) VALUES(1, 'old-session-token', datetime('now', '+1 day'))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`INSERT INTO dns_records(hostname, type, value, description) VALUES('saved.home', 'A', '192.168.1.20', 'backup fixture')`); err != nil {
+		t.Fatal(err)
+	}
+
+	service := NewService(store)
+	path, manifest, cleanup, err := service.Create(context.Background(), testPassphrase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if manifest.FormatVersion != FormatVersion || manifest.DatabaseBytes == 0 {
+		t.Fatalf("unexpected manifest: %#v", manifest)
+	}
+	encrypted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range [][]byte{[]byte("saved.home"), []byte("secret-hash"), []byte("old-session-token")} {
+		if bytes.Contains(encrypted, secret) {
+			t.Fatalf("encrypted backup exposed plaintext %q", secret)
+		}
+	}
+
+	if _, err := store.DB.Exec(`DELETE FROM dns_records WHERE hostname = 'saved.home'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`UPDATE settings SET value = '8.8.8.8' WHERE key = 'upstream_dns'`); err != nil {
+		t.Fatal(err)
+	}
+	input, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredManifest, err := service.Restore(context.Background(), input, testPassphrase)
+	_ = input.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredManifest.CreatedAt != manifest.CreatedAt {
+		t.Fatalf("restored manifest = %#v, want %#v", restoredManifest, manifest)
+	}
+	var address string
+	if err := store.DB.QueryRow(`SELECT value FROM dns_records WHERE hostname = 'saved.home'`).Scan(&address); err != nil {
+		t.Fatal(err)
+	}
+	if address != "192.168.1.20" {
+		t.Fatalf("restored address = %q", address)
+	}
+	var upstream string
+	if err := store.DB.QueryRow(`SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&upstream); err != nil {
+		t.Fatal(err)
+	}
+	if upstream != "1.1.1.1,9.9.9.9" {
+		t.Fatalf("restored upstream = %q", upstream)
+	}
+	var sessions int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM auth_sessions`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 {
+		t.Fatalf("restored auth sessions = %d, want 0", sessions)
+	}
+}
+
+func TestWrongPassphraseDoesNotMutateDatabase(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	service := NewService(store)
+	path, _, cleanup, err := service.Create(context.Background(), testPassphrase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if _, err := store.DB.Exec(`UPDATE settings SET value = '8.8.4.4' WHERE key = 'upstream_dns'`); err != nil {
+		t.Fatal(err)
+	}
+	input, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, restoreErr := service.Restore(context.Background(), input, "definitely the wrong password")
+	_ = input.Close()
+	if !errors.Is(restoreErr, ErrInvalidBackup) {
+		t.Fatalf("restore error = %v, want ErrInvalidBackup", restoreErr)
+	}
+	var upstream string
+	if err := store.DB.QueryRow(`SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&upstream); err != nil {
+		t.Fatal(err)
+	}
+	if upstream != "8.8.4.4" {
+		t.Fatalf("database changed after rejected restore: upstream = %q", upstream)
+	}
+}
+
+func TestTruncatedEncryptedStreamIsRejected(t *testing.T) {
+	var encrypted bytes.Buffer
+	if err := encrypt(&encrypted, bytes.NewBufferString("complete payload"), testPassphrase); err != nil {
+		t.Fatal(err)
+	}
+	data := encrypted.Bytes()
+	var plaintext bytes.Buffer
+	if err := decrypt(&plaintext, bytes.NewReader(data[:len(data)-1]), testPassphrase); !errors.Is(err, ErrInvalidBackup) {
+		t.Fatalf("decrypt truncated stream error = %v", err)
+	}
+}

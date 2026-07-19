@@ -4,13 +4,13 @@ import {
 	Bell,
 	CheckCircle2,
 	ChevronDown,
+	Database,
 	MonitorSmartphone,
 	LogOut,
 	Network,
 	Router,
 	Search,
 	Settings,
-	Shield,
 	ShieldCheck
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -25,8 +25,8 @@ const navItems: { id: Page; label: string; description: string; href: string; ic
   { id: "devices", label: "Devices", description: "See which devices are active on your network.", href: "/devices", icon: MonitorSmartphone },
   { id: "records", label: "Local DNS", description: "Manage friendly names for services on your network.", href: "/local-dns", icon: Router },
   { id: "upstreams", label: "Upstreams", description: "Choose the DNS providers Faro uses for public lookups.", href: "/upstreams", icon: Network },
-  { id: "blocklists", label: "Blocklists", description: "Manage the lists Faro uses to filter domains.", href: "/blocklists", icon: Shield },
-  { id: "lists", label: "Allowlist", description: "Manage domains that should always be allowed.", href: "/allowlist", icon: ShieldCheck },
+  { id: "protection", label: "Protection", description: "Choose what Faro blocks for your home and individual devices.", href: "/protection", icon: ShieldCheck },
+  { id: "blocklists", label: "Blocklists", description: "Install, update, pause, and remove filtering sources.", href: "/blocklists", icon: Database },
   { id: "settings", label: "Settings", description: "Configure DNS behavior and Faro preferences.", href: "/settings", icon: Settings }
 ];
 
@@ -85,9 +85,9 @@ export function Layout({ page, setPage, children, apiState, onOpenSearch, notifi
               <span>Search</span>
               <kbd>Ctrl K</kbd>
             </button>
-            <div className={`system-status ${apiState}`} title={apiState === "online" ? "Faro API and DNS services are responding" : apiState === "offline" ? "Faro API is not responding" : "Checking Faro services"}>
+            <div className={`system-status ${apiState}`} title={apiState === "online" ? "Faro's control plane is responding; DNS and upstream health are shown on the dashboard" : apiState === "offline" ? "Faro API is not responding" : "Checking Faro services"}>
               <CheckCircle2 size={17} />
-              <span>{apiState === "online" ? "Healthy" : apiState === "offline" ? "Offline" : "Checking"}</span>
+              <span>{apiState === "online" ? "API online" : apiState === "offline" ? "Offline" : "Checking"}</span>
             </div>
             <button className="icon-button notification-button" type="button" onClick={onOpenNotifications} aria-label="Network updates">
               <Bell size={18} />

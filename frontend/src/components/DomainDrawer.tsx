@@ -77,13 +77,13 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
               {summary.status !== "Blocked" && (
                 <button type="button" onClick={() => void addRule("block")} disabled={busy !== null}>
                   <Ban size={16} />
-                  <span>{summary.status === "Mixed" ? "Block all" : "Block domain"}</span>
+                  <span>Block in Home</span>
                 </button>
               )}
               {summary.status !== "Allowed" && (
                 <button type="button" className="secondary" onClick={() => void addRule("allow")} disabled={busy !== null}>
                   <ShieldCheck size={16} />
-                  <span>{summary.status === "Mixed" ? "Allow all" : "Allow domain"}</span>
+                  <span>Allow in Home</span>
                 </button>
               )}
             </div>
@@ -149,12 +149,13 @@ function DecisionTrace({ query }: { query: DNSQuery }) {
     decision.local_record || decision.blocklists?.length
   ));
   const rules = decision?.blocklists ?? [];
+  const protectionName = decision?.protection?.name ?? "Home";
   const policyDetail = decision?.allowlist
-    ? "Manual allowlist exception bypassed filtering."
+    ? `${protectionName}: an allow exception bypassed filtering.`
     : decision?.manual_block
-      ? "Matched a manual domain block."
+      ? `${protectionName}: matched a custom domain block.`
       : rules.length > 0
-        ? `Matched ${rules.map((rule) => rule.name).join(", ")}.`
+        ? `${protectionName}: matched ${rules.map((rule) => rule.name).join(", ")}.`
         : decision?.local_record
           ? `Matched Local DNS ${decision.local_record.type} record ${decision.local_record.value}.`
           : hasDecision
@@ -181,7 +182,7 @@ function DecisionTrace({ query }: { query: DNSQuery }) {
       </div>
       <div className="decision-trace" aria-label="DNS decision trace">
         <TraceStep icon={<Route size={15} />} label="Request received" detail={`${query.client_ip} requested ${query.query_type} ${query.domain}.`} />
-        <TraceStep icon={query.action === "blocked" ? <ShieldX size={15} /> : <ShieldCheck size={15} />} label="Policy evaluation" detail={policyDetail} tone={query.action === "blocked" ? "blocked" : "allowed"} />
+        <TraceStep icon={query.action === "blocked" ? <ShieldX size={15} /> : <ShieldCheck size={15} />} label="Protection" detail={policyDetail} tone={query.action === "blocked" ? "blocked" : "allowed"} />
         <TraceStep icon={query.source === "cache" ? <Database size={15} /> : query.source === "upstream" ? <Server size={15} /> : <GitBranch size={15} />} label="Resolution path" detail={resolution} />
         <TraceStep icon={<CheckCircle2 size={15} />} label="Response" detail={`${responseCode} · ${latency}`} />
       </div>

@@ -28,6 +28,14 @@ func TestEncryptedBackupRestoreLifecycle(t *testing.T) {
 	if _, err := store.DB.Exec(`INSERT INTO dns_records(hostname, type, value, description) VALUES('saved.home', 'A', '192.168.1.20', 'backup fixture')`); err != nil {
 		t.Fatal(err)
 	}
+	protectionResult, err := store.DB.Exec(`INSERT INTO protection_profiles(name, icon) VALUES('Children', 'baby')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectionID, _ := protectionResult.LastInsertId()
+	if _, err := store.DB.Exec(`INSERT INTO protection_block_entries(protection_id, domain) VALUES(?, 'games.example'); INSERT INTO device_protection_assignments(client_ip, protection_id) VALUES('192.168.7.23', ?)`, protectionID, protectionID); err != nil {
+		t.Fatal(err)
+	}
 
 	service := NewService(store)
 	path, manifest, cleanup, err := service.Create(context.Background(), testPassphrase)
@@ -49,6 +57,9 @@ func TestEncryptedBackupRestoreLifecycle(t *testing.T) {
 	}
 
 	if _, err := store.DB.Exec(`DELETE FROM dns_records WHERE hostname = 'saved.home'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`DELETE FROM protection_profiles WHERE id = ?`, protectionID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.DB.Exec(`UPDATE settings SET value = '8.8.8.8' WHERE key = 'upstream_dns'`); err != nil {
@@ -79,6 +90,19 @@ func TestEncryptedBackupRestoreLifecycle(t *testing.T) {
 	}
 	if upstream != "1.1.1.1,9.9.9.9" {
 		t.Fatalf("restored upstream = %q", upstream)
+	}
+	var restoredProtection, restoredDomain string
+	if err := store.DB.QueryRow(`
+		SELECT p.name, b.domain
+		FROM protection_profiles p
+		JOIN protection_block_entries b ON b.protection_id = p.id
+		JOIN device_protection_assignments a ON a.protection_id = p.id
+		WHERE a.client_ip = '192.168.7.23'
+	`).Scan(&restoredProtection, &restoredDomain); err != nil {
+		t.Fatal(err)
+	}
+	if restoredProtection != "Children" || restoredDomain != "games.example" {
+		t.Fatalf("restored protection=%q domain=%q", restoredProtection, restoredDomain)
 	}
 	var sessions int
 	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM auth_sessions`).Scan(&sessions); err != nil {

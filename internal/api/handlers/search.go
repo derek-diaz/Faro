@@ -59,9 +59,13 @@ func (s *Handler) search(w http.ResponseWriter, r *http.Request) {
 			LIMIT 8
 		`, like, like, like),
 		"rules": searchRows(r.Context(), s.store.DB, `
-			SELECT domain AS label, 'Allowed manually' AS subtitle FROM allowlist_entries WHERE domain LIKE ?
+			SELECT e.domain AS label, 'Allowed in ' || p.name AS subtitle
+			FROM protection_allow_entries e JOIN protection_profiles p ON p.id = e.protection_id
+			WHERE e.domain LIKE ?
 			UNION ALL
-			SELECT domain AS label, 'Blocked manually' AS subtitle FROM manual_block_entries WHERE domain LIKE ?
+			SELECT e.domain AS label, 'Blocked in ' || p.name AS subtitle
+			FROM protection_block_entries e JOIN protection_profiles p ON p.id = e.protection_id
+			WHERE e.domain LIKE ?
 			ORDER BY label
 			LIMIT 8
 		`, like, like),

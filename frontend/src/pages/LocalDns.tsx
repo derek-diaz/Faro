@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { api, type DNSRecord } from "../api/client";
+import { api, type DNSRecord, type Setting } from "../api/client";
 import { EmptyState } from "../components/EmptyState";
 
 type LocalDnsProps = {
   records: DNSRecord[];
+  settings: Setting[];
   refresh: () => Promise<void>;
 };
 
@@ -14,9 +15,10 @@ const blankRecord: Omit<DNSRecord, "id"> = {
   description: ""
 };
 
-export function LocalDns({ records, refresh }: LocalDnsProps) {
+export function LocalDns({ records, settings, refresh }: LocalDnsProps) {
   const [form, setForm] = useState<Omit<DNSRecord, "id">>(blankRecord);
   const [editing, setEditing] = useState<DNSRecord | null>(null);
+  const localSuffix = settings.find((setting) => setting.key === "local_domain_suffix")?.value || "home";
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -92,7 +94,8 @@ export function LocalDns({ records, refresh }: LocalDnsProps) {
         <form className="stack-form" onSubmit={(event) => void submit(event)}>
           <label>
             Hostname
-            <input value={form.hostname} onChange={(event) => setForm({ ...form, hostname: event.target.value })} placeholder="plex.home" />
+            <input value={form.hostname} onChange={(event) => setForm({ ...form, hostname: event.target.value })} placeholder={`plex or plex.${localSuffix}`} />
+            <small>Single-label names automatically use the .{localSuffix} suffix.</small>
           </label>
           <label>
             Type

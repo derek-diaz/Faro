@@ -23,7 +23,8 @@ Faro pairs CoreDNS with an approachable web app so you can understand and contro
 - Guided first-run setup and local administrator authentication
 - Live dashboard and searchable network activity
 - Device inventory, friendly names, and activity replay
-- Local DNS records, allow rules, and curated blocklists
+- Home protection plus custom per-device protection setups
+- Local DNS records, per-protection exceptions, and curated blocklists
 - Upstream DNS selection with live latency comparisons
 - DNS cache and upstream-resolution visibility
 - Clear explanations for why requests were allowed or blocked
@@ -49,7 +50,7 @@ Invoke-WebRequest https://raw.githubusercontent.com/derek-diaz/Faro/main/docker-
 docker compose up -d
 ```
 
-Open `http://YOUR-FARO-IP:1787`, complete the guided setup, then configure your router's DHCP DNS server to use `YOUR-FARO-IP`.
+Open `http://YOUR-FARO-IP:1787` and create the administrator account. First-run setup remains open until that account is created, then Faro closes account creation automatically. Complete the guided setup, then configure your router's DHCP DNS server to use `YOUR-FARO-IP`.
 
 | Port | Protocol | Purpose |
 | --- | --- | --- |

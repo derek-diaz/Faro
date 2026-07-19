@@ -35,6 +35,14 @@ FARO_VERSION=latest
 
 The API remains inside the Compose network and is accessed through the web container. It is not exposed as a separate host port. Use a nonstandard DNS port only for testing because routers normally cannot specify a port other than `53`.
 
+Faro automatically accepts DNS clients from standard home and private networks while preventing an accidentally internet-exposed host from becoming an open resolver. Most installations need no configuration. Advanced networks using another routed IPv4 or IPv6 prefix can add it under **Settings → DNS & interface → Network access → Advanced**.
+
+## Protection setups
+
+**Home** is Faro's network default. Existing blocklist and exception choices are migrated into Home automatically. Use the separate **Blocklists** page to install, update, pause, or remove shared filtering sources. Under **Protection**, you can create additional named setups, choose an icon, select from those installed blocklists, add allow or block exceptions, and assign observed devices. Devices that are not assigned elsewhere always fall back to Home.
+
+Device assignment uses the DNS client's source IP address. Give important devices stable DHCP leases so their protection remains predictable. If a router proxies every DNS request through its own address, Faro sees the router as one client and cannot apply different protection to the devices behind it.
+
 ## Verify the installation
 
 Check container health:
@@ -199,7 +207,7 @@ To run the full development stack in containers with hot reload:
 docker compose -f docker-compose.dev.yml up --build
 ```
 
-Open `http://localhost:1787`. Vite applies frontend edits with hot module replacement, while Air rebuilds and restarts the Go API after Go source changes. The Compose file uses polling for reliable file watching through Docker Desktop bind mounts. Stop the stack with `Ctrl-C`, or run `make dev-down` from another terminal.
+Open `http://localhost:1787`. Vite applies frontend edits with hot module replacement, while Air rebuilds and restarts the Go API after Go source changes. Both watchers use polling for reliable Windows and macOS bind-mount detection through Docker Desktop. Stop the stack with `Ctrl-C`, or run `make dev-down` from another terminal.
 
 Development DNS is published on host port `5354` by default to avoid privileged/system DNS listeners. Test it with `dig @127.0.0.1 -p 5354 example.com`, or set `FARO_DEV_DNS_PORT` to another available port. You can also use `make dev` as a shortcut for the command above.
 

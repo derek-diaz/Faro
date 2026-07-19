@@ -15,6 +15,8 @@ func (s *Handler) reload(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	if err := s.reloader.Apply(r.Context()); err != nil {
 		s.recordEvent(r.Context(), eventInput{
 			Type:        "dns.reload_failed",

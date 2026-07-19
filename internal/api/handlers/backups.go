@@ -62,6 +62,8 @@ func (s *Handler) backupRestore(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
 	r.Body = http.MaxBytesReader(w, r.Body, farobackup.MaxUploadBytes+(1<<20))
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeBadRequest(w, errors.New("backup upload is invalid or too large"))

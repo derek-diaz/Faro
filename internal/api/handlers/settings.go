@@ -1,11 +1,16 @@
 package handlers
 
 import (
+	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/derek/faro/internal/db"
 )
 
 func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
@@ -19,11 +24,14 @@ func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 		writeRows(w, rows)
 	case http.MethodPut:
+		s.configMu.Lock()
+		defer s.configMu.Unlock()
 		var input map[string]string
 		if !decode(w, r, &input) {
 			return
 		}
 		oldUpstream := settingValue(r.Context(), s.store.DB, "upstream_dns")
+		previous := map[string]*string{}
 		requiresReload := false
 		tx, err := s.store.DB.BeginTx(r.Context(), nil)
 		if err != nil {
@@ -33,7 +41,17 @@ func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
 		defer tx.Rollback()
 		for key, value := range input {
 			switch key {
-			case "upstream_dns", "local_domain_suffix", "faro_lan_ip", "retention_days", "favicon_fetching_enabled", "dns_cache_enabled", "dns_cache_ttl", "onboarding_completed":
+			case "upstream_dns", "local_domain_suffix", "faro_lan_ip", "retention_days", "favicon_fetching_enabled", "dns_cache_enabled", "dns_cache_ttl", "allowed_client_cidrs", "onboarding_completed":
+				var oldValue string
+				if scanErr := tx.QueryRowContext(r.Context(), `SELECT value FROM settings WHERE key = ?`, key).Scan(&oldValue); scanErr == nil {
+					copyValue := oldValue
+					previous[key] = &copyValue
+				} else if scanErr == sql.ErrNoRows {
+					previous[key] = nil
+				} else {
+					writeError(w, scanErr)
+					return
+				}
 				if key == "onboarding_completed" && value != "true" && value != "false" {
 					writeBadRequest(w, errors.New("onboarding_completed must be true or false"))
 					return
@@ -63,13 +81,44 @@ func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 				}
-				if key == "upstream_dns" || key == "local_domain_suffix" || key == "dns_cache_enabled" || key == "dns_cache_ttl" {
+				if key == "upstream_dns" {
+					normalized, upstreamErr := normalizeUpstreamAddresses(value)
+					if upstreamErr != nil {
+						writeBadRequest(w, upstreamErr)
+						return
+					}
+					value = normalized
+				}
+				if key == "local_domain_suffix" {
+					suffix := strings.Trim(strings.TrimSpace(value), ".")
+					if suffix == "" || strings.Contains(suffix, ".") {
+						writeBadRequest(w, errors.New("local_domain_suffix must be one DNS label such as home or lan"))
+						return
+					}
+					if _, normalizeErr := db.NormalizeDomain("host." + suffix); normalizeErr != nil {
+						writeBadRequest(w, errors.New("local_domain_suffix must be a valid DNS label"))
+						return
+					}
+					value = strings.ToLower(suffix)
+				}
+				if key == "allowed_client_cidrs" {
+					normalized, cidrErr := normalizeClientCIDRs(value)
+					if cidrErr != nil {
+						writeBadRequest(w, cidrErr)
+						return
+					}
+					value = normalized
+				}
+				if key == "upstream_dns" || key == "local_domain_suffix" || key == "dns_cache_enabled" || key == "dns_cache_ttl" || key == "allowed_client_cidrs" {
 					requiresReload = true
 				}
 				if _, err := tx.ExecContext(r.Context(), `INSERT INTO settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, key, value); err != nil {
 					writeError(w, err)
 					return
 				}
+			default:
+				writeBadRequest(w, fmt.Errorf("unknown setting %q", key))
+				return
 			}
 		}
 		if err := tx.Commit(); err != nil {
@@ -78,6 +127,9 @@ func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
 		}
 		if requiresReload {
 			if err := s.reloader.Apply(r.Context()); err != nil {
+				rollbackCtx := context.WithoutCancel(r.Context())
+				s.restoreSettings(rollbackCtx, previous)
+				_ = s.reloader.Apply(rollbackCtx)
 				s.recordEvent(r.Context(), eventInput{
 					Type:        "dns.reload_failed",
 					Severity:    "critical",
@@ -113,4 +165,65 @@ func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+func normalizeClientCIDRs(value string) (string, error) {
+	seen := map[string]bool{}
+	var normalized []string
+	for _, raw := range strings.Split(value, ",") {
+		candidate := strings.TrimSpace(raw)
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		_, network, err := net.ParseCIDR(candidate)
+		if err != nil {
+			return "", errors.New("allowed_client_cidrs must contain valid comma-separated CIDR ranges")
+		}
+		canonical := network.String()
+		if !seen[canonical] {
+			seen[canonical] = true
+			normalized = append(normalized, canonical)
+		}
+	}
+	if len(normalized) == 0 {
+		return "", errors.New("allowed_client_cidrs must contain at least one CIDR range")
+	}
+	return strings.Join(normalized, ","), nil
+}
+
+func normalizeUpstreamAddresses(value string) (string, error) {
+	seen := map[string]bool{}
+	var normalized []string
+	for _, raw := range strings.Split(value, ",") {
+		address := net.ParseIP(strings.TrimSpace(raw))
+		if address == nil {
+			return "", errors.New("upstream_dns must contain valid comma-separated IPv4 or IPv6 addresses")
+		}
+		canonical := address.String()
+		if !seen[canonical] {
+			seen[canonical] = true
+			normalized = append(normalized, canonical)
+		}
+	}
+	if len(normalized) == 0 || len(normalized) > 15 {
+		return "", errors.New("upstream_dns must contain between 1 and 15 addresses")
+	}
+	return strings.Join(normalized, ","), nil
+}
+
+func (s *Handler) restoreSettings(ctx context.Context, previous map[string]*string) {
+	tx, err := s.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	for key, value := range previous {
+		if value == nil {
+			_, _ = tx.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, key)
+			continue
+		}
+		_, _ = tx.ExecContext(ctx, `INSERT INTO settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`, key, *value)
+	}
+	_ = tx.Commit()
 }

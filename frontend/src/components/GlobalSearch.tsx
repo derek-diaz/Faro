@@ -76,7 +76,7 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
         setPage("records");
         break;
       case "rules":
-        setPage("lists");
+        setPage("protection");
         break;
       case "blocklists":
         setPage("blocklists");

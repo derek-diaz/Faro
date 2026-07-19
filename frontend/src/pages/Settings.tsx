@@ -25,6 +25,7 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [passwordVisible, setPasswordVisible] = useState(false);
+  const [advancedNetworkOpen, setAdvancedNetworkOpen] = useState(false);
 
   useEffect(() => {
     const values = Object.fromEntries(settings.map((setting) => [setting.key, setting.value]));
@@ -59,6 +60,7 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
         faro_lan_ip: form.faro_lan_ip || "",
         dns_cache_enabled: form.dns_cache_enabled || "true",
         dns_cache_ttl: form.dns_cache_ttl || "300",
+        allowed_client_cidrs: form.allowed_client_cidrs || "127.0.0.0/8,10.0.0.0/8,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7,fe80::/10",
         favicon_fetching_enabled: form.favicon_fetching_enabled || "false"
       });
       await refresh();
@@ -173,6 +175,22 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
 
               <SettingRow icon={<Network size={19} />} title="Faro LAN address" description="Fixed address distributed to devices as their DNS server.">
                 <input className="settings-short-input" value={form.faro_lan_ip ?? ""} onChange={(event) => setForm({ ...form, faro_lan_ip: event.target.value })} placeholder="192.168.1.20" required />
+              </SettingRow>
+
+              <SettingRow icon={<ShieldCheck size={19} />} title="Network access" description="Faro automatically accepts DNS requests from devices on home and private networks.">
+                <div className="settings-network-access">
+                  <div className="settings-network-access-summary">
+                    <span className="settings-access-badge"><Check size={13} /> Home networks</span>
+                    <button type="button" className="secondary" aria-expanded={advancedNetworkOpen} onClick={() => setAdvancedNetworkOpen((open) => !open)}>{advancedNetworkOpen ? "Hide advanced" : "Advanced"}</button>
+                  </div>
+                  {advancedNetworkOpen && (
+                    <label className="settings-network-advanced">
+                      <span>Custom network ranges</span>
+                      <textarea className="settings-cidr-input" rows={4} value={form.allowed_client_cidrs ?? ""} onChange={(event) => setForm({ ...form, allowed_client_cidrs: event.target.value })} aria-label="Custom allowed DNS client network ranges" />
+                      <small>Most people never need this. Only change these ranges if your network uses addresses outside standard home networks.</small>
+                    </label>
+                  )}
+                </div>
               </SettingRow>
 
               <SettingRow icon={<Gauge size={19} />} title="DNS response cache" description="Keep repeated answers local to reduce latency and upstream traffic.">

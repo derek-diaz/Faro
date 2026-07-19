@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,11 +31,12 @@ const (
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{3,64}$`)
 
 type Manager struct {
-	store     *db.Store
-	now       func() time.Time
-	dummyHash []byte
-	mu        sync.Mutex
-	failures  map[string]failureState
+	store      *db.Store
+	now        func() time.Time
+	dummyHash  []byte
+	trustProxy bool
+	mu         sync.Mutex
+	failures   map[string]failureState
 }
 
 type failureState struct {
@@ -68,7 +70,7 @@ func UserID(ctx context.Context) (int64, bool) {
 
 func NewManager(store *db.Store) *Manager {
 	dummyHash, _ := bcrypt.GenerateFromPassword([]byte("faro-invalid-login-comparison"), bcrypt.DefaultCost)
-	return &Manager{store: store, now: time.Now, dummyHash: dummyHash, failures: map[string]failureState{}}
+	return &Manager{store: store, now: time.Now, dummyHash: dummyHash, trustProxy: strings.EqualFold(os.Getenv("FARO_TRUST_PROXY"), "true"), failures: map[string]failureState{}}
 }
 
 func (m *Manager) Status(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +87,7 @@ func (m *Manager) Status(w http.ResponseWriter, r *http.Request) {
 	payload := map[string]any{
 		"configured":          configured,
 		"authenticated":       authenticated,
-		"onboarding_complete": m.onboardingComplete(r.Context()),
+		"onboarding_complete": m.OnboardingComplete(r.Context()),
 	}
 	if authenticated {
 		payload["username"] = user.Username
@@ -93,7 +95,7 @@ func (m *Manager) Status(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, payload)
 }
 
-func (m *Manager) onboardingComplete(ctx context.Context) bool {
+func (m *Manager) OnboardingComplete(ctx context.Context) bool {
 	var value string
 	if err := m.store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'onboarding_completed'`).Scan(&value); err != nil {
 		return false
@@ -382,6 +384,11 @@ func (m *Manager) failureKey(r *http.Request, username string) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
+	}
+	if m.trustProxy {
+		if forwarded := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); forwarded != nil {
+			host = forwarded.String()
+		}
 	}
 	return strings.ToLower(strings.TrimSpace(username)) + "|" + host
 }

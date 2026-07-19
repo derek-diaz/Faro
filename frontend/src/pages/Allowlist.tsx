@@ -51,7 +51,7 @@ export function Allowlist({ entries, refresh }: AllowlistProps) {
 
       <section className="panel allowlist-panel">
         <div className="allowlist-heading">
-          <div><h2>Always allow</h2><p>Faro excludes these domains from every blocking source.</p></div>
+          <div><h2>Always allow</h2><p>Faro excludes each exact hostname from every blocking source. Add subdomains separately.</p></div>
           <form className="allowlist-add-form" onSubmit={(event) => void add(event)}>
             <input required value={domain} onChange={(event) => setDomain(event.target.value)} placeholder="example.com" aria-label="Domain to always allow" />
             <button type="submit" disabled={busy || !domain.trim()}><Plus size={16} /><span>Add exception</span></button>

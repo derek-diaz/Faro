@@ -11,6 +11,7 @@ services:
       FARO_COREDNS_CONFIG_DIR: /coredns
       FARO_COREDNS_LOG_PATH: /var/log/coredns/query.log
       FARO_COREDNS_METRICS_URL: http://dns:9153/metrics
+      FARO_TRUST_PROXY: "true"
     volumes:
       - .:/app
       - faro-data:/data

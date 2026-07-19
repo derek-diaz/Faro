@@ -19,7 +19,7 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { api, type DeviceReplay as DeviceReplayData, type DeviceSummary, type DNSQuery, type ReplayBucket } from "../api/client";
+import { api, type DeviceReplay as DeviceReplayData, type DeviceSummary, type DNSQuery, type Protection, type ReplayBucket } from "../api/client";
 import { DeviceReplay } from "../components/DeviceReplay";
 import { DomainFavicon } from "../components/DomainFavicon";
 import { EmptyState } from "../components/EmptyState";
@@ -28,6 +28,7 @@ import { TrafficChart } from "../components/TrafficChart";
 
 type DevicesProps = {
   devices: DeviceSummary[];
+  protections: Protection[];
   refresh: () => Promise<void>;
   selectedClientIP: string | null;
   onSelectClient: (clientIP: string | null) => void;
@@ -36,7 +37,7 @@ type DevicesProps = {
 
 type DeviceView = "overview" | "replay";
 
-export function Devices({ devices, refresh, selectedClientIP, onSelectClient, onDomainSelect }: DevicesProps) {
+export function Devices({ devices, protections, refresh, selectedClientIP, onSelectClient, onDomainSelect }: DevicesProps) {
   const [detail, setDetail] = useState<DeviceSummary | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
@@ -44,6 +45,7 @@ export function Devices({ devices, refresh, selectedClientIP, onSelectClient, on
   const [editing, setEditing] = useState(false);
   const [view, setView] = useState<DeviceView>("overview");
   const [search, setSearch] = useState("");
+  const [protectionBusy, setProtectionBusy] = useState(false);
   const mostActiveDevice = useMemo(() => devices.reduce<DeviceSummary | null>((current, device) => {
     if (!current || device.total_queries_today > current.total_queries_today) return device;
     return current;
@@ -121,6 +123,21 @@ export function Devices({ devices, refresh, selectedClientIP, onSelectClient, on
     setDetail(await api.device(selectedClientIP));
   }
 
+  async function changeProtection(protectionID: number) {
+    if (!selectedClientIP) return;
+    setProtectionBusy(true);
+    setDetailError("");
+    try {
+      await api.assignDeviceProtection(selectedClientIP, protectionID);
+      await refresh();
+      setDetail(await api.device(selectedClientIP));
+    } catch (caught) {
+      setDetailError(caught instanceof Error ? caught.message : "Could not change protection.");
+    } finally {
+      setProtectionBusy(false);
+    }
+  }
+
   if (devices.length === 0) {
     return <EmptyState title="No devices yet" body="Point a device or router at Faro to start seeing clients, names, blocked requests, and top domains." />;
   }
@@ -150,7 +167,7 @@ export function Devices({ devices, refresh, selectedClientIP, onSelectClient, on
 
         <div className="device-table">
           <div className="device-table-header" aria-hidden="true">
-            <span>Device</span><span>Requests today</span><span>Blocked</span><span>Last seen</span><span>Profile</span><span />
+            <span>Device</span><span>Requests today</span><span>Blocked</span><span>Last seen</span><span>Protection</span><span />
           </div>
           {filteredDevices.map((device) => (
             <button
@@ -197,7 +214,16 @@ export function Devices({ devices, refresh, selectedClientIP, onSelectClient, on
                     <div className="device-detail-identity">
                       <span className="device-detail-icon">{deviceTypeIcon(detail.device_type)}</span>
                       <div>
-                        <div className="device-detail-context"><span className="device-profile-badge">{detail.profile} profile</span><span>{detail.client_ip}</span></div>
+                        <div className="device-detail-context">
+                          <label className="device-protection-select">
+                            <ShieldCheck size={14} />
+                            <span className="sr-only">Protection</span>
+                            <select value={detail.protection_id} disabled={protectionBusy} onChange={(event) => void changeProtection(Number(event.target.value))}>
+                              {protections.map((protection) => <option key={protection.id} value={protection.id}>{protection.name}</option>)}
+                            </select>
+                          </label>
+                          <span>{detail.client_ip}</span>
+                        </div>
                         <h2>{deviceDisplayName(detail)}</h2>
                         <p>{detail.device_type} · {deviceIdentityDescription(detail)}</p>
                       </div>

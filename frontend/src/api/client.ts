@@ -14,6 +14,7 @@ export type Blocklist = {
   url: string;
   enabled: boolean;
   entry_count: number;
+  protection_count?: number;
   last_refreshed_at?: string | null;
   created_at?: string;
   updated_at?: string;
@@ -23,6 +24,30 @@ export type DomainEntry = {
   id: number;
   domain: string;
   created_at?: string;
+};
+
+export type Protection = {
+  id: number;
+  name: string;
+  icon: ProtectionIconKey;
+  is_default: boolean;
+  blocklist_ids: number[];
+  allow_entries: DomainEntry[];
+  block_entries: DomainEntry[];
+  device_ips: string[];
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type ProtectionIconKey = "house" | "users" | "baby" | "guest" | "tv" | "gamepad" | "smartphone" | "laptop" | "briefcase" | "lightbulb" | "cpu" | "shield";
+
+export type ProtectionInput = {
+  name: string;
+  icon: ProtectionIconKey;
+  blocklist_ids: number[];
+  allow_domains: string[];
+  block_domains: string[];
+  device_ips: string[];
 };
 
 export type DNSQuery = {
@@ -55,6 +80,7 @@ export type DecisionLocalRecord = {
 export type DNSDecision = {
   action?: "allowed" | "blocked";
   reason?: string;
+  protection?: DecisionRule;
   allowlist?: DecisionRule;
   manual_block?: DecisionRule;
   blocklists?: DecisionRule[];
@@ -81,6 +107,9 @@ export type DeviceSummary = {
   last_seen?: string | null;
   first_seen?: string | null;
   profile: string;
+  protection?: string;
+  protection_id: number;
+  protection_icon: ProtectionIconKey;
   recent_activity?: DNSQuery[];
 };
 
@@ -386,13 +415,21 @@ export const api = {
     request<{ ok: boolean }>(`/api/dns-records/${record.id}`, { method: "PUT", body: JSON.stringify(record) }),
   deleteRecord: (id: number) => request<{ ok: boolean }>(`/api/dns-records/${id}`, { method: "DELETE" }),
   blocklists: () => request<Blocklist[]>("/api/blocklists"),
-  createBlocklist: (blocklist: { name: string; url: string; enabled: boolean }) =>
+  createBlocklist: (blocklist: { name: string; url: string; enabled: boolean; assign_to_default?: boolean }) =>
     request<{ id: number }>("/api/blocklists", { method: "POST", body: JSON.stringify(blocklist) }),
   updateBlocklist: (blocklist: Blocklist) =>
     request<{ ok: boolean }>(`/api/blocklists/${blocklist.id}`, { method: "PUT", body: JSON.stringify(blocklist) }),
   refreshBlocklist: (id: number) => request<{ entry_count: number }>(`/api/blocklists/${id}/refresh`, { method: "POST" }),
   refreshBlocklists: () => request<{ updated: number; entry_count: number }>("/api/blocklists/refresh", { method: "POST" }),
   deleteBlocklist: (id: number) => request<{ ok: boolean }>(`/api/blocklists/${id}`, { method: "DELETE" }),
+  protections: () => request<Protection[]>("/api/protections"),
+  createProtection: (protection: ProtectionInput) =>
+    request<{ id: number }>("/api/protections", { method: "POST", body: JSON.stringify(protection) }),
+  updateProtection: (id: number, protection: ProtectionInput) =>
+    request<{ ok: boolean }>(`/api/protections/${id}`, { method: "PUT", body: JSON.stringify(protection) }),
+  deleteProtection: (id: number) => request<{ ok: boolean }>(`/api/protections/${id}`, { method: "DELETE" }),
+  assignDeviceProtection: (clientIP: string, protectionID: number) =>
+    request<{ ok: boolean }>(`/api/devices/${encodeURIComponent(clientIP)}/protection`, { method: "PUT", body: JSON.stringify({ protection_id: protectionID }) }),
   allowlist: () => request<DomainEntry[]>("/api/allowlist"),
   blockDomains: () => request<DomainEntry[]>("/api/blocklist-domains"),
   addAllow: (domain: string) => request<{ id: number }>("/api/allowlist", { method: "POST", body: JSON.stringify({ domain }) }),

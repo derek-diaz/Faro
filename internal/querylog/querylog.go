@@ -3,7 +3,10 @@ package querylog
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -35,8 +38,8 @@ type Tailer struct {
 }
 
 type logCursor struct {
-	info   os.FileInfo
-	offset int64
+	Identity string `json:"identity"`
+	Offset   int64  `json:"offset"`
 }
 
 func NewTailer(store *db.Store, path string) *Tailer {
@@ -47,7 +50,11 @@ func (t *Tailer) Run(ctx context.Context) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	cursor := cursorAtEnd(t.Path)
+	cursor, loaded := loadCursor(t.Path + ".cursor")
+	if !loaded {
+		cursor = cursorAtEnd(t.Path)
+		_ = saveCursor(t.Path+".cursor", cursor)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -61,16 +68,24 @@ func (t *Tailer) Run(ctx context.Context) {
 				continue
 			}
 			cursor = next
+			if err := saveCursor(t.Path+".cursor", cursor); err != nil {
+				log.Printf("query log cursor save failed: %v", err)
+			}
 		}
 	}
 }
 
 func cursorAtEnd(path string) logCursor {
-	stat, err := os.Stat(path)
+	file, err := os.Open(path)
 	if err != nil {
 		return logCursor{}
 	}
-	return logCursor{info: stat, offset: stat.Size()}
+	defer file.Close()
+	stat, err := file.Stat()
+	if err != nil {
+		return logCursor{}
+	}
+	return logCursor{Identity: fileIdentity(file), Offset: stat.Size()}
 }
 
 func (t *Tailer) readAvailable(ctx context.Context, cursor logCursor) (logCursor, error) {
@@ -85,8 +100,9 @@ func (t *Tailer) readAvailable(ctx context.Context, cursor logCursor) (logCursor
 		return cursor, err
 	}
 
-	if cursor.info == nil || os.SameFile(cursor.info, currentInfo) {
-		offset := cursor.offset
+	currentIdentity := fileIdentity(file)
+	if cursor.Identity == "" || cursor.Identity == currentIdentity {
+		offset := cursor.Offset
 		if currentInfo.Size() < offset {
 			offset = 0
 		}
@@ -94,12 +110,12 @@ func (t *Tailer) readAvailable(ctx context.Context, cursor logCursor) (logCursor
 		if err != nil {
 			return cursor, err
 		}
-		return logCursor{info: currentInfo, offset: position}, nil
+		return logCursor{Identity: currentIdentity, Offset: position}, nil
 	}
 
-	rotatedIndex := findRotatedIndex(t.Path, cursor.info)
+	rotatedIndex := findRotatedIndex(t.Path, cursor.Identity)
 	if rotatedIndex > 0 {
-		if _, err := t.readPath(ctx, rotatedPath(t.Path, rotatedIndex), cursor.offset); err != nil {
+		if _, err := t.readPath(ctx, rotatedPath(t.Path, rotatedIndex), cursor.Offset); err != nil {
 			return cursor, err
 		}
 		for index := rotatedIndex - 1; index >= 1; index-- {
@@ -115,7 +131,7 @@ func (t *Tailer) readAvailable(ctx context.Context, cursor logCursor) (logCursor
 	if err != nil {
 		return cursor, err
 	}
-	return logCursor{info: currentInfo, offset: position}, nil
+	return logCursor{Identity: currentIdentity, Offset: position}, nil
 }
 
 func (t *Tailer) readPath(ctx context.Context, path string, offset int64) (int64, error) {
@@ -146,7 +162,7 @@ func (t *Tailer) readOpenFile(ctx context.Context, file *os.File, offset int64) 
 	return position, nil
 }
 
-func findRotatedIndex(path string, info os.FileInfo) int {
+func findRotatedIndex(path, identity string) int {
 	matches, err := filepath.Glob(path + ".*")
 	if err != nil {
 		return 0
@@ -156,12 +172,72 @@ func findRotatedIndex(path string, info os.FileInfo) int {
 		if err != nil || index < 1 {
 			continue
 		}
-		candidate, err := os.Stat(match)
-		if err == nil && os.SameFile(info, candidate) {
+		candidate, err := os.Open(match)
+		if err == nil && fileIdentity(candidate) == identity {
+			_ = candidate.Close()
 			return index
+		}
+		if candidate != nil {
+			_ = candidate.Close()
 		}
 	}
 	return 0
+}
+
+func fileIdentity(file *os.File) string {
+	if file == nil {
+		return ""
+	}
+	position, _ := file.Seek(0, 1)
+	_, _ = file.Seek(0, 0)
+	reader := bufio.NewReader(io.LimitReader(file, 4096))
+	firstLine, _ := reader.ReadBytes('\n')
+	_, _ = file.Seek(position, 0)
+	if len(firstLine) == 0 {
+		return "empty"
+	}
+	sum := sha256.Sum256(firstLine)
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func loadCursor(path string) (logCursor, bool) {
+	input, err := os.Open(path)
+	if err != nil {
+		return logCursor{}, false
+	}
+	defer input.Close()
+	var cursor logCursor
+	if json.NewDecoder(io.LimitReader(input, 4096)).Decode(&cursor) != nil || cursor.Offset < 0 {
+		return logCursor{}, false
+	}
+	return cursor, true
+}
+
+func saveCursor(path string, cursor logCursor) error {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o755); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(directory, ".query-cursor-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempName := temp.Name()
+	defer os.Remove(tempName)
+	if err := json.NewEncoder(temp).Encode(cursor); err != nil {
+		_ = temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tempName, path); err == nil {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(tempName, path)
 }
 
 func rotatedPath(path string, index int) string {
@@ -174,7 +250,7 @@ func (t *Tailer) insert(ctx context.Context, line string) {
 		return
 	}
 
-	decision := coredns.ExplainDomain(ctx, t.Store, entry.domain)
+	decision := coredns.ExplainDomainForClient(ctx, t.Store, entry.domain, entry.clientIP)
 	action := decision.Action
 	source := ""
 	if action == "blocked" {

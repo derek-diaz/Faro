@@ -72,6 +72,9 @@ func TestInsertPersistsDecisionSnapshot(t *testing.T) {
 	if _, err := store.DB.Exec(`INSERT INTO blocklist_entries(blocklist_id, domain) VALUES(?, 'telemetry.example')`, listID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.DB.Exec(`INSERT INTO protection_blocklists(protection_id, blocklist_id) SELECT id, ? FROM protection_profiles WHERE is_default = 1`, listID); err != nil {
+		t.Fatal(err)
+	}
 
 	tailer := NewTailer(store, "")
 	tailer.insert(context.Background(), `[INFO] FARO|192.168.7.22|A|telemetry.example.|NOERROR|0.000250s|-`)
@@ -156,5 +159,39 @@ func TestTailerFinishesRotatedLogBeforeReadingCurrentLog(t *testing.T) {
 	}
 	if skipped != 0 {
 		t.Fatal("tailer re-ingested data from before its saved offset")
+	}
+}
+
+func TestPersistedCursorIngestsOnlyQueriesWrittenDuringRestart(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	logPath := filepath.Join(t.TempDir(), "query.log")
+	before := "[INFO] FARO|192.168.7.20|A|before-restart.example.|NOERROR|1ms|udp://1.1.1.1:53\n"
+	if err := os.WriteFile(logPath, []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveCursor(logPath+".cursor", cursorAtEnd(logPath)); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(logPath, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = file.WriteString("[INFO] FARO|192.168.7.20|A|during-restart.example.|NOERROR|2ms|udp://1.1.1.1:53\n")
+	_ = file.Close()
+	cursor, ok := loadCursor(logPath + ".cursor")
+	if !ok {
+		t.Fatal("persisted cursor could not be loaded")
+	}
+	tailer := NewTailer(store, logPath)
+	if _, err := tailer.readAvailable(context.Background(), cursor); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM dns_queries`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("ingested count = %d, err = %v", count, err)
 	}
 }

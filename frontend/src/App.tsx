@@ -5,7 +5,7 @@ import {
   type DNSRecord,
   type DashboardSummary,
   type DeviceSummary,
-  type DomainEntry,
+  type Protection,
   type NotificationsResponse,
   type AuthStatus,
   type Setting
@@ -16,16 +16,16 @@ import { Onboarding } from "./components/Onboarding";
 import { GlobalSearch } from "./components/GlobalSearch";
 import { Layout } from "./components/Layout";
 import { NotificationDrawer } from "./components/NotificationDrawer";
-import { Blocklists } from "./pages/Blocklists";
-import { Allowlist } from "./pages/Allowlist";
 import { Dashboard } from "./pages/Dashboard";
+import { Blocklists } from "./pages/Blocklists";
 import { Devices } from "./pages/Devices";
 import { LocalDns } from "./pages/LocalDns";
 import { QueryLog } from "./pages/QueryLog";
+import { ProtectionPage } from "./pages/Protection";
 import { Settings } from "./pages/Settings";
 import { Upstreams } from "./pages/Upstreams";
 
-export type Page = "dashboard" | "queries" | "devices" | "records" | "upstreams" | "blocklists" | "lists" | "settings";
+export type Page = "dashboard" | "queries" | "devices" | "records" | "upstreams" | "protection" | "blocklists" | "settings";
 
 const pagePaths: Record<Page, string> = {
   dashboard: "/",
@@ -33,8 +33,8 @@ const pagePaths: Record<Page, string> = {
   devices: "/devices",
   records: "/local-dns",
   upstreams: "/upstreams",
+  protection: "/protection",
   blocklists: "/blocklists",
-  lists: "/allowlist",
   settings: "/settings"
 };
 
@@ -44,8 +44,8 @@ const pageLabels: Record<Page, string> = {
   devices: "Devices",
   records: "Local DNS",
   upstreams: "Upstreams",
+  protection: "Protection",
   blocklists: "Blocklists",
-  lists: "Allowlist",
   settings: "Settings"
 };
 
@@ -100,8 +100,7 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
   const [records, setRecords] = useState<DNSRecord[]>([]);
   const [blocklists, setBlocklists] = useState<Blocklist[]>([]);
-  const [allowlist, setAllowlist] = useState<DomainEntry[]>([]);
-  const [manualBlocks, setManualBlocks] = useState<DomainEntry[]>([]);
+  const [protections, setProtections] = useState<Protection[]>([]);
   const [settings, setSettings] = useState<Setting[]>([]);
   const [notifications, setNotifications] = useState<NotificationsResponse>({ attention_count: 0, unread_count: 0, items: [] });
   const [loading, setLoading] = useState(true);
@@ -117,14 +116,13 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
     setLoading(true);
     setError(null);
     try {
-      const [nextSummary, nextDevices, nextRecords, nextBlocklists, nextAllowlist, nextBlocks, nextSettings, nextNotifications] =
+      const [nextSummary, nextDevices, nextRecords, nextBlocklists, nextProtections, nextSettings, nextNotifications] =
         await Promise.all([
         api.dashboard(),
         api.devices(),
         api.records(),
         api.blocklists(),
-        api.allowlist(),
-        api.blockDomains(),
+        api.protections(),
         api.settings(),
         api.notifications()
       ]);
@@ -132,8 +130,7 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
       setDevices(nextDevices);
       setRecords(nextRecords);
       setBlocklists(nextBlocklists);
-      setAllowlist(nextAllowlist);
-      setManualBlocks(nextBlocks);
+      setProtections(nextProtections);
       setSettings(nextSettings);
       setNotifications(nextNotifications);
     } catch (caught) {
@@ -192,6 +189,7 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
         setDevices(await api.devices());
       }
       setNotifications(await api.notifications());
+      setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to refresh live data");
     }
@@ -310,6 +308,7 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
         return (
           <Devices
             devices={devices}
+            protections={protections}
             refresh={refreshDevices}
             selectedClientIP={selectedClientIP}
             onSelectClient={selectDevice}
@@ -317,13 +316,13 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
           />
         );
       case "records":
-        return <LocalDns records={records} refresh={loadAll} />;
+        return <LocalDns records={records} settings={settings} refresh={loadAll} />;
       case "upstreams":
         return <Upstreams settings={settings} refresh={loadAll} />;
+      case "protection":
+        return <ProtectionPage protections={protections} blocklists={blocklists} devices={devices} refresh={loadAll} onManageBlocklists={() => navigateToPage("blocklists")} />;
       case "blocklists":
-        return <Blocklists blocklists={blocklists} manualBlocks={manualBlocks} refresh={loadAll} />;
-      case "lists":
-        return <Allowlist entries={allowlist} refresh={loadAll} />;
+        return <Blocklists blocklists={blocklists} refresh={loadAll} />;
       case "settings":
         return <Settings settings={settings} refresh={loadAll} onManageUpstreams={() => navigateToPage("upstreams")} />;
     }
@@ -392,7 +391,7 @@ function readRoute(): AppRoute {
     return { page: "devices", clientIP: null, domain, canonicalPath: withDomain(pagePaths.devices, domain) };
   }
 
-  const legacyPages: Record<string, Page> = { "/query-log": "queries", "/records": "records", "/lists": "lists", "/rules": "lists" };
+  const legacyPages: Record<string, Page> = { "/query-log": "queries", "/records": "records", "/lists": "protection", "/rules": "protection", "/allowlist": "protection" };
   const legacyPage = legacyPages[pathname];
   if (legacyPage) return { page: legacyPage, clientIP: null, domain, canonicalPath: withDomain(pagePaths[legacyPage], domain) };
   return { page: "dashboard", clientIP: null, domain: null, canonicalPath: pagePaths.dashboard };

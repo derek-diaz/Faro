@@ -1,19 +1,18 @@
-import { AlertCircle, Ban, Check, CheckCircle2, Database, Download, Plus, RefreshCw, Search, ShieldCheck, Trash2, X } from "lucide-react";
+import { AlertCircle, Check, CheckCircle2, Database, Download, Filter, Info, Plus, RefreshCw, Search, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import { useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { api, type Blocklist, type DomainEntry } from "../api/client";
+import { api, type Blocklist } from "../api/client";
 import { EmptyState } from "../components/EmptyState";
-import { blocklistCatalog, type CatalogBlocklist } from "../data/blocklists";
+import { blocklistCatalog, blocklistCategories, type BlocklistCategory, type CatalogBlocklist } from "../data/blocklists";
 
 type BlocklistsProps = {
   blocklists: Blocklist[];
-  manualBlocks: DomainEntry[];
   refresh: () => Promise<void>;
 };
 
 type View = "installed" | "available";
 type Notice = { tone: "success" | "error"; text: string } | null;
 
-export function Blocklists({ blocklists, manualBlocks, refresh }: BlocklistsProps) {
+export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
   const [view, setView] = useState<View>("installed");
   const [form, setForm] = useState({ name: "", url: "", enabled: true });
   const [showCustom, setShowCustom] = useState(false);
@@ -21,20 +20,26 @@ export function Blocklists({ blocklists, manualBlocks, refresh }: BlocklistsProp
   const [installing, setInstalling] = useState<string | null>(null);
   const [updatingAll, setUpdatingAll] = useState(false);
   const [catalogQuery, setCatalogQuery] = useState("");
-  const [catalogCategory, setCatalogCategory] = useState("All");
+  const [catalogCategory, setCatalogCategory] = useState<"All" | BlocklistCategory>("All");
+  const [catalogProvider, setCatalogProvider] = useState("All");
+  const [catalogCompatibility, setCatalogCompatibility] = useState<"All" | CatalogBlocklist["compatibility"]>("All");
   const [notice, setNotice] = useState<Notice>(null);
-  const [manualDomain, setManualDomain] = useState("");
-  const [manualBusy, setManualBusy] = useState<string | null>(null);
 
   const enabledCount = blocklists.filter((blocklist) => blocklist.enabled).length;
   const entryCount = blocklists.reduce((total, blocklist) => total + (blocklist.entry_count ?? 0), 0);
   const needsUpdate = blocklists.filter((blocklist) => isStale(blocklist.last_refreshed_at)).length;
   const available = useMemo(() => blocklistCatalog.filter((item) => !isInstalled(item, blocklists)), [blocklists]);
-  const filteredCatalog = available.filter((item) => {
+  const catalogProviders = useMemo(() => Array.from(new Set(blocklistCatalog.map((item) => item.provider))).sort(), []);
+  const catalogCandidates = available.filter((item) => {
     const query = catalogQuery.trim().toLowerCase();
-    const matchesQuery = !query || `${item.name} ${item.provider} ${item.description} ${item.tags.join(" ")}`.toLowerCase().includes(query);
-    return matchesQuery && (catalogCategory === "All" || item.category === catalogCategory);
+    const matchesQuery = !query || `${item.name} ${item.provider} ${item.description} ${item.bestFor} ${item.tags.join(" ")}`.toLowerCase().includes(query);
+    const matchesProvider = catalogProvider === "All" || item.provider === catalogProvider;
+    const matchesCompatibility = catalogCompatibility === "All" || item.compatibility === catalogCompatibility;
+    return matchesQuery && matchesProvider && matchesCompatibility;
   });
+  const filteredCatalog = catalogCandidates.filter((item) => catalogCategory === "All" || item.category === catalogCategory);
+  const visibleCategories = blocklistCategories.filter((category) => filteredCatalog.some((item) => item.category === category.id));
+  const hasCatalogFilters = Boolean(catalogQuery || catalogCategory !== "All" || catalogProvider !== "All" || catalogCompatibility !== "All");
 
   async function add(event: FormEvent) {
     event.preventDefault();
@@ -42,13 +47,13 @@ export function Blocklists({ blocklists, manualBlocks, refresh }: BlocklistsProp
     setNotice(null);
     let created = false;
     try {
-      const result = await api.createBlocklist(form);
+      const result = await api.createBlocklist({ ...form, assign_to_default: false });
       created = true;
       await api.refreshBlocklist(result.id);
       setForm({ name: "", url: "", enabled: true });
       setShowCustom(false);
       setView("installed");
-      setNotice({ tone: "success", text: `${form.name} was installed and updated.` });
+      setNotice({ tone: "success", text: `${form.name} was installed. Choose it from a Protection setup when you want to use it.` });
     } catch (caught) {
       setNotice({ tone: "error", text: created ? "The list was added, but its first update failed. Try updating it from Installed." : errorMessage(caught, "Could not add the blocklist.") });
     } finally {
@@ -103,11 +108,11 @@ export function Blocklists({ blocklists, manualBlocks, refresh }: BlocklistsProp
     setNotice(null);
     let created = false;
     try {
-      const result = await api.createBlocklist({ name: item.name, url: item.url, enabled: true });
+      const result = await api.createBlocklist({ name: item.name, url: item.url, enabled: true, assign_to_default: false });
       created = true;
       await api.refreshBlocklist(result.id);
       await refresh();
-      setNotice({ tone: "success", text: `${item.name} was installed and is now active.` });
+      setNotice({ tone: "success", text: `${item.name} was installed. Choose it from a Protection setup when you want to use it.` });
     } catch (caught) {
       await refresh();
       setNotice({ tone: "error", text: created ? `${item.name} was added, but its first update failed.` : errorMessage(caught, `Could not install ${item.name}.`) });
@@ -117,7 +122,9 @@ export function Blocklists({ blocklists, manualBlocks, refresh }: BlocklistsProp
   }
 
   async function remove(blocklist: Blocklist) {
-    if (!window.confirm(`Remove ${blocklist.name}? Its downloaded entries will also be deleted.`)) return;
+    const usage = blocklist.protection_count ?? 0;
+    const impact = usage > 0 ? ` It is used by ${usage} protection setup${usage === 1 ? "" : "s"} and will be removed from ${usage === 1 ? "it" : "them"}.` : "";
+    if (!window.confirm(`Remove ${blocklist.name}? Its downloaded entries will also be deleted.${impact}`)) return;
     setBusy(blocklist.id);
     setNotice(null);
     try {
@@ -128,36 +135,6 @@ export function Blocklists({ blocklists, manualBlocks, refresh }: BlocklistsProp
       setNotice({ tone: "error", text: errorMessage(caught, `Could not remove ${blocklist.name}.`) });
     } finally {
       setBusy(null);
-    }
-  }
-
-  async function addManualBlock(event: FormEvent) {
-    event.preventDefault();
-    setManualBusy("add");
-    setNotice(null);
-    try {
-      await api.addBlock(manualDomain);
-      setManualDomain("");
-      await refresh();
-      setNotice({ tone: "success", text: "Manual domain block added." });
-    } catch (caught) {
-      setNotice({ tone: "error", text: errorMessage(caught, "Could not block the domain.") });
-    } finally {
-      setManualBusy(null);
-    }
-  }
-
-  async function removeManualBlock(entry: DomainEntry) {
-    setManualBusy(String(entry.id));
-    setNotice(null);
-    try {
-      await api.deleteBlock(entry.id);
-      await refresh();
-      setNotice({ tone: "success", text: `${entry.domain} is no longer manually blocked.` });
-    } catch (caught) {
-      setNotice({ tone: "error", text: errorMessage(caught, `Could not remove ${entry.domain}.`) });
-    } finally {
-      setManualBusy(null);
     }
   }
 
@@ -182,12 +159,12 @@ export function Blocklists({ blocklists, manualBlocks, refresh }: BlocklistsProp
             <SummaryItem icon={<ShieldCheck size={17} />} label="Enabled lists" value={String(enabledCount)} />
             <SummaryItem icon={<Database size={17} />} label="List entries" value={formatNumber(entryCount)} />
             <SummaryItem icon={<RefreshCw size={17} />} label="Need update" value={String(needsUpdate)} tone={needsUpdate > 0 ? "warning" : "healthy"} />
-            <SummaryItem icon={<Check size={17} />} label="DNS filtering" value={enabledCount > 0 || manualBlocks.length > 0 ? "Active" : "Off"} tone={enabledCount > 0 || manualBlocks.length > 0 ? "healthy" : "warning"} />
+            <SummaryItem icon={<Check size={17} />} label="Source library" value={enabledCount > 0 ? "Ready" : "Empty"} tone={enabledCount > 0 ? "healthy" : "warning"} />
           </section>
 
           <section className="panel installed-blocklists-panel">
             <div className="installed-list-heading">
-              <div><h2>Installed lists</h2><p>Enable, update, or remove lists currently used by Faro.</p></div>
+              <div><h2>Installed lists</h2><p>Install sources once, then choose where they are used under Protection.</p></div>
               <span>{enabledCount} of {blocklists.length} enabled</span>
             </div>
             {blocklists.length === 0 ? (
@@ -197,7 +174,7 @@ export function Blocklists({ blocklists, manualBlocks, refresh }: BlocklistsProp
                 <div className="installed-blocklist-columns" aria-hidden="true"><span>List</span><span>Entries</span><span>Last updated</span><span>Status</span><span>Actions</span></div>
                 {blocklists.map((blocklist) => (
                   <article className="installed-blocklist-row" key={blocklist.id}>
-                    <div className="installed-list-identity"><span className="blocklist-source-mark">{sourceInitial(blocklist)}</span><div><strong>{blocklist.name}</strong><span>{sourceLabel(blocklist.url)}</span></div></div>
+                    <div className="installed-list-identity"><span className="blocklist-source-mark">{sourceInitial(blocklist)}</span><div><strong>{blocklist.name}</strong><span>{sourceLabel(blocklist.url)} · {usageLabel(blocklist.protection_count)}</span></div></div>
                     <div className="installed-list-metric"><strong>{formatNumber(blocklist.entry_count ?? 0)}</strong><span>entries</span></div>
                     <div className="installed-list-updated"><strong>{formatUpdated(blocklist.last_refreshed_at)}</strong><span>{isStale(blocklist.last_refreshed_at) ? "Update recommended" : "Current"}</span></div>
                     <label className="blocklist-switch" title={blocklist.enabled ? "Disable list" : "Enable list"}>
@@ -214,54 +191,47 @@ export function Blocklists({ blocklists, manualBlocks, refresh }: BlocklistsProp
               </div>
             )}
           </section>
-
-          <section className="panel manual-blocks-panel">
-            <div className="manual-blocks-heading">
-              <div><h2>Manual domain blocks</h2><p>Block individual domains without creating or installing a list.</p></div>
-              <form className="manual-block-form" onSubmit={(event) => void addManualBlock(event)}>
-                <input required value={manualDomain} onChange={(event) => setManualDomain(event.target.value)} placeholder="example.com" aria-label="Domain to block manually" />
-                <button type="submit" disabled={manualBusy !== null || !manualDomain.trim()}><Ban size={16} /><span>Block domain</span></button>
-              </form>
-            </div>
-            {manualBlocks.length === 0 ? (
-              <div className="compact-empty manual-blocks-empty"><strong>No manual blocks</strong><span>Installed blocklists are still active. Add a domain here only when you need a specific override.</span></div>
-            ) : (
-              <div className="manual-block-list">
-                {manualBlocks.map((entry) => (
-                  <div className="manual-block-row" key={entry.id}>
-                    <span className="manual-block-mark"><Ban size={15} /></span>
-                    <strong>{entry.domain}</strong>
-                    <span>{formatEntryDate(entry.created_at)}</span>
-                    <button type="button" className="icon-button danger-icon" title="Remove manual block" aria-label={`Remove manual block for ${entry.domain}`} disabled={manualBusy !== null} onClick={() => void removeManualBlock(entry)}><Trash2 size={16} /></button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
         </>
       ) : (
         <section className="panel blocklist-catalog-panel">
           <div className="catalog-heading">
-            <div><h2>Available blocklists</h2><p>Choose a protection level that fits your network. Installed lists are hidden here.</p></div>
-            <div className="catalog-filters">
-              <label className="catalog-search"><Search size={16} /><input value={catalogQuery} onChange={(event) => setCatalogQuery(event.target.value)} placeholder="Search lists" aria-label="Search available blocklists" /></label>
-              <select value={catalogCategory} onChange={(event) => setCatalogCategory(event.target.value)} aria-label="Filter blocklists by category">
-                {catalogCategories.map((category) => <option key={category} value={category}>{category === "All" ? "All categories" : category}</option>)}
-              </select>
-            </div>
+            <div><h2>Find a blocklist</h2><p>Choose by what you want to protect, not by technical list names.</p></div>
+            <label className="catalog-search"><Search size={16} /><input value={catalogQuery} onChange={(event) => setCatalogQuery(event.target.value)} placeholder="Search by need, provider, or list" aria-label="Search available blocklists" /></label>
+          </div>
+          <div className="catalog-guide">
+            <span className="catalog-guide-icon"><Sparkles size={18} /></span>
+            <div><strong>Start with one everyday list</strong><span>For most homes, that is enough. Add a Security, Privacy, or Content list only when you have a specific need.</span></div>
+          </div>
+          <div className="catalog-refine-row">
+            <span><Filter size={14} /> Refine</span>
+            <label>Category<select value={catalogCategory} onChange={(event) => setCatalogCategory(event.target.value as "All" | BlocklistCategory)} aria-label="Filter blocklists by category"><option value="All">All categories ({catalogCandidates.length})</option>{blocklistCategories.map((category) => <option key={category.id} value={category.id}>{category.label} ({catalogCandidates.filter((item) => item.category === category.id).length})</option>)}</select></label>
+            <label>Provider<select value={catalogProvider} onChange={(event) => setCatalogProvider(event.target.value)} aria-label="Filter blocklists by provider"><option value="All">All providers</option>{catalogProviders.map((provider) => <option key={provider} value={provider}>{provider}</option>)}</select></label>
+            <label>Compatibility<select value={catalogCompatibility} onChange={(event) => setCatalogCompatibility(event.target.value as "All" | CatalogBlocklist["compatibility"])} aria-label="Filter blocklists by compatibility"><option value="All">Any compatibility</option><option value="Easy">Easy to use</option><option value="Balanced">Balanced</option><option value="Advanced">Advanced</option></select></label>
+            {hasCatalogFilters && <button type="button" className="text-action" onClick={() => { setCatalogQuery(""); setCatalogCategory("All"); setCatalogProvider("All"); setCatalogCompatibility("All"); }}>Clear filters</button>}
           </div>
           {filteredCatalog.length === 0 ? (
-            <div className="compact-empty"><strong>No matching lists</strong><span>Try another search or category.</span></div>
+            <div className="compact-empty"><strong>No matching lists</strong><span>Try another search, category, or provider.</span>{hasCatalogFilters && <button type="button" className="secondary" onClick={() => { setCatalogQuery(""); setCatalogCategory("All"); setCatalogProvider("All"); setCatalogCompatibility("All"); }}>Clear filters</button>}</div>
           ) : (
-            <div className="blocklist-catalog-grid">
-              {filteredCatalog.map((item) => (
-                <article className="catalog-blocklist-card" key={item.id}>
-                  <div className="catalog-card-top"><span className="category-badge">{item.category}</span>{item.recommended && <span className="catalog-recommended"><CheckCircle2 size={13} /> Recommended</span>}</div>
-                  <div><h3>{item.name}</h3><span className="catalog-provider">{item.provider} · {item.intensity}</span></div>
-                  <p>{item.description}</p>
-                  <div className="catalog-tags">{item.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
-                  <button type="button" className="secondary catalog-install-button" disabled={installing === item.id} onClick={() => void installCatalog(item)}><Download size={16} /><span>{installing === item.id ? "Installing and updating" : "Install"}</span></button>
-                </article>
+            <div className="blocklist-catalog-sections">
+              {visibleCategories.map((category) => (
+                <section className="catalog-category-section" key={category.id}>
+                  <header><div><h3>{category.label}</h3><p>{category.description}</p></div><span>{filteredCatalog.filter((item) => item.category === category.id).length} available</span></header>
+                  <div className="blocklist-catalog-grid">
+                    {filteredCatalog.filter((item) => item.category === category.id).map((item) => (
+                      <article className={`catalog-blocklist-card ${item.recommended ? "recommended" : ""}`} key={item.id}>
+                        <div className="catalog-card-top"><span className={`compatibility-badge ${item.compatibility.toLowerCase()}`}>{item.compatibility === "Easy" ? "Easy to use" : item.compatibility}</span>{item.recommended && <span className="catalog-recommended"><CheckCircle2 size={13} /> Recommended</span>}</div>
+                        <div><h4>{item.name}</h4><span className="catalog-provider">By {item.provider}</span></div>
+                        <p>{item.description}</p>
+                        <div className="catalog-best-for"><strong>Best for</strong><span>{item.bestFor}</span></div>
+                        {item.caution && <div className="catalog-caution"><Info size={13} /><span>{item.caution}</span></div>}
+                        <div className="catalog-card-footer">
+                          <div className="catalog-tags">{item.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
+                          <button type="button" className="secondary catalog-install-button" disabled={installing === item.id} onClick={() => void installCatalog(item)}><Download size={15} /><span>{installing === item.id ? "Installing" : "Install"}</span></button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </section>
               ))}
             </div>
           )}
@@ -288,8 +258,6 @@ export function Blocklists({ blocklists, manualBlocks, refresh }: BlocklistsProp
 function SummaryItem({ icon, label, value, tone = "" }: { icon: ReactNode; label: string; value: string; tone?: string }) {
   return <div className={`blocklist-summary-item ${tone}`}>{icon}<span>{label}</span><strong>{value}</strong></div>;
 }
-
-const catalogCategories = ["All", "Balanced", "Privacy", "Strict", "Security", "Classic"];
 
 function isInstalled(item: CatalogBlocklist, installed: Blocklist[]) {
   const itemURL = normalizeURL(item.url);
@@ -328,14 +296,13 @@ function sourceInitial(blocklist: Blocklist) {
   return blocklist.name.slice(0, 1).toUpperCase();
 }
 
-function formatNumber(value: number) {
-  return new Intl.NumberFormat().format(value);
+function usageLabel(count = 0) {
+  if (count === 0) return "Not used by a protection setup";
+  return `Used by ${count} protection setup${count === 1 ? "" : "s"}`;
 }
 
-function formatEntryDate(value?: string) {
-  if (!value) return "Unknown";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+function formatNumber(value: number) {
+  return new Intl.NumberFormat().format(value);
 }
 
 function errorMessage(caught: unknown, fallback: string) {

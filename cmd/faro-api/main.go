@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/derek/faro/internal/api"
+	"github.com/derek/faro/internal/blocklists"
 	"github.com/derek/faro/internal/coredns"
 	"github.com/derek/faro/internal/db"
 	"github.com/derek/faro/internal/querylog"
@@ -46,6 +47,8 @@ func main() {
 	go tailer.Run(ctx)
 	retentionManager := retention.NewManager(store)
 	go retentionManager.Run(ctx)
+	blocklistManager := blocklists.NewManager(store, reloader.Apply)
+	go blocklistManager.Run(ctx)
 	upstreamMonitor := upstreamhealth.NewMonitor(store, upstreamhealth.DefaultInterval, nil)
 	go upstreamMonitor.Run(ctx)
 
@@ -53,6 +56,8 @@ func main() {
 		Addr:              addr,
 		Handler:           api.NewServer(store, reloader, upstreamMonitor),
 		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	go func() {

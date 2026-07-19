@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,7 @@ type Handler struct {
 	upstreams    *upstreamhealth.Monitor
 	backups      *farobackup.Service
 	startedAt    time.Time
+	configMu     sync.Mutex
 }
 
 func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Monitor) http.Handler {
@@ -56,6 +58,8 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 	mux.HandleFunc("/api/dns-records/", handler.dnsRecord)
 	mux.HandleFunc("/api/blocklists", handler.blocklists)
 	mux.HandleFunc("/api/blocklists/", handler.blocklist)
+	mux.HandleFunc("/api/protections", handler.protections)
+	mux.HandleFunc("/api/protections/", handler.protection)
 	mux.HandleFunc("/api/allowlist", handler.allowlist)
 	mux.HandleFunc("/api/allowlist/", handler.allowlistEntry)
 	mux.HandleFunc("/api/blocklist-domains", handler.manualBlocklist)
@@ -76,7 +80,8 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 	mux.HandleFunc("/api/backups", handler.backupExport)
 	mux.HandleFunc("/api/backups/restore", handler.backupRestore)
 	mux.HandleFunc("/api/reload", handler.reload)
-	return cors(authManager.Require(mux))
+	trustProxy := strings.EqualFold(os.Getenv("FARO_TRUST_PROXY"), "true")
+	return cors(trustProxy, authManager.OnboardingComplete, authManager.Require(mux))
 }
 
 func env(key, fallback string) string {

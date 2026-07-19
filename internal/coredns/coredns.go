@@ -3,12 +3,15 @@ package coredns
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"text/template"
 
@@ -21,6 +24,7 @@ var reloadFailedTotal atomic.Uint64
 type Manager struct {
 	Store     *db.Store
 	ConfigDir string
+	applyMu   sync.Mutex
 }
 
 type renderState struct {
@@ -28,6 +32,16 @@ type renderState struct {
 	CacheEnabled bool
 	CacheTTL     int
 	DenialTTL    int
+	AllowedCIDRs []string
+}
+
+type protectionRender struct {
+	ID         int64
+	Name       string
+	IsDefault  bool
+	ClientIPs  []string
+	HostsFile  string
+	BlockHosts string
 }
 
 type RuleMatch struct {
@@ -45,6 +59,7 @@ type LocalRecordMatch struct {
 type DomainDecision struct {
 	Action       string            `json:"action"`
 	Reason       string            `json:"reason"`
+	Protection   *RuleMatch        `json:"protection,omitempty"`
 	Allowlist    *RuleMatch        `json:"allowlist,omitempty"`
 	ManualBlock  *RuleMatch        `json:"manual_block,omitempty"`
 	Blocklists   []RuleMatch       `json:"blocklists,omitempty"`
@@ -60,6 +75,8 @@ func NewManager(store *db.Store, configDir string) *Manager {
 }
 
 func (m *Manager) Apply(ctx context.Context) error {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
 	reloadTotal.Add(1)
 	state, err := m.render(ctx)
 	if err != nil {
@@ -77,6 +94,9 @@ func (m *Manager) Apply(ctx context.Context) error {
 		"local.hosts":     []byte(state.LocalHosts),
 		"blocklist.hosts": []byte(state.BlockHosts),
 	}
+	for name, content := range state.ProtectionHosts {
+		files[name] = []byte(content)
+	}
 	if err := validate(files); err != nil {
 		reloadFailedTotal.Add(1)
 		return err
@@ -93,9 +113,10 @@ func ReloadTotals() (uint64, uint64) {
 }
 
 type renderedFiles struct {
-	Corefile   string
-	LocalHosts string
-	BlockHosts string
+	Corefile        string
+	LocalHosts      string
+	BlockHosts      string
+	ProtectionHosts map[string]string
 }
 
 func (m *Manager) render(ctx context.Context) (renderedFiles, error) {
@@ -107,29 +128,59 @@ func (m *Manager) render(ctx context.Context) (renderedFiles, error) {
 	if len(upstreams) == 0 {
 		upstreams = []string{"1.1.1.1", "9.9.9.9"}
 	}
+	if len(upstreams) > 15 {
+		return renderedFiles{}, fmt.Errorf("at most 15 upstream resolvers are supported")
+	}
+	for _, upstream := range upstreams {
+		if net.ParseIP(upstream) == nil {
+			return renderedFiles{}, fmt.Errorf("invalid upstream resolver %q", upstream)
+		}
+	}
 	cacheEnabled := settings["dns_cache_enabled"] != "false"
 	cacheTTL := 300
 	if parsed, parseErr := strconv.Atoi(settings["dns_cache_ttl"]); parseErr == nil {
 		cacheTTL = max(30, min(parsed, 3600))
 	}
 	denialTTL := min(cacheTTL, 60)
+	allowedCIDRs := splitCSV(settings["allowed_client_cidrs"])
+	if len(allowedCIDRs) == 0 {
+		allowedCIDRs = []string{"127.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"}
+	}
+	for _, allowedCIDR := range allowedCIDRs {
+		if _, _, parseErr := net.ParseCIDR(allowedCIDR); parseErr != nil {
+			return renderedFiles{}, fmt.Errorf("invalid allowed client CIDR %q", allowedCIDR)
+		}
+	}
 
 	localHosts, err := m.localHosts(ctx)
 	if err != nil {
 		return renderedFiles{}, err
 	}
-	blockHosts, err := m.blockHosts(ctx)
+	protections, err := m.protections(ctx)
 	if err != nil {
 		return renderedFiles{}, err
 	}
+	if len(protections) == 0 {
+		return renderedFiles{}, errors.New("Home protection is missing")
+	}
 
-	corefileTemplate := template.Must(template.New("Corefile").Parse(`.:53 {
+	blockTemplate := template.Must(template.New("serverBlock").Parse(`.:53 {
+    {{ if not .Protection.IsDefault }}view protection_{{ .Protection.ID }} {
+        expr {{ .ViewExpression }}
+    }
+    {{ end }}
     errors
     metadata
     log . "FARO|{remote}|{type}|{name}|{rcode}|{duration}|{/forward/upstream}"
+    {{ if .Protection.IsDefault }}
     prometheus 0.0.0.0:9153
     reload 2s
-    hosts /etc/coredns/faro.hosts {
+	{{ end }}
+	acl {
+		allow net {{ range .AllowedCIDRs }}{{ . }} {{ end }}
+		block
+	}
+    hosts /etc/coredns/{{ .Protection.HostsFile }} {
         ttl 60
         fallthrough
     }
@@ -141,13 +192,31 @@ func (m *Manager) render(ctx context.Context) (renderedFiles, error) {
 }
 `))
 	var core bytes.Buffer
-	if err := corefileTemplate.Execute(&core, renderState{Upstreams: upstreams, CacheEnabled: cacheEnabled, CacheTTL: cacheTTL, DenialTTL: denialTTL}); err != nil {
-		return renderedFiles{}, err
+	state := renderState{Upstreams: upstreams, CacheEnabled: cacheEnabled, CacheTTL: cacheTTL, DenialTTL: denialTTL, AllowedCIDRs: allowedCIDRs}
+	protectionHosts := map[string]string{}
+	defaultBlocks := ""
+	for _, protection := range protections {
+		protectionHosts[protection.HostsFile] = localHosts + "\n" + protection.BlockHosts
+		if protection.IsDefault {
+			defaultBlocks = protection.BlockHosts
+		}
+		if !protection.IsDefault && len(protection.ClientIPs) == 0 {
+			continue
+		}
+		data := struct {
+			renderState
+			Protection     protectionRender
+			ViewExpression string
+		}{renderState: state, Protection: protection, ViewExpression: protectionViewExpression(protection.ClientIPs)}
+		if err := blockTemplate.Execute(&core, data); err != nil {
+			return renderedFiles{}, err
+		}
 	}
 	return renderedFiles{
-		Corefile:   core.String(),
-		LocalHosts: localHosts,
-		BlockHosts: blockHosts,
+		Corefile:        core.String(),
+		LocalHosts:      localHosts,
+		BlockHosts:      defaultBlocks,
+		ProtectionHosts: protectionHosts,
 	}, nil
 }
 
@@ -173,18 +242,27 @@ func (m *Manager) localHosts(ctx context.Context) (string, error) {
 }
 
 func (m *Manager) blockHosts(ctx context.Context) (string, error) {
-	allowlist, err := domains(ctx, m.Store, `SELECT domain FROM allowlist_entries`)
+	var protectionID int64
+	if err := m.Store.DB.QueryRowContext(ctx, `SELECT id FROM protection_profiles WHERE is_default = 1`).Scan(&protectionID); err != nil {
+		return "", err
+	}
+	return m.blockHostsForProtection(ctx, protectionID)
+}
+
+func (m *Manager) blockHostsForProtection(ctx context.Context, protectionID int64) (string, error) {
+	allowlist, err := domains(ctx, m.Store, `SELECT domain FROM protection_allow_entries WHERE protection_id = ?`, protectionID)
 	if err != nil {
 		return "", err
 	}
 	blocked, err := domains(ctx, m.Store, `
-		SELECT domain FROM manual_block_entries
+		SELECT domain FROM protection_block_entries WHERE protection_id = ?
 		UNION
 		SELECT e.domain
 		FROM blocklist_entries e
 		JOIN blocklists b ON b.id = e.blocklist_id
-		WHERE b.enabled = 1
-	`)
+		JOIN protection_blocklists p ON p.blocklist_id = b.id
+		WHERE b.enabled = 1 AND p.protection_id = ?
+	`, protectionID, protectionID)
 	if err != nil {
 		return "", err
 	}
@@ -203,6 +281,50 @@ func (m *Manager) blockHosts(ctx context.Context) (string, error) {
 		fmt.Fprintf(&b, "0.0.0.0 %s\n", domain)
 	}
 	return b.String(), nil
+}
+
+func (m *Manager) protections(ctx context.Context) ([]protectionRender, error) {
+	rows, err := m.Store.DB.QueryContext(ctx, `SELECT id, name, is_default FROM protection_profiles ORDER BY is_default, id`)
+	if err != nil {
+		return nil, err
+	}
+	var protections []protectionRender
+	for rows.Next() {
+		var protection protectionRender
+		if err := rows.Scan(&protection.ID, &protection.Name, &protection.IsDefault); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		protections = append(protections, protection)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for index := range protections {
+		protection := &protections[index]
+		protection.HostsFile = fmt.Sprintf("protection-%d.hosts", protection.ID)
+		protection.ClientIPs, err = domains(ctx, m.Store, `SELECT client_ip FROM device_protection_assignments WHERE protection_id = ?`, protection.ID)
+		if err != nil {
+			return nil, err
+		}
+		protection.BlockHosts, err = m.blockHostsForProtection(ctx, protection.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return protections, nil
+}
+
+func protectionViewExpression(clientIPs []string) string {
+	parts := make([]string, 0, len(clientIPs))
+	for _, clientIP := range clientIPs {
+		bits := 32
+		if parsed := net.ParseIP(clientIP); parsed != nil && parsed.To4() == nil {
+			bits = 128
+		}
+		parts = append(parts, fmt.Sprintf("incidr(client_ip(), '%s/%d')", clientIP, bits))
+	}
+	return strings.Join(parts, " || ")
 }
 
 func settingsMap(ctx context.Context, store *db.Store) (map[string]string, error) {
@@ -333,28 +455,47 @@ func IsBlocked(ctx context.Context, store *db.Store, domain string) (bool, strin
 }
 
 func ExplainDomain(ctx context.Context, store *db.Store, domain string) DomainDecision {
+	return ExplainDomainForClient(ctx, store, domain, "")
+}
+
+func ExplainDomainForClient(ctx context.Context, store *db.Store, domain, clientIP string) DomainDecision {
 	normalized, err := db.NormalizeDomain(domain)
 	if err != nil {
 		return DomainDecision{Action: "allowed"}
 	}
 	decision := DomainDecision{Action: "allowed"}
+	var protectionID int64
+	var protectionName string
+	err = store.DB.QueryRowContext(ctx, `
+		SELECT p.id, p.name
+		FROM protection_profiles p
+		LEFT JOIN device_protection_assignments a ON a.protection_id = p.id AND a.client_ip = ?
+		WHERE a.client_ip IS NOT NULL OR p.is_default = 1
+		ORDER BY CASE WHEN a.client_ip IS NOT NULL THEN 0 ELSE 1 END
+		LIMIT 1
+	`, clientIP).Scan(&protectionID, &protectionName)
+	if err != nil {
+		return decision
+	}
+	decision.Protection = &RuleMatch{Kind: "protection", ID: protectionID, Name: protectionName}
 	var allowID int64
-	if err := store.DB.QueryRowContext(ctx, `SELECT id FROM allowlist_entries WHERE domain = ?`, normalized).Scan(&allowID); err == nil {
-		decision.Allowlist = &RuleMatch{Kind: "allowlist", ID: allowID, Name: "Manual allowlist"}
+	if err := store.DB.QueryRowContext(ctx, `SELECT id FROM protection_allow_entries WHERE protection_id = ? AND domain = ?`, protectionID, normalized).Scan(&allowID); err == nil {
+		decision.Allowlist = &RuleMatch{Kind: "allowlist", ID: allowID, Name: protectionName + " exception"}
 	}
 
 	var manualID int64
-	if err := store.DB.QueryRowContext(ctx, `SELECT id FROM manual_block_entries WHERE domain = ?`, normalized).Scan(&manualID); err == nil {
-		decision.ManualBlock = &RuleMatch{Kind: "manual_block", ID: manualID, Name: "Manual domain block"}
+	if err := store.DB.QueryRowContext(ctx, `SELECT id FROM protection_block_entries WHERE protection_id = ? AND domain = ?`, protectionID, normalized).Scan(&manualID); err == nil {
+		decision.ManualBlock = &RuleMatch{Kind: "manual_block", ID: manualID, Name: protectionName + " custom block"}
 	}
 
 	rows, err := store.DB.QueryContext(ctx, `
 		SELECT b.id, b.name
 		FROM blocklist_entries e
 		JOIN blocklists b ON b.id = e.blocklist_id
-		WHERE b.enabled = 1 AND e.domain = ?
+		JOIN protection_blocklists p ON p.blocklist_id = b.id
+		WHERE b.enabled = 1 AND p.protection_id = ? AND e.domain = ?
 		ORDER BY b.name
-	`, normalized)
+	`, protectionID, normalized)
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -373,16 +514,16 @@ func ExplainDomain(ctx context.Context, store *db.Store, domain string) DomainDe
 
 	switch {
 	case decision.Allowlist != nil:
-		decision.Reason = "A manual allowlist exception bypassed filtering."
+		decision.Reason = "An exception in " + protectionName + " bypassed filtering."
 	case decision.ManualBlock != nil:
 		decision.Action = "blocked"
-		decision.Reason = "Matched a manual domain block."
+		decision.Reason = "Matched a custom block in " + protectionName + "."
 	case len(decision.Blocklists) == 1:
 		decision.Action = "blocked"
-		decision.Reason = "Matched the " + decision.Blocklists[0].Name + " blocklist."
+		decision.Reason = "Matched the " + decision.Blocklists[0].Name + " blocklist in " + protectionName + "."
 	case len(decision.Blocklists) > 1:
 		decision.Action = "blocked"
-		decision.Reason = fmt.Sprintf("Matched %d enabled blocklists.", len(decision.Blocklists))
+		decision.Reason = fmt.Sprintf("Matched %d blocklists in %s.", len(decision.Blocklists), protectionName)
 	case decision.LocalRecord != nil:
 		decision.Reason = "Matched a Faro Local DNS record."
 	}

@@ -154,7 +154,7 @@ function hydrateSettings(settings: Setting[], setSuffix: (value: string) => void
 }
 
 function validSuffix(value: string) {
-  return /^[a-z0-9][a-z0-9.-]{0,62}$/i.test(value.trim()) && !value.includes("..") && !value.endsWith(".");
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(value.trim());
 }
 
 function validIPAddress(value: string) {

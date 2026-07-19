@@ -90,6 +90,7 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 			identity.NameSource = "manual"
 		}
 		identity.DeviceType, identity.TypeConfidence = inferDeviceType(r.Context(), s.store.DB, device.clientIP, identity.DisplayName)
+		protectionID, protectionName, protectionIcon := protectionForClient(r.Context(), s.store.DB, device.clientIP)
 		items = append(items, map[string]any{
 			"client_ip":             device.clientIP,
 			"name":                  device.name,
@@ -104,7 +105,10 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 			"block_percentage":      percentage(device.blocked, device.total),
 			"top_domains":           grouped(r.Context(), s.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC, domain LIMIT 5`, device.clientIP, start),
 			"last_seen":             device.lastSeen,
-			"profile":               "Default",
+			"profile":               protectionName,
+			"protection":            protectionName,
+			"protection_id":         protectionID,
+			"protection_icon":       protectionIcon,
 		})
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -124,6 +128,16 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.deviceAlias(w, r, clientIP)
+		return
+	}
+	if strings.HasSuffix(path, "/protection") {
+		rawClientIP := strings.TrimSuffix(path, "/protection")
+		clientIP, err := url.PathUnescape(strings.Trim(rawClientIP, "/"))
+		if err != nil || strings.TrimSpace(clientIP) == "" {
+			writeBadRequest(w, errors.New("invalid client ip"))
+			return
+		}
+		s.assignDeviceProtection(w, r, clientIP)
 		return
 	}
 	if strings.HasSuffix(path, "/replay") {
@@ -159,6 +173,7 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 		identity.NameSource = "manual"
 	}
 	identity.DeviceType, identity.TypeConfidence = inferDeviceType(r.Context(), s.store.DB, clientIP, identity.DisplayName)
+	protectionID, protectionName, protectionIcon := protectionForClient(r.Context(), s.store.DB, clientIP)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"client_ip":             clientIP,
 		"name":                  name,
@@ -174,7 +189,10 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 		"top_domains":           grouped(r.Context(), s.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC, domain LIMIT 8`, clientIP, start),
 		"first_seen":            nullableString(firstSeen),
 		"last_seen":             nullableString(lastSeen),
-		"profile":               "Default",
+		"profile":               protectionName,
+		"protection":            protectionName,
+		"protection_id":         protectionID,
+		"protection_icon":       protectionIcon,
 		"recent_activity":       recentQueriesFor(r.Context(), s.store.DB, `client_ip = ?`, clientIP),
 	})
 }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -15,11 +17,92 @@ import (
 
 type testReloader struct {
 	calls int
+	err   error
 }
 
 func (r *testReloader) Apply(context.Context) error {
 	r.calls++
-	return nil
+	return r.err
+}
+
+func TestCrossOriginRequestsAreRejected(t *testing.T) {
+	handler, _ := newTestServer(t)
+	complete := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewBufferString(`{"onboarding_completed":"true"}`))
+	complete.Header.Set("Content-Type", "application/json")
+	completeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(completeResponse, complete)
+	if completeResponse.Code != http.StatusOK {
+		t.Fatalf("complete onboarding status = %d, body = %s", completeResponse.Code, completeResponse.Body.String())
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/dashboard", nil)
+	request.Header.Set("Origin", "https://attacker.example")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status = %d, want %d", response.Code, http.StatusForbidden)
+	}
+}
+
+func TestSameOriginUsesTrustedForwardedHost(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "http://api:8080/api/settings", nil)
+	request.Host = "api:8080"
+	request.Header.Set("X-Forwarded-Host", "localhost:1787")
+	request.Header.Set("X-Forwarded-Proto", "http")
+	const origin = "http://localhost:1787"
+	if !sameOrigin(request, origin, true) {
+		t.Fatal("trusted forwarded host should match the browser-facing origin")
+	}
+	if sameOrigin(request, origin, false) {
+		t.Fatal("forwarded host must be ignored when proxy trust is disabled")
+	}
+}
+
+func TestCrossOriginRequestsAreAllowedDuringOnboarding(t *testing.T) {
+	handler, _ := newTestServer(t)
+	request := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewBufferString(`{"faro_lan_ip":"192.168.1.20"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "https://setup-device.example")
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("onboarding settings status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFirstRunSetupDoesNotRequireSameOrigin(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	handler := New(store, &testReloader{}, nil)
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/setup", bytes.NewBufferString(`{"username":"test-admin","password":"correct-horse-battery-staple"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Origin", "https://setup-device.example")
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("first-run setup status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestFailedDNSReloadRestoresPreviousSettings(t *testing.T) {
+	handler, reloader := newTestServer(t)
+	reloader.err = errors.New("invalid generated configuration")
+	request := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewBufferString(`{"upstream_dns":"8.8.8.8"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("settings status = %d, want %d", response.Code, http.StatusInternalServerError)
+	}
+	read := httptest.NewRecorder()
+	handler.ServeHTTP(read, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if !bytes.Contains(read.Body.Bytes(), []byte(`"value":"1.1.1.1,9.9.9.9"`)) {
+		t.Fatalf("previous upstream setting was not restored: %s", read.Body.String())
+	}
 }
 
 func newTestServer(t *testing.T) (http.Handler, *testReloader) {
@@ -146,6 +229,48 @@ func TestAllowlistLifecycle(t *testing.T) {
 	}
 	if reloader.calls != 1 {
 		t.Fatalf("reload calls = %d, want 1", reloader.calls)
+	}
+}
+
+func TestProtectionLifecycle(t *testing.T) {
+	handler, reloader := newTestServer(t)
+	list := httptest.NewRecorder()
+	handler.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/protections", nil))
+	if list.Code != http.StatusOK || !bytes.Contains(list.Body.Bytes(), []byte(`"name":"Home"`)) {
+		t.Fatalf("default protection response: status=%d body=%s", list.Code, list.Body.String())
+	}
+
+	create := httptest.NewRequest(http.MethodPost, "/api/protections", bytes.NewBufferString(`{"name":"Children","icon":"baby","blocklist_ids":[],"allow_domains":["school.example"],"block_domains":["games.example"],"device_ips":["192.168.7.23"]}`))
+	create.Header.Set("Content-Type", "application/json")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, create)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create protection: status=%d body=%s", created.Code, created.Body.String())
+	}
+	var result struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil || result.ID == 0 {
+		t.Fatalf("invalid create response: %s", created.Body.String())
+	}
+
+	read := httptest.NewRecorder()
+	handler.ServeHTTP(read, httptest.NewRequest(http.MethodGet, "/api/protections", nil))
+	if !bytes.Contains(read.Body.Bytes(), []byte(`"name":"Children"`)) || !bytes.Contains(read.Body.Bytes(), []byte(`"device_ips":["192.168.7.23"]`)) {
+		t.Fatalf("created protection missing: %s", read.Body.String())
+	}
+	if reloader.calls != 1 {
+		t.Fatalf("reload calls=%d want 1", reloader.calls)
+	}
+
+	deleteRequest := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/protections/%d", result.ID), nil)
+	deleted := httptest.NewRecorder()
+	handler.ServeHTTP(deleted, deleteRequest)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete protection: status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	if reloader.calls != 2 {
+		t.Fatalf("reload calls=%d want 2", reloader.calls)
 	}
 }
 

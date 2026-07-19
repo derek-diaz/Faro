@@ -43,12 +43,13 @@ func (s *Store) migrate(ctx context.Context) error {
 	schema := []string{
 		`CREATE TABLE IF NOT EXISTS dns_records (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			hostname TEXT NOT NULL UNIQUE,
+			hostname TEXT NOT NULL,
 			type TEXT NOT NULL DEFAULT 'A',
 			value TEXT NOT NULL,
 			description TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(hostname, type, value)
 		);`,
 		`CREATE TABLE IF NOT EXISTS blocklists (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,6 +69,49 @@ func (s *Store) migrate(ctx context.Context) error {
 			UNIQUE(blocklist_id, domain)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_blocklist_entries_domain ON blocklist_entries(domain);`,
+		`CREATE TABLE IF NOT EXISTS protection_profiles (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+			icon TEXT NOT NULL DEFAULT 'shield',
+			is_default INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0, 1)),
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_protection_profiles_default ON protection_profiles(is_default) WHERE is_default = 1;`,
+		`CREATE TABLE IF NOT EXISTS protection_blocklists (
+			protection_id INTEGER NOT NULL,
+			blocklist_id INTEGER NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(protection_id, blocklist_id),
+			FOREIGN KEY(protection_id) REFERENCES protection_profiles(id) ON DELETE CASCADE,
+			FOREIGN KEY(blocklist_id) REFERENCES blocklists(id) ON DELETE CASCADE
+		);`,
+		`CREATE TABLE IF NOT EXISTS protection_allow_entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			protection_id INTEGER NOT NULL,
+			domain TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(protection_id) REFERENCES protection_profiles(id) ON DELETE CASCADE,
+			UNIQUE(protection_id, domain)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_protection_allow_domain ON protection_allow_entries(protection_id, domain);`,
+		`CREATE TABLE IF NOT EXISTS protection_block_entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			protection_id INTEGER NOT NULL,
+			domain TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(protection_id) REFERENCES protection_profiles(id) ON DELETE CASCADE,
+			UNIQUE(protection_id, domain)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_protection_block_domain ON protection_block_entries(protection_id, domain);`,
+		`CREATE TABLE IF NOT EXISTS device_protection_assignments (
+			client_ip TEXT PRIMARY KEY,
+			protection_id INTEGER NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(protection_id) REFERENCES protection_profiles(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_device_protection_profile ON device_protection_assignments(protection_id);`,
 		`CREATE TABLE IF NOT EXISTS allowlist_entries (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			domain TEXT NOT NULL UNIQUE,
@@ -173,6 +217,12 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	if err := s.migrateDNSRecords(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateProtection(ctx); err != nil {
+		return err
+	}
 	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE dns_queries ADD COLUMN upstream TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
@@ -188,6 +238,42 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) migrateProtection(ctx context.Context) error {
+	if _, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO protection_profiles(name, icon, is_default) VALUES('Home', 'house', 1)`); err != nil {
+		return err
+	}
+	var completed string
+	err := s.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'protection_migration_completed'`).Scan(&completed)
+	if err == nil && completed == "true" {
+		return nil
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var homeID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM protection_profiles WHERE is_default = 1`).Scan(&homeID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO protection_blocklists(protection_id, blocklist_id) SELECT ?, id FROM blocklists WHERE enabled = 1`, homeID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO protection_allow_entries(protection_id, domain, created_at) SELECT ?, domain, created_at FROM allowlist_entries`, homeID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO protection_block_entries(protection_id, domain, created_at) SELECT ?, domain, created_at FROM manual_block_entries`, homeID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key, value) VALUES('protection_migration_completed', 'true') ON CONFLICT(key) DO UPDATE SET value = excluded.value`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) seed(ctx context.Context) error {
 	defaults := map[string]string{
 		"upstream_dns":             "1.1.1.1,9.9.9.9",
@@ -197,6 +283,7 @@ func (s *Store) seed(ctx context.Context) error {
 		"favicon_fetching_enabled": "false",
 		"dns_cache_enabled":        "true",
 		"dns_cache_ttl":            "300",
+		"allowed_client_cidrs":     "127.0.0.0/8,10.0.0.0/8,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7,fe80::/10",
 	}
 	for key, value := range defaults {
 		if _, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)`, key, value); err != nil {
@@ -319,8 +406,18 @@ func NormalizeDomain(domain string) (string, error) {
 	if normalized == "" {
 		return "", errors.New("domain is required")
 	}
-	if strings.ContainsAny(normalized, " \t\r\n/") {
+	if len(normalized) > 253 || strings.ContainsAny(normalized, " \t\r\n/") {
 		return "", fmt.Errorf("invalid domain %q", domain)
+	}
+	for _, label := range strings.Split(normalized, ".") {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("invalid domain %q", domain)
+		}
+		for _, character := range label {
+			if (character < 'a' || character > 'z') && (character < '0' || character > '9') && character != '-' {
+				return "", fmt.Errorf("invalid domain %q", domain)
+			}
+		}
 	}
 	return normalized, nil
 }
@@ -343,8 +440,95 @@ func NormalizeRecord(hostname, typ, value string) (string, string, string, error
 	if recordValue == "" {
 		return "", "", "", errors.New("record value is required")
 	}
-	if net.ParseIP(recordValue) == nil {
+	parsedIP := net.ParseIP(recordValue)
+	if parsedIP == nil {
 		return "", "", "", errors.New("A and AAAA records require an IP address")
 	}
-	return host, recordType, recordValue, nil
+	if recordType == "A" && parsedIP.To4() == nil {
+		return "", "", "", errors.New("A records require an IPv4 address")
+	}
+	if recordType == "AAAA" && parsedIP.To4() != nil {
+		return "", "", "", errors.New("AAAA records require an IPv6 address")
+	}
+	return host, recordType, parsedIP.String(), nil
+}
+
+// migrateDNSRecords replaces the original hostname-only uniqueness constraint
+// with record-level uniqueness so a hostname can be genuinely dual-stack.
+func (s *Store) migrateDNSRecords(ctx context.Context) error {
+	rows, err := s.DB.QueryContext(ctx, `PRAGMA index_list(dns_records)`)
+	if err != nil {
+		return err
+	}
+	var uniqueIndexes []string
+	for rows.Next() {
+		var sequence, unique, partial int
+		var name, origin string
+		if err := rows.Scan(&sequence, &name, &unique, &origin, &partial); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if unique == 1 {
+			uniqueIndexes = append(uniqueIndexes, name)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	hasHostnameOnlyUnique := false
+	for _, name := range uniqueIndexes {
+		columns, columnErr := s.DB.QueryContext(ctx, `PRAGMA index_info(`+quoteIdentifier(name)+`)`)
+		if columnErr != nil {
+			return columnErr
+		}
+		var names []string
+		for columns.Next() {
+			var rank, cid int
+			var columnName string
+			if err := columns.Scan(&rank, &cid, &columnName); err != nil {
+				_ = columns.Close()
+				return err
+			}
+			names = append(names, columnName)
+		}
+		_ = columns.Close()
+		if len(names) == 1 && names[0] == "hostname" {
+			hasHostnameOnlyUnique = true
+		}
+	}
+	if !hasHostnameOnlyUnique {
+		return nil
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	statements := []string{
+		`CREATE TABLE dns_records_migrated (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			hostname TEXT NOT NULL,
+			type TEXT NOT NULL DEFAULT 'A',
+			value TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(hostname, type, value)
+		)`,
+		`INSERT INTO dns_records_migrated(id, hostname, type, value, description, created_at, updated_at)
+		 SELECT id, hostname, type, value, description, created_at, updated_at FROM dns_records`,
+		`DROP TABLE dns_records`,
+		`ALTER TABLE dns_records_migrated RENAME TO dns_records`,
+	}
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func quoteIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }

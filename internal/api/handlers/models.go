@@ -8,9 +8,10 @@ type dnsRecordInput struct {
 }
 
 type blocklistInput struct {
-	Name    string `json:"name"`
-	URL     string `json:"url"`
-	Enabled *bool  `json:"enabled"`
+	Name            string `json:"name"`
+	URL             string `json:"url"`
+	Enabled         *bool  `json:"enabled"`
+	AssignToDefault *bool  `json:"assign_to_default,omitempty"`
 }
 
 type domainInput struct {

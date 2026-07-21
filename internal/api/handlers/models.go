@@ -19,9 +19,10 @@ type domainInput struct {
 }
 
 type deviceAliasInput struct {
-	Name     string `json:"name"`
-	Location string `json:"location"`
-	Notes    string `json:"notes"`
+	Name       string  `json:"name"`
+	Location   string  `json:"location"`
+	Notes      string  `json:"notes"`
+	DeviceType *string `json:"device_type,omitempty"`
 }
 
 type eventInput struct {

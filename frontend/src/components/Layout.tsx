@@ -25,7 +25,7 @@ const navItems: { id: Page; label: string; description: string; href: string; ic
   { id: "devices", label: "Devices", description: "See which devices are active on your network.", href: "/devices", icon: MonitorSmartphone },
   { id: "records", label: "Local DNS", description: "Manage friendly names for services on your network.", href: "/local-dns", icon: Router },
   { id: "upstreams", label: "Upstreams", description: "Choose the DNS providers Faro uses for public lookups.", href: "/upstreams", icon: Network },
-  { id: "protection", label: "Protection", description: "Choose what Faro blocks for your home and individual devices.", href: "/protection", icon: ShieldCheck },
+  { id: "protection", label: "Protection", description: "Home covers every device by default. Add a setup only when some devices need different blocking or exceptions.", href: "/protection", icon: ShieldCheck },
   { id: "blocklists", label: "Blocklists", description: "Install, update, pause, and remove filtering sources.", href: "/blocklists", icon: Database },
   { id: "settings", label: "Settings", description: "Configure DNS behavior and Faro preferences.", href: "/settings", icon: Settings }
 ];
@@ -103,7 +103,7 @@ export function Layout({ page, setPage, children, apiState, onOpenSearch, notifi
             </details>
           </div>
         </header>
-        {children}
+        <div className="main-content">{children}</div>
       </main>
     </div>
   );

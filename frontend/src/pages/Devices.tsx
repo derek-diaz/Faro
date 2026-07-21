@@ -2,6 +2,7 @@ import {
   Activity,
   Check,
   Car,
+  Camera,
   ChevronDown,
   ChevronRight,
   Clock3,
@@ -14,10 +15,17 @@ import {
   LayoutDashboard,
   MonitorSmartphone,
   Network,
+  Gamepad2,
+  Lightbulb,
+  Printer,
+  Router,
   Search,
   Server,
   ShieldCheck,
+  Speaker,
+  Sparkles,
   Smartphone,
+  Tablet,
   Tv,
   X
 } from "lucide-react";
@@ -40,13 +48,31 @@ type DevicesProps = {
 };
 
 type DeviceView = "overview" | "replay";
+type DeviceEditForm = { name: string; location: string; notes: string; device_type: string };
+
+const deviceTypeChoices = [
+  "Computer",
+  "Phone",
+  "Tablet",
+  "TV",
+  "Game console",
+  "Router",
+  "Server / NAS",
+  "Smart home",
+  "Printer",
+  "Camera",
+  "Speaker",
+  "Vehicle",
+  "Other"
+] as const;
 
 export function Devices({ devices, protections, refresh, selectedClientIP, onSelectClient, onDomainSelect }: DevicesProps) {
   const [detail, setDetail] = useState<DeviceSummary | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
-  const [form, setForm] = useState({ name: "", location: "", notes: "" });
+  const [form, setForm] = useState<DeviceEditForm>({ name: "", location: "", notes: "", device_type: "" });
   const [editing, setEditing] = useState(false);
+  const [aliasSaving, setAliasSaving] = useState(false);
   const [view, setView] = useState<DeviceView>("overview");
   const [search, setSearch] = useState("");
   const [protectionBusy, setProtectionBusy] = useState(false);
@@ -78,7 +104,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
       .then((nextDetail) => {
         if (!cancelled) {
           setDetail(nextDetail);
-          setForm({ name: nextDetail.name || "", location: nextDetail.location ?? "", notes: nextDetail.notes ?? "" });
+          setForm({ name: nextDetail.name || "", location: nextDetail.location ?? "", notes: nextDetail.notes ?? "", device_type: nextDetail.type_source === "manual" ? nextDetail.device_type : "" });
         }
       })
       .catch((caught: unknown) => {
@@ -138,10 +164,18 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
   async function saveAlias(event: FormEvent) {
     event.preventDefault();
     if (!selectedClientIP) return;
-    await api.updateDeviceAlias(selectedClientIP, form);
-    setEditing(false);
-    await refresh();
-    setDetail(await api.device(selectedClientIP));
+    setAliasSaving(true);
+    setDetailError("");
+    try {
+      await api.updateDeviceAlias(selectedClientIP, form);
+      setEditing(false);
+      await refresh();
+      setDetail(await api.device(selectedClientIP));
+    } catch (caught) {
+      setDetailError(caught instanceof Error ? caught.message : "Could not save this device.");
+    } finally {
+      setAliasSaving(false);
+    }
   }
 
   async function changeProtection(protectionID: number) {
@@ -286,7 +320,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
                           <span>{detail.client_ip}</span>
                         </div>
                         <h2>{deviceDisplayName(detail)}</h2>
-                        <p>{detail.device_type} · {deviceIdentityDescription(detail)}</p>
+                        <p>{detail.device_type} · {detail.type_source === "manual" ? "Type chosen by you" : deviceIdentityDescription(detail)}</p>
                       </div>
                     </div>
                     {view === "overview" && <button className="secondary device-edit-button" type="button" onClick={() => setEditing((value) => !value)}><Edit3 size={16} /><span>{editing ? "Cancel" : "Edit device"}</span></button>}
@@ -298,7 +332,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
                   </div>
 
                   {view === "overview" ? (
-                    <DeviceOverview detail={detail} form={form} setForm={setForm} editing={editing} saveAlias={saveAlias} onDomainSelect={onDomainSelect} onOpenReplay={() => setView("replay")} />
+                    <DeviceOverview detail={detail} form={form} setForm={setForm} editing={editing} saving={aliasSaving} saveAlias={saveAlias} onDomainSelect={onDomainSelect} onOpenReplay={() => setView("replay")} />
                   ) : (
                     <DeviceReplay clientIP={detail.client_ip} deviceName={deviceDisplayName(detail)} onDomainSelect={onDomainSelect} />
                   )}
@@ -323,11 +357,12 @@ function DeviceSummaryMetric({ icon, label, value, detail, tone = "default", com
   return <div className={`device-summary-metric ${tone} ${compact ? "compact" : ""}`}><span className="device-summary-icon">{icon}</span><span><small>{label}</small><strong>{value}</strong><em>{detail}</em></span></div>;
 }
 
-function DeviceOverview({ detail, form, setForm, editing, saveAlias, onDomainSelect, onOpenReplay }: {
+function DeviceOverview({ detail, form, setForm, editing, saving, saveAlias, onDomainSelect, onOpenReplay }: {
   detail: DeviceSummary;
-  form: { name: string; location: string; notes: string };
-  setForm: (form: { name: string; location: string; notes: string }) => void;
+  form: DeviceEditForm;
+  setForm: (form: DeviceEditForm) => void;
   editing: boolean;
+  saving: boolean;
   saveAlias: (event: FormEvent) => Promise<void>;
   onDomainSelect: (domain: string) => void;
   onOpenReplay: () => void;
@@ -358,10 +393,30 @@ function DeviceOverview({ detail, form, setForm, editing, saveAlias, onDomainSel
     <div className="device-overview-dashboard">
       {editing && (
         <form className="alias-form" onSubmit={(event) => void saveAlias(event)}>
-          <label>Friendly name<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="Living room TV" /></label>
-          <label>Location<input value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} placeholder="Living room" /></label>
-          <label>Notes<input value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} placeholder="Optional notes" /></label>
-          <button type="submit">Save device</button>
+          <div className="alias-form-heading"><div><strong>Edit device</strong><span>Give this device a recognizable name and correct Faro when automatic detection gets it wrong.</span></div></div>
+          <div className="alias-form-fields">
+            <label>Friendly name<input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder={detail.client_ip} /></label>
+            <label>Location<input value={form.location} onChange={(event) => setForm({ ...form, location: event.target.value })} placeholder="Living room" /></label>
+            <label>Notes<input value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} placeholder="Optional notes" /></label>
+          </div>
+          <fieldset className="device-type-picker">
+            <legend>Device type &amp; icon</legend>
+            <p>Choose what looks right, or leave Faro on Automatic.</p>
+            <div>
+              <button type="button" className={form.device_type === "" ? "selected" : ""} aria-pressed={form.device_type === ""} onClick={() => setForm({ ...form, device_type: "" })}>
+                <span><Sparkles size={18} />{form.device_type === "" && <i><Check size={10} /></i>}</span><strong>Automatic</strong><small>Faro decides</small>
+              </button>
+              {deviceTypeChoices.map((type) => (
+                <button type="button" key={type} className={form.device_type === type ? "selected" : ""} aria-pressed={form.device_type === type} onClick={() => setForm({ ...form, device_type: type })}>
+                  <span>{deviceTypeIcon(type, 18)}{form.device_type === type && <i><Check size={10} /></i>}</span><strong>{type}</strong>
+                </button>
+              ))}
+            </div>
+          </fieldset>
+          <div className="alias-form-actions">
+            <span>{form.device_type ? "Your choice will not be replaced by automatic detection." : `Currently detected as ${detail.device_type}. Faro will keep improving this automatically.`}</span>
+            <button type="submit" disabled={saving}>{saving ? "Saving…" : "Save device"}</button>
+          </div>
         </form>
       )}
 
@@ -499,20 +554,35 @@ function overviewFrequency(rate?: number) {
   return { value: daily >= 10 ? daily.toFixed(0) : daily.toFixed(1), unit: "queries per day" };
 }
 
-function deviceTypeIcon(type: string) {
+function deviceTypeIcon(type: string, size = 20) {
   switch (type) {
-    case "Apple TV": return <Tv size={20} />;
+    case "Apple TV":
+    case "TV": return <Tv size={size} />;
     case "Apple Device":
-    case "Android Device": return <Smartphone size={20} />;
+    case "Android Device":
+    case "Android Phone":
+    case "Phone": return <Smartphone size={size} />;
+    case "Tablet": return <Tablet size={size} />;
     case "Smart TV":
-    case "Roku": return <Tv size={20} />;
-    case "Tesla": return <Car size={20} />;
+    case "Roku": return <Tv size={size} />;
+    case "Xbox":
+    case "PlayStation":
+    case "Nintendo":
+    case "Game console": return <Gamepad2 size={size} />;
+    case "Tesla":
+    case "Vehicle": return <Car size={size} />;
     case "Windows PC":
-    case "Mac": return <Laptop size={20} />;
-    case "Linux Server": return <Server size={20} />;
-    case "NAS": return <HardDrive size={20} />;
-    case "Android Phone": return <Smartphone size={20} />;
-    default: return <MonitorSmartphone size={20} />;
+    case "Mac":
+    case "Computer": return <Laptop size={size} />;
+    case "Linux Server": return <Server size={size} />;
+    case "NAS": return <HardDrive size={size} />;
+    case "Server / NAS": return <HardDrive size={size} />;
+    case "Router": return <Router size={size} />;
+    case "Smart home": return <Lightbulb size={size} />;
+    case "Printer": return <Printer size={size} />;
+    case "Camera": return <Camera size={size} />;
+    case "Speaker": return <Speaker size={size} />;
+    default: return <MonitorSmartphone size={size} />;
   }
 }
 
@@ -523,6 +593,7 @@ function deviceDisplayName(device?: DeviceSummary | null) {
 function deviceIdentityCaption(device: DeviceSummary) {
 	const additionalAddresses = Math.max(0, (device.addresses?.length ?? 1) - 1);
 	const addressLabel = additionalAddresses > 0 ? `${device.client_ip} + ${additionalAddresses} more` : device.client_ip;
+  if (device.type_source === "manual") return `Chosen by you · ${addressLabel}`;
   if (!device.display_name && !device.name) return "Name not discovered";
   if (device.name_source === "manual" || device.name) return addressLabel;
   return `${addressLabel} · Auto-detected`;

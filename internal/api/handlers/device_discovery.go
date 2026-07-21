@@ -146,9 +146,10 @@ func usefulHostname(hostname, clientIP string) bool {
 }
 
 type deviceTypeRule struct {
-	name       string
-	nameTokens []string
-	domains    map[string]int
+	name                string
+	nameTokens          []string
+	domains             map[string]int
+	minDomainSignatures int
 }
 
 var deviceTypeRules = []deviceTypeRule{
@@ -157,7 +158,11 @@ var deviceTypeRules = []deviceTypeRule{
 	{name: "Roku", nameTokens: []string{"roku"}, domains: weightedDomains(4, "roku.com", "rokutime.com")},
 	{name: "Smart TV", nameTokens: []string{"tv", "smarttv", "webos", "tizen"}, domains: mergeWeightedDomains(weightedDomains(4, "samsungacr.com", "samsungcloudsolution.com", "lgtvsdp.com"), weightedDomains(2, "samsung.com", "lg.com"))},
 	{name: "PlayStation", nameTokens: []string{"playstation", "ps4", "ps5"}, domains: weightedDomains(4, "playstation.net", "playstation.com")},
-	{name: "Xbox", nameTokens: []string{"xbox"}, domains: weightedDomains(4, "xboxlive.com", "xbox.com")},
+	// Windows and several Microsoft apps contact xboxlive.com even when the
+	// client is not an Xbox. Require two independent Xbox domain families when
+	// there is no explicit Xbox hostname instead of counting every subdomain as
+	// a separate clue.
+	{name: "Xbox", nameTokens: []string{"xbox"}, domains: weightedDomains(4, "xboxlive.com", "xbox.com"), minDomainSignatures: 2},
 	{name: "Nintendo", nameTokens: []string{"nintendo", "switch"}, domains: weightedDomains(4, "nintendo.net", "nintendo.com")},
 	{name: "Sonos", nameTokens: []string{"sonos"}, domains: weightedDomains(4, "sonos.com")},
 	{name: "Android Device", nameTokens: []string{"android", "pixel"}, domains: weightedDomains(3, "android.clients.google.com", "connectivitycheck.gstatic.com", "connectivitycheck.android.com", "mtalk.google.com")},
@@ -188,18 +193,25 @@ func inferDeviceTypeFromSignals(name, clientIP string, domains []string) (string
 	scores := make([]score, 0, len(deviceTypeRules))
 	for _, rule := range deviceTypeRules {
 		value := 0
+		nameMatched := false
 		for _, token := range rule.nameTokens {
 			if tokens[token] {
 				value += 7
+				nameMatched = true
 			}
 		}
+		matchedSignatures := map[string]bool{}
 		for _, domain := range domains {
 			for signature, weight := range rule.domains {
-				if domainMatches(domain, signature) {
+				if !matchedSignatures[signature] && domainMatches(domain, signature) {
 					value += weight
+					matchedSignatures[signature] = true
 					break
 				}
 			}
+		}
+		if !nameMatched && rule.minDomainSignatures > 0 && len(matchedSignatures) < rule.minDomainSignatures {
+			continue
 		}
 		if value > 0 {
 			scores = append(scores, score{name: rule.name, value: value})

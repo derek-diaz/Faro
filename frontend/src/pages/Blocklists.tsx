@@ -1,6 +1,7 @@
-import { AlertCircle, Check, CheckCircle2, Database, Download, Filter, Info, Plus, RefreshCw, Search, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
+import { AlertCircle, AlertTriangle, Check, CheckCircle2, Database, Download, Filter, Info, Plus, RefreshCw, Search, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import { useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { api, type Blocklist } from "../api/client";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
 import { blocklistCatalog, blocklistCategories, type BlocklistCategory, type CatalogBlocklist } from "../data/blocklists";
 
@@ -26,6 +27,7 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
   const [catalogProvider, setCatalogProvider] = useState("All");
   const [catalogCompatibility, setCatalogCompatibility] = useState<"All" | CatalogBlocklist["compatibility"]>("All");
   const [notice, setNotice] = useState<Notice>(null);
+  const [pendingRemoval, setPendingRemoval] = useState<Blocklist | null>(null);
 
   const enabledCount = blocklists.filter((blocklist) => blocklist.enabled).length;
   const entryCount = blocklists.reduce((total, blocklist) => total + (blocklist.entry_count ?? 0), 0);
@@ -139,9 +141,6 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
   }
 
   async function remove(blocklist: Blocklist) {
-    const usage = blocklist.protection_count ?? 0;
-    const impact = usage > 0 ? ` It is used by ${usage} protection setup${usage === 1 ? "" : "s"} and will be removed from ${usage === 1 ? "it" : "them"}.` : "";
-    if (!window.confirm(`Remove ${blocklist.name}? Its downloaded entries will also be deleted.${impact}`)) return;
     setBusy(blocklist.id);
     setNotice(null);
     try {
@@ -152,6 +151,7 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
       setNotice({ tone: "error", text: errorMessage(caught, `Could not remove ${blocklist.name}.`) });
     } finally {
       setBusy(null);
+      setPendingRemoval(null);
     }
   }
 
@@ -206,7 +206,7 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
                     </label>
                     <div className="installed-list-actions">
                       <button type="button" className="icon-button" title="Update now" aria-label={`Update ${blocklist.name}`} disabled={isInstalling || busy === blocklist.id} onClick={() => void refreshList(blocklist)}><RefreshCw className={busy === blocklist.id ? "spinning" : ""} size={16} /></button>
-                      <button type="button" className="icon-button danger-icon" title="Remove" aria-label={`Remove ${blocklist.name}`} disabled={isInstalling || busy === blocklist.id} onClick={() => void remove(blocklist)}><Trash2 size={16} /></button>
+                      <button type="button" className="icon-button danger-icon" title="Remove" aria-label={`Remove ${blocklist.name}`} disabled={isInstalling || busy === blocklist.id} onClick={() => { setNotice(null); setPendingRemoval(blocklist); }}><Trash2 size={16} /></button>
                     </div>
                   </article>
                 ))}
@@ -272,6 +272,23 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
             </form>
           </section>
         </div>
+      )}
+
+      {pendingRemoval && (
+        <ConfirmDialog
+          title={`Remove ${pendingRemoval.name}?`}
+          body={`This will permanently delete ${formatNumber(pendingRemoval.entry_count ?? 0)} downloaded domain ${pendingRemoval.entry_count === 1 ? "entry" : "entries"} from Faro.`}
+          confirmLabel="Remove blocklist"
+          busyLabel="Removing blocklist…"
+          busy={busy === pendingRemoval.id}
+          onCancel={() => setPendingRemoval(null)}
+          onConfirm={() => void remove(pendingRemoval)}
+          detail={(pendingRemoval.protection_count ?? 0) > 0 ? (
+            <div className="confirm-dialog-impact warning"><AlertTriangle size={18} /><span><strong>Used by {pendingRemoval.protection_count} protection setup{pendingRemoval.protection_count === 1 ? "" : "s"}</strong><small>The list will be removed from {pendingRemoval.protection_count === 1 ? "that setup" : "those setups"}. {pendingRemoval.protection_count === 1 ? "Its" : "Their"} devices and other settings will remain.</small></span></div>
+          ) : (
+            <div className="confirm-dialog-impact"><ShieldCheck size={18} /><span><strong>No protection setups use this list</strong><small>Removing it will not change protection for any device.</small></span></div>
+          )}
+        />
       )}
     </div>
   );

@@ -10,6 +10,7 @@ import {
   Laptop,
   Lightbulb,
   ListFilter,
+  LoaderCircle,
   MonitorPlay,
   Plus,
   Save,
@@ -31,6 +32,7 @@ import {
   type ProtectionIconKey,
   type ProtectionInput
 } from "../api/client";
+import { ConfirmDialog } from "../components/ConfirmDialog";
 
 type Props = {
   protections: Protection[];
@@ -73,6 +75,8 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [busy, setBusy] = useState(false);
+  const [saveStage, setSaveStage] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
@@ -97,15 +101,18 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
     event.preventDefault();
     if (!selected) return;
     setBusy(true);
+    setSaveStage("Saving settings and applying DNS changes");
     setError("");
     setNotice("");
     try {
       await api.updateProtection(selected.id, cleanInput(editor));
+      setSaveStage("Refreshing the updated protection details");
       await refresh();
       setNotice(`${editor.name} was updated.`);
     } catch (caught) {
       setError(message(caught, "Could not save protection."));
     } finally {
+      setSaveStage("");
       setBusy(false);
     }
   }
@@ -127,7 +134,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
   }
 
   async function removeSelected() {
-    if (!selected || selected.is_default || !window.confirm(`Delete ${selected.name}? Its devices will return to Home.`)) return;
+    if (!selected || selected.is_default) return;
     setBusy(true);
     setError("");
     try {
@@ -139,6 +146,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
       setError(message(caught, "Could not delete protection."));
     } finally {
       setBusy(false);
+      setConfirmDelete(false);
     }
   }
 
@@ -146,11 +154,6 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
 
   return (
     <div className="protection-page">
-      <header className="protection-intro">
-        <div><span className="eyebrow">Simple rules, device by device</span><h2>One home, different needs</h2><p>Home protects everything by default. Add a setup only when some devices need different blocking or exceptions.</p></div>
-        <button type="button" onClick={openWizard}><Plus size={17} />New protection setup</button>
-      </header>
-
       {(error || notice) && <div className={`protection-message ${error ? "error" : "success"}`} role="status"><span>{error || notice}</span><button className="icon-button" type="button" aria-label="Dismiss" onClick={() => { setError(""); setNotice(""); }}><X size={15} /></button></div>}
 
       {!selected ? (
@@ -158,14 +161,14 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
       ) : (
         <div className="protection-edit-view">
           <div className="protection-edit-nav">
-            <button className="secondary" type="button" onClick={() => { setSelectedID(null); setError(""); }}><ChevronLeft size={16} />All protection setups</button>
+            <button className="secondary" type="button" disabled={Boolean(saveStage)} onClick={() => { setSelectedID(null); setError(""); }}><ChevronLeft size={16} />All protection setups</button>
             <span><small>Editing setup</small><strong>{selected.name}</strong></span>
           </div>
-          <form className="protection-editor panel" onSubmit={(event) => void saveSelected(event)}>
+          <form className={`protection-editor panel ${saveStage ? "saving" : ""}`} aria-busy={Boolean(saveStage)} onSubmit={(event) => void saveSelected(event)}>
           <div className="protection-editor-heading">
             <div className="protection-title-icon"><ProtectionIcon name={editor.icon} /></div>
             <div><span>{selected.is_default ? "NETWORK DEFAULT" : "CUSTOM PROTECTION"}</span><input value={editor.name} disabled={selected.is_default} maxLength={40} aria-label="Protection name" onChange={(event) => setEditor({ ...editor, name: event.target.value })} /><p>{selected.is_default ? "Any device not assigned elsewhere uses Home." : "Only the devices selected below use these choices."}</p></div>
-            {!selected.is_default && <button className="icon-button danger-icon" type="button" title="Delete protection" onClick={() => void removeSelected()}><Trash2 size={17} /></button>}
+            {!selected.is_default && <button className="icon-button danger-icon" type="button" title="Delete protection" aria-label={`Delete ${selected.name}`} disabled={Boolean(saveStage)} onClick={() => setConfirmDelete(true)}><Trash2 size={17} /></button>}
           </div>
 
           <EditorSection title="Icon" description="Choose a simple visual cue.">
@@ -196,12 +199,21 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
             {selected.is_default ? <DeviceSummaryList devices={homeDevices} /> : <DeviceChoices devices={devices} selected={editor.device_ips} onChange={(deviceIPs) => setEditor({ ...editor, device_ips: deviceIPs })} />}
           </EditorSection>
 
-          <footer className="protection-save-bar"><span>Changes apply to DNS as soon as they are saved.</span><button type="submit" disabled={busy || !editor.name.trim()}><Save size={16} />{busy ? "Applying…" : "Save changes"}</button></footer>
+          <footer className={`protection-save-bar ${saveStage ? "saving" : ""}`}>
+            {saveStage ? (
+              <div className="protection-save-progress" role="status" aria-live="polite">
+                <span className="protection-save-spinner"><LoaderCircle className="spinning" size={17} /></span>
+                <div><strong>Saving {selected.name}</strong><small>{saveStage}. Keep this page open.</small><i aria-hidden="true"><b /></i></div>
+              </div>
+            ) : <span>Changes apply to DNS as soon as they are saved.</span>}
+            <button type="submit" disabled={busy || !editor.name.trim()}>{saveStage ? <LoaderCircle className="spinning" size={16} /> : <Save size={16} />}<span>{saveStage ? "Saving changes…" : "Save changes"}</span></button>
+          </footer>
           </form>
         </div>
       )}
 
       {wizard && <ProtectionWizard step={step} setStep={setStep} draft={draft} setDraft={setDraft} blocklists={blocklists} devices={devices} busy={busy} error={error} onManageBlocklists={() => { setWizard(false); onManageBlocklists(); }} onClose={() => { if (!busy) { setWizard(false); setError(""); } }} onFinish={() => void finishWizard()} />}
+      {confirmDelete && selected && !selected.is_default && <ConfirmDialog title={`Delete ${selected.name}?`} body="This protection setup and its exceptions will be permanently deleted." confirmLabel="Delete protection" busyLabel="Deleting protection…" busy={busy} onCancel={() => setConfirmDelete(false)} onConfirm={() => void removeSelected()} detail={<div className="confirm-dialog-impact warning"><Shield size={18} /><span><strong>{selected.device_ips.length} assigned device{selected.device_ips.length === 1 ? "" : "s"} will return to Home</strong><small>The devices themselves and their activity history will remain.</small></span></div>} />}
     </div>
   );
 }
@@ -215,11 +227,13 @@ function ProtectionOverview({ protections, blocklists, devices, homeDevices, onM
   onCreate: () => void;
 }) {
   return (
-    <section className="protection-overview" aria-labelledby="protection-overview-title">
-      <header className="protection-overview-heading">
-        <div><span className="eyebrow">Your network</span><h2 id="protection-overview-title">Protection setups</h2><p>See what each setup does. Open one only when you want to make changes.</p></div>
-        <span className="protection-overview-count"><strong>{protections.length}</strong> active setup{protections.length === 1 ? "" : "s"}</span>
-      </header>
+    <section className="protection-overview" aria-label="Protection setups">
+      <div className="protection-overview-toolbar">
+        <div className="protection-overview-actions">
+          <span className="protection-overview-count"><strong>{protections.length}</strong> active setup{protections.length === 1 ? "" : "s"}</span>
+          <button type="button" onClick={onCreate}><Plus size={16} />New protection setup</button>
+        </div>
+      </div>
 
       <div className="protection-card-grid">
         {protections.map((protection) => {
@@ -241,9 +255,6 @@ function ProtectionOverview({ protections, blocklists, devices, homeDevices, onM
             </article>
           );
         })}
-        <button className="protection-create-card" type="button" onClick={onCreate}>
-          <span><Plus size={22} /></span><strong>Create another setup</strong><small>For children, guests, work devices, smart home gear, or anything else that needs different rules.</small>
-        </button>
       </div>
     </section>
   );

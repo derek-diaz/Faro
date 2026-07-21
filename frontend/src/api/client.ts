@@ -111,6 +111,7 @@ export type DeviceSummary = {
   notes?: string | null;
   device_type: string;
   type_confidence?: "high" | "medium" | "unknown" | string;
+  type_source?: "manual" | "automatic" | string;
   total_queries_today: number;
   blocked_queries_today: number;
   block_percentage: number;
@@ -415,7 +416,7 @@ export const api = {
   devices: () => request<DeviceSummary[]>("/api/devices"),
   device: (clientIP: string) => request<DeviceSummary>(`/api/devices/${encodeURIComponent(clientIP)}`),
   deviceReplay: (clientIP: string, range = "7d") => request<DeviceReplay>(`/api/devices/${encodeURIComponent(clientIP)}/replay?range=${encodeURIComponent(range)}`),
-  updateDeviceAlias: (clientIP: string, alias: { name: string; location?: string; notes?: string }) =>
+  updateDeviceAlias: (clientIP: string, alias: { name: string; location?: string; notes?: string; device_type?: string }) =>
     request<{ ok: boolean }>(`/api/devices/${encodeURIComponent(clientIP)}/alias`, { method: "PUT", body: JSON.stringify(alias) }),
   domainSummary: (domain: string) => request<DomainSummary>(`/api/domains/${encodeURIComponent(domain)}/summary`),
   search: (q: string) => request<SearchResults>(`/api/search?q=${encodeURIComponent(q)}`),

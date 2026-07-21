@@ -53,6 +53,24 @@ func TestInferDeviceTypeRecognizesExplicitAppleTVName(t *testing.T) {
 	}
 }
 
+func TestInferDeviceTypeDoesNotMistakeXboxLiveTrafficForAnXbox(t *testing.T) {
+	typ, confidence := inferDeviceTypeFromSignals("", "192.168.1.40", []string{
+		"device.auth.xboxlive.com",
+		"title.mgt.xboxlive.com",
+		"userpresence.xboxlive.com",
+	})
+	if typ != "Unknown" || confidence != "unknown" {
+		t.Fatalf("inferred %s (%s) from one Xbox domain family, want Unknown", typ, confidence)
+	}
+}
+
+func TestInferDeviceTypeRecognizesExplicitXboxName(t *testing.T) {
+	typ, confidence := inferDeviceTypeFromSignals("living-room-xbox", "192.168.1.41", []string{"device.auth.xboxlive.com"})
+	if typ != "Xbox" || confidence != "high" {
+		t.Fatalf("inferred %s (%s), want high-confidence Xbox", typ, confidence)
+	}
+}
+
 func TestFriendlyHostnameRemovesLocalSuffix(t *testing.T) {
 	if got := friendlyHostname("living-room-tv.home.arpa."); got != "living-room-tv" {
 		t.Fatalf("friendly hostname = %q", got)

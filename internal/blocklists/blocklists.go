@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sort"
@@ -21,10 +22,13 @@ const (
 	maxDownloadBytes       = 64 << 20
 	defaultRefreshInterval = 6 * time.Hour
 	defaultRefreshAge      = 24 * time.Hour
+	defaultStartupDelay    = 15 * time.Second
+	defaultRetryInterval   = 5 * time.Minute
 )
 
 type Refresher struct {
-	Store *db.Store
+	Store        *db.Store
+	DNSUpstreams []string
 }
 
 type listSnapshot struct {
@@ -62,7 +66,7 @@ func (r Refresher) Refresh(ctx context.Context, id int64) (int, error) {
 		return 0, err
 	}
 
-	body, err := openSource(ctx, source)
+	body, err := r.openSource(ctx, source)
 	if err != nil {
 		return 0, err
 	}
@@ -157,36 +161,60 @@ func (r Refresher) restore(ctx context.Context, id int64, snapshot listSnapshot)
 }
 
 type Manager struct {
-	Store      *db.Store
-	Refresher  Refresher
-	Apply      func(context.Context) error
-	Interval   time.Duration
-	RefreshAge time.Duration
+	Store         *db.Store
+	Refresher     Refresher
+	Apply         func(context.Context) error
+	Interval      time.Duration
+	RefreshAge    time.Duration
+	StartupDelay  time.Duration
+	RetryInterval time.Duration
 }
 
 func NewManager(store *db.Store, apply func(context.Context) error) *Manager {
-	return &Manager{Store: store, Refresher: Refresher{Store: store}, Apply: apply, Interval: defaultRefreshInterval, RefreshAge: defaultRefreshAge}
+	return &Manager{
+		Store:         store,
+		Refresher:     Refresher{Store: store},
+		Apply:         apply,
+		Interval:      defaultRefreshInterval,
+		RefreshAge:    defaultRefreshAge,
+		StartupDelay:  defaultStartupDelay,
+		RetryInterval: defaultRetryInterval,
+	}
 }
 
 func (m *Manager) Run(ctx context.Context) {
-	m.refreshDue(ctx)
 	interval := m.Interval
 	if interval <= 0 {
 		interval = defaultRefreshInterval
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	startupDelay := m.StartupDelay
+	if startupDelay == 0 {
+		startupDelay = defaultStartupDelay
+	} else if startupDelay < 0 {
+		startupDelay = 0
+	}
+	retryInterval := m.RetryInterval
+	if retryInterval <= 0 {
+		retryInterval = defaultRetryInterval
+	}
+	timer := time.NewTimer(startupDelay)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			m.refreshDue(ctx)
+		case <-timer.C:
+			next := interval
+			if m.refreshDue(ctx) {
+				next = retryInterval
+				log.Printf("automatic blocklist refresh will retry in %s", retryInterval)
+			}
+			timer.Reset(next)
 		}
 	}
 }
 
-func (m *Manager) refreshDue(ctx context.Context) {
+func (m *Manager) refreshDue(ctx context.Context) (failed bool) {
 	age := m.RefreshAge
 	if age <= 0 {
 		age = defaultRefreshAge
@@ -199,7 +227,7 @@ func (m *Manager) refreshDue(ctx context.Context) {
 	`, cutoff)
 	if err != nil {
 		log.Printf("automatic blocklist scan failed: %v", err)
-		return
+		return true
 	}
 	var ids []int64
 	for rows.Next() {
@@ -208,13 +236,19 @@ func (m *Manager) refreshDue(ctx context.Context) {
 			ids = append(ids, id)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		log.Printf("automatic blocklist scan failed: %v", err)
+		failed = true
+	}
 	_ = rows.Close()
 
 	for _, id := range ids {
 		if _, err := m.Refresher.RefreshAndApply(ctx, id, m.Apply); err != nil {
 			log.Printf("automatic blocklist refresh %d failed: %v", id, err)
+			failed = true
 		}
 	}
+	return failed
 }
 
 func Parse(reader io.Reader) ([]string, error) {
@@ -276,7 +310,7 @@ func Parse(reader io.Reader) ([]string, error) {
 	return domains, nil
 }
 
-func openSource(ctx context.Context, source string) (io.ReadCloser, error) {
+func (r Refresher) openSource(ctx context.Context, source string) (io.ReadCloser, error) {
 	if strings.HasPrefix(source, "file://") {
 		return os.Open(strings.TrimPrefix(source, "file://"))
 	}
@@ -284,7 +318,13 @@ func openSource(ctx context.Context, source string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	// Resolve downloads directly through Faro's configured public upstreams.
+	// Docker's host resolver may point back to Faro and cannot answer while the
+	// DNS container is still coming up during an install or upgrade.
+	resolver := newBlocklistResolver(r.blocklistDNSUpstreams(ctx))
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DialContext = blocklistDialContext(resolver)
+	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -294,4 +334,75 @@ func openSource(ctx context.Context, source string) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("download failed: %s", resp.Status)
 	}
 	return resp.Body, nil
+}
+
+func (r Refresher) blocklistDNSUpstreams(ctx context.Context) []string {
+	if len(r.DNSUpstreams) > 0 {
+		return r.DNSUpstreams
+	}
+	var configured, faroIP string
+	_ = r.Store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&configured)
+	_ = r.Store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'faro_lan_ip'`).Scan(&faroIP)
+	faroAddress := net.ParseIP(strings.TrimSpace(faroIP))
+	upstreams := make([]string, 0, 4)
+	for _, raw := range strings.Split(configured, ",") {
+		address := strings.TrimSpace(raw)
+		parsedAddress := net.ParseIP(address)
+		if parsedAddress == nil || faroAddress != nil && parsedAddress.Equal(faroAddress) {
+			continue
+		}
+		upstreams = append(upstreams, net.JoinHostPort(address, "53"))
+	}
+	if len(upstreams) == 0 {
+		return []string{"1.1.1.1:53", "9.9.9.9:53"}
+	}
+	return upstreams
+}
+
+func newBlocklistResolver(upstreams []string) *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var lastErr error
+			for _, upstream := range upstreams {
+				connection, err := (&net.Dialer{Timeout: 2 * time.Second}).DialContext(ctx, network, upstream)
+				if err == nil {
+					return connection, nil
+				}
+				lastErr = err
+			}
+			if lastErr == nil {
+				lastErr = errors.New("no DNS upstream is configured for blocklist downloads")
+			}
+			return nil, lastErr
+		},
+	}
+}
+
+func blocklistDialContext(resolver *net.Resolver) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil || net.ParseIP(strings.Trim(host, "[]")) != nil {
+			return dialer.DialContext(ctx, network, address)
+		}
+		addresses, lookupErr := resolver.LookupNetIP(ctx, "ip", strings.TrimSuffix(host, ".")+".")
+		if lookupErr != nil {
+			// Custom sources may use a local hostname known only to Faro or the
+			// host resolver. Preserve that path when public upstreams return NXDOMAIN.
+			return dialer.DialContext(ctx, network, address)
+		}
+		var lastErr error
+		for _, candidate := range addresses {
+			connection, err := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.String(), port))
+			if err == nil {
+				return connection, nil
+			}
+			lastErr = err
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("blocklist domain %s did not resolve", host)
+		}
+		return nil, lastErr
+	}
 }

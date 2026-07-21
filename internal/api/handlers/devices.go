@@ -26,6 +26,8 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 			d.name,
 			d.location,
 			d.notes,
+			d.device_type,
+			d.type_source,
 			COUNT(CASE WHEN q.timestamp >= ? THEN 1 END) AS total_queries_today,
 			COALESCE(SUM(CASE WHEN q.timestamp >= ? AND q.action = 'blocked' THEN 1 ELSE 0 END), 0) AS blocked_queries_today,
 			COALESCE(MAX(q.timestamp), strftime('%Y-%m-%dT%H:%M:%SZ', d.last_seen_at)) AS last_seen
@@ -41,34 +43,38 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type baseDevice struct {
-		deviceID int64
-		clientIP string
-		name     string
-		location any
-		notes    any
-		total    int
-		blocked  int
-		lastSeen any
+		deviceID   int64
+		clientIP   string
+		name       string
+		location   any
+		notes      any
+		deviceType string
+		typeSource string
+		total      int
+		blocked    int
+		lastSeen   any
 	}
 	baseDevices := []baseDevice{}
 	for rows.Next() {
-		var clientIP, name string
+		var clientIP, name, deviceType, typeSource string
 		var location, notes, lastSeen sql.NullString
 		var total, blocked int
 		var deviceID int64
-		if err := rows.Scan(&deviceID, &clientIP, &name, &location, &notes, &total, &blocked, &lastSeen); err != nil {
+		if err := rows.Scan(&deviceID, &clientIP, &name, &location, &notes, &deviceType, &typeSource, &total, &blocked, &lastSeen); err != nil {
 			writeError(w, err)
 			return
 		}
 		baseDevices = append(baseDevices, baseDevice{
-			deviceID: deviceID,
-			clientIP: clientIP,
-			name:     name,
-			location: nullableString(location),
-			notes:    nullableString(notes),
-			total:    total,
-			blocked:  blocked,
-			lastSeen: nullableString(lastSeen),
+			deviceID:   deviceID,
+			clientIP:   clientIP,
+			name:       name,
+			location:   nullableString(location),
+			notes:      nullableString(notes),
+			deviceType: deviceType,
+			typeSource: typeSource,
+			total:      total,
+			blocked:    blocked,
+			lastSeen:   nullableString(lastSeen),
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -97,7 +103,12 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 			identity.DisplayName = device.name
 			identity.NameSource = "manual"
 		}
-		identity.DeviceType, identity.TypeConfidence = inferDeviceTypeForDevice(r.Context(), s.store.DB, device.deviceID, device.clientIP, identity.DisplayName)
+		typeSource := "automatic"
+		if device.typeSource == "manual" && validManualDeviceType(device.deviceType) {
+			identity.DeviceType, identity.TypeConfidence, typeSource = device.deviceType, "high", "manual"
+		} else {
+			identity.DeviceType, identity.TypeConfidence = inferDeviceTypeForDevice(r.Context(), s.store.DB, device.deviceID, device.clientIP, identity.DisplayName)
+		}
 		protectionID, protectionName, protectionIcon := protectionForClient(r.Context(), s.store.DB, device.clientIP)
 		items = append(items, map[string]any{
 			"device_id":             device.deviceID,
@@ -111,6 +122,7 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 			"notes":                 device.notes,
 			"device_type":           identity.DeviceType,
 			"type_confidence":       identity.TypeConfidence,
+			"type_source":           typeSource,
 			"total_queries_today":   device.total,
 			"blocked_queries_today": device.blocked,
 			"block_percentage":      percentage(device.blocked, device.total),
@@ -238,9 +250,9 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	start := todayStart(r)
-	var name string
+	var name, storedDeviceType, storedTypeSource string
 	var location, notes sql.NullString
-	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT name, location, notes FROM devices WHERE id = ?`, deviceID).Scan(&name, &location, &notes)
+	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT name, location, notes, device_type, type_source FROM devices WHERE id = ?`, deviceID).Scan(&name, &location, &notes, &storedDeviceType, &storedTypeSource)
 	total := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE device_id = ? AND timestamp >= ?`, deviceID, start)
 	blocked := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE device_id = ? AND timestamp >= ? AND action = 'blocked'`, deviceID, start)
 	var firstSeen, lastSeen sql.NullString
@@ -251,7 +263,12 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 		identity.DisplayName = name
 		identity.NameSource = "manual"
 	}
-	identity.DeviceType, identity.TypeConfidence = inferDeviceTypeForDevice(r.Context(), s.store.DB, deviceID, clientIP, identity.DisplayName)
+	typeSource := "automatic"
+	if storedTypeSource == "manual" && validManualDeviceType(storedDeviceType) {
+		identity.DeviceType, identity.TypeConfidence, typeSource = storedDeviceType, "high", "manual"
+	} else {
+		identity.DeviceType, identity.TypeConfidence = inferDeviceTypeForDevice(r.Context(), s.store.DB, deviceID, clientIP, identity.DisplayName)
+	}
 	protectionID, protectionName, protectionIcon := protectionForClient(r.Context(), s.store.DB, clientIP)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"device_id":             deviceID,
@@ -266,6 +283,7 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 		"notes":                 nullableString(notes),
 		"device_type":           identity.DeviceType,
 		"type_confidence":       identity.TypeConfidence,
+		"type_source":           typeSource,
 		"total_queries_today":   total,
 		"blocked_queries_today": blocked,
 		"block_percentage":      percentage(blocked, total),
@@ -489,18 +507,31 @@ func (s *Handler) deviceAlias(w http.ResponseWriter, r *http.Request, clientIP s
 		return
 	}
 	name := strings.TrimSpace(input.Name)
-	if name == "" {
-		writeBadRequest(w, errors.New("name is required"))
-		return
-	}
 	deviceID, err := deviceidentity.ResolveAddress(r.Context(), s.store, clientIP, "manual")
 	if err != nil {
 		writeBadRequest(w, err)
 		return
 	}
+	var currentDeviceType, currentTypeSource string
+	if err := s.store.DB.QueryRowContext(r.Context(), `SELECT device_type, type_source FROM devices WHERE id = ?`, deviceID).Scan(&currentDeviceType, &currentTypeSource); err != nil {
+		writeError(w, err)
+		return
+	}
+	if input.DeviceType != nil {
+		currentDeviceType = strings.TrimSpace(*input.DeviceType)
+		if currentDeviceType != "" && !validManualDeviceType(currentDeviceType) {
+			writeBadRequest(w, errors.New("invalid device type"))
+			return
+		}
+		if currentDeviceType == "" {
+			currentTypeSource = ""
+		} else {
+			currentTypeSource = "manual"
+		}
+	}
 	if _, err := s.store.DB.ExecContext(r.Context(), `
-		UPDATE devices SET name = ?, location = ?, notes = ?, confirmed = 1, updated_at = CURRENT_TIMESTAMP
-		WHERE id = ?`, name, nullableInput(input.Location), nullableInput(input.Notes), deviceID); err != nil {
+		UPDATE devices SET name = ?, location = ?, notes = ?, device_type = ?, type_source = ?, confirmed = 1, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`, name, nullableInput(input.Location), nullableInput(input.Notes), currentDeviceType, currentTypeSource, deviceID); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -526,6 +557,26 @@ func (s *Handler) deviceAlias(w http.ResponseWriter, r *http.Request, clientIP s
 		Source:      "devices",
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+var manualDeviceTypes = map[string]bool{
+	"Computer":     true,
+	"Phone":        true,
+	"Tablet":       true,
+	"TV":           true,
+	"Game console": true,
+	"Router":       true,
+	"Server / NAS": true,
+	"Smart home":   true,
+	"Printer":      true,
+	"Camera":       true,
+	"Speaker":      true,
+	"Vehicle":      true,
+	"Other":        true,
+}
+
+func validManualDeviceType(deviceType string) bool {
+	return manualDeviceTypes[strings.TrimSpace(deviceType)]
 }
 
 func displayDeviceName(ctx context.Context, database *sql.DB, clientIP string) string {

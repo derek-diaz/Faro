@@ -154,6 +154,30 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestCreateBlocklistRejectsDuplicateSource(t *testing.T) {
+	handler, _ := newTestServer(t)
+	create := func(name, source string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/api/blocklists", bytes.NewBufferString(fmt.Sprintf(`{"name":%q,"url":%q,"assign_to_default":false}`, name, source)))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	first := create("Privacy list", "https://example.test/privacy.txt")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first create status = %d, body = %s", first.Code, first.Body.String())
+	}
+	duplicate := create("Another name", "https://example.test/privacy.txt")
+	if duplicate.Code != http.StatusConflict {
+		t.Fatalf("duplicate create status = %d, want %d, body = %s", duplicate.Code, http.StatusConflict, duplicate.Body.String())
+	}
+	if !bytes.Contains(duplicate.Body.Bytes(), []byte("already installed")) {
+		t.Fatalf("duplicate response did not explain the conflict: %s", duplicate.Body.String())
+	}
+}
+
 func TestEncryptedBackupExportAndRestore(t *testing.T) {
 	handler, reloader := newTestServer(t)
 	passphrase := "correct horse backup staple"

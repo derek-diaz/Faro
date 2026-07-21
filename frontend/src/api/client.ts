@@ -92,7 +92,18 @@ export type DNSDecision = {
 };
 
 export type DeviceSummary = {
+  device_id: number;
   client_ip: string;
+  addresses?: string[];
+  address_history?: Array<{
+    address: string;
+    family: "ipv4" | "ipv6" | string;
+    source: string;
+    confidence: string;
+    first_seen: string;
+    last_seen: string;
+  }>;
+  identity_source?: string;
   name: string;
   display_name?: string;
   name_source?: "manual" | "local_dns" | "reverse_dns" | string;

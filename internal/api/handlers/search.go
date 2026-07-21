@@ -32,16 +32,12 @@ func (s *Handler) search(w http.ResponseWriter, r *http.Request) {
 			LIMIT 8
 		`, like),
 		"devices": searchRows(r.Context(), s.store.DB, `
-			WITH clients AS (
-				SELECT client_ip FROM dns_queries
-				UNION
-				SELECT client_ip FROM device_aliases
-			)
-			SELECT clients.client_ip AS label, COALESCE(a.name, '') AS subtitle
-			FROM clients
-			LEFT JOIN device_aliases a ON a.client_ip = clients.client_ip
-			WHERE clients.client_ip LIKE ? OR a.name LIKE ?
-			ORDER BY COALESCE(a.name, clients.client_ip)
+			SELECT
+				(SELECT address FROM device_addresses WHERE device_id = d.id ORDER BY last_seen_at DESC, id DESC LIMIT 1) AS label,
+				COALESCE(NULLIF(d.name, ''), 'Observed device') AS subtitle
+			FROM devices d
+			WHERE d.name LIKE ? OR EXISTS (SELECT 1 FROM device_addresses a WHERE a.device_id = d.id AND a.address LIKE ?)
+			ORDER BY COALESCE(NULLIF(d.name, ''), label)
 			LIMIT 8
 		`, like, like),
 		"events": searchRows(r.Context(), s.store.DB, `

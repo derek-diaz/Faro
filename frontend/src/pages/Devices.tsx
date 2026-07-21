@@ -1,6 +1,8 @@
 import {
   Activity,
+  Check,
   Car,
+  ChevronDown,
   ChevronRight,
   Clock3,
   Gauge,
@@ -11,6 +13,7 @@ import {
   Laptop,
   LayoutDashboard,
   MonitorSmartphone,
+  Network,
   Search,
   Server,
   ShieldCheck,
@@ -18,13 +21,14 @@ import {
   Tv,
   X
 } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { api, type DeviceReplay as DeviceReplayData, type DeviceSummary, type DNSQuery, type Protection, type ReplayBucket } from "../api/client";
 import { DeviceReplay } from "../components/DeviceReplay";
 import { DomainFavicon } from "../components/DomainFavicon";
 import { EmptyState } from "../components/EmptyState";
 import { StatusBadge } from "../components/StatusBadge";
 import { TrafficChart } from "../components/TrafficChart";
+import { ProtectionIcon } from "./Protection";
 
 type DevicesProps = {
   devices: DeviceSummary[];
@@ -46,16 +50,21 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
   const [view, setView] = useState<DeviceView>("overview");
   const [search, setSearch] = useState("");
   const [protectionBusy, setProtectionBusy] = useState(false);
+  const [protectionMenuOpen, setProtectionMenuOpen] = useState(false);
+  const protectionMenuRef = useRef<HTMLDivElement>(null);
   const mostActiveDevice = useMemo(() => devices.reduce<DeviceSummary | null>((current, device) => {
     if (!current || device.total_queries_today > current.total_queries_today) return device;
     return current;
   }, null), [devices]);
+  const activeProtection = detail ? protections.find((protection) => protection.id === detail.protection_id) : null;
+  const activeProtectionName = activeProtection?.name ?? detail?.protection ?? detail?.profile ?? "Protection";
 
   useEffect(() => {
     if (!selectedClientIP) {
       setDetail(null);
       setEditing(false);
       setView("overview");
+      setProtectionMenuOpen(false);
       return;
     }
     let cancelled = false;
@@ -64,6 +73,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
     setDetailError("");
     setEditing(false);
     setView("overview");
+    setProtectionMenuOpen(false);
     api.device(selectedClientIP)
       .then((nextDetail) => {
         if (!cancelled) {
@@ -87,19 +97,30 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onSelectClient(null);
+      if (event.key !== "Escape") return;
+      if (protectionMenuOpen) setProtectionMenuOpen(false);
+      else onSelectClient(null);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => {
       document.body.style.overflow = previousOverflow;
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [onSelectClient, selectedClientIP]);
+  }, [onSelectClient, protectionMenuOpen, selectedClientIP]);
+
+  useEffect(() => {
+    if (!protectionMenuOpen) return;
+    function onPointerDown(event: PointerEvent) {
+      if (!protectionMenuRef.current?.contains(event.target as Node)) setProtectionMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [protectionMenuOpen]);
 
   const filteredDevices = useMemo(() => {
     const term = search.trim().toLowerCase();
     if (!term) return devices;
-    return devices.filter((device) => [device.name, device.display_name, device.client_ip, device.device_type, device.location, device.profile]
+    return devices.filter((device) => [device.name, device.display_name, device.client_ip, ...(device.addresses ?? []), device.device_type, device.location, device.profile]
       .some((value) => value?.toLowerCase().includes(term)));
   }, [devices, search]);
 
@@ -124,7 +145,8 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
   }
 
   async function changeProtection(protectionID: number) {
-    if (!selectedClientIP) return;
+    if (!selectedClientIP || protectionID === detail?.protection_id) return;
+    setProtectionMenuOpen(false);
     setProtectionBusy(true);
     setDetailError("");
     try {
@@ -151,6 +173,13 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
         <DeviceSummaryMetric icon={<Clock3 size={18} />} label="Most active" value={deviceDisplayName(mostActiveDevice) || "None"} detail={`${mostActiveDevice?.total_queries_today.toLocaleString() ?? "0"} requests today`} compact />
       </section>
 
+	  {devices.length === 1 && totals.requests > 0 && (
+		<section className="device-visibility-note" aria-label="Device visibility status">
+		  <Network size={19} />
+		  <div><strong>Faro currently sees one DNS source</strong><span>If that source is your router, Faro will keep protecting the network, but the router is hiding which device made each request.</span></div>
+		</section>
+	  )}
+
       <section className="panel device-inventory-panel">
         <div className="device-inventory-header">
           <div>
@@ -172,7 +201,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
           {filteredDevices.map((device) => (
             <button
               className={selectedClientIP === device.client_ip ? "device-table-row active" : "device-table-row"}
-              key={device.client_ip}
+              key={device.device_id || device.client_ip}
               type="button"
               onClick={() => onSelectClient(device.client_ip)}
               aria-pressed={selectedClientIP === device.client_ip}
@@ -215,13 +244,45 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
                       <span className="device-detail-icon">{deviceTypeIcon(detail.device_type)}</span>
                       <div>
                         <div className="device-detail-context">
-                          <label className="device-protection-select">
-                            <ShieldCheck size={14} />
-                            <span className="sr-only">Protection</span>
-                            <select value={detail.protection_id} disabled={protectionBusy} onChange={(event) => void changeProtection(Number(event.target.value))}>
-                              {protections.map((protection) => <option key={protection.id} value={protection.id}>{protection.name}</option>)}
-                            </select>
-                          </label>
+                          <div className="device-protection-picker" ref={protectionMenuRef}>
+                            <button
+                              type="button"
+                              className="device-protection-trigger"
+                              aria-label={`Protection: ${activeProtectionName}`}
+                              aria-haspopup="listbox"
+                              aria-expanded={protectionMenuOpen}
+                              aria-controls="device-protection-options"
+                              disabled={protectionBusy || protections.length === 0}
+                              onClick={() => setProtectionMenuOpen((open) => !open)}
+                            >
+                              <ProtectionIcon name={activeProtection?.icon ?? detail.protection_icon} size={15} />
+                              <span>{protectionBusy ? "Applying…" : activeProtectionName}</span>
+                              <ChevronDown className={protectionMenuOpen ? "open" : ""} size={14} />
+                            </button>
+                            {protectionMenuOpen && (
+                              <div className="device-protection-menu" id="device-protection-options" role="listbox" aria-label="Choose protection">
+                                <div className="device-protection-menu-heading"><strong>Choose protection</strong><span>Changes apply to this device immediately.</span></div>
+                                {protections.map((protection) => {
+                                  const selected = protection.id === detail.protection_id;
+                                  const assignedCount = protection.device_ips.length;
+                                  return (
+                                    <button
+                                      type="button"
+                                      role="option"
+                                      aria-selected={selected}
+                                      className={selected ? "selected" : ""}
+                                      key={protection.id}
+                                      onClick={() => void changeProtection(protection.id)}
+                                    >
+                                      <span className="device-protection-option-icon"><ProtectionIcon name={protection.icon} size={17} /></span>
+                                      <span><strong>{protection.name}</strong><small>{protection.is_default ? "Default for unassigned devices" : `${assignedCount} assigned device${assignedCount === 1 ? "" : "s"}`}</small></span>
+                                      <Check size={15} />
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
                           <span>{detail.client_ip}</span>
                         </div>
                         <h2>{deviceDisplayName(detail)}</h2>
@@ -309,6 +370,15 @@ function DeviceOverview({ detail, form, setForm, editing, saveAlias, onDomainSel
         <div><small>Today at a glance</small><h3>{story.headline}</h3><p>{story.detail}</p></div>
         <button className="secondary" type="button" onClick={onOpenReplay}><History size={16} /><span>Open replay</span></button>
       </section>
+
+	  <section className="device-identity-evidence">
+		<div className="device-section-heading"><div><h3>How Faro recognizes this device</h3><p>{detail.identity_source || "DNS activity"} · address changes stay connected automatically when Faro has a strong match</p></div></div>
+		<div className="device-address-history">
+		  {(detail.address_history?.length ? detail.address_history : (detail.addresses ?? [detail.client_ip]).map((address) => ({ address, family: address.includes(":") ? "ipv6" : "ipv4", source: "dns", confidence: "observed", first_seen: detail.first_seen ?? "", last_seen: detail.last_seen ?? "" }))).map((item, index) => (
+			<div key={item.address}><span className={index === 0 ? "current" : ""}>{index === 0 ? "Current" : "Seen before"}</span><code>{item.address}</code><small>{item.family.toUpperCase()} · Last seen {formatLastSeen(item.last_seen, true)}</small></div>
+		  ))}
+		</div>
+	  </section>
 
       <div className="device-overview-kpis">
         <OverviewKpi icon={<Activity size={17} />} label="Queries today" value={detail.total_queries_today.toLocaleString()} detail="DNS requests" />
@@ -451,9 +521,11 @@ function deviceDisplayName(device?: DeviceSummary | null) {
 }
 
 function deviceIdentityCaption(device: DeviceSummary) {
+	const additionalAddresses = Math.max(0, (device.addresses?.length ?? 1) - 1);
+	const addressLabel = additionalAddresses > 0 ? `${device.client_ip} + ${additionalAddresses} more` : device.client_ip;
   if (!device.display_name && !device.name) return "Name not discovered";
-  if (device.name_source === "manual" || device.name) return device.client_ip;
-  return `${device.client_ip} · Auto-detected`;
+  if (device.name_source === "manual" || device.name) return addressLabel;
+  return `${addressLabel} · Auto-detected`;
 }
 
 function deviceIdentityDescription(device: DeviceSummary) {

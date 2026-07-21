@@ -171,6 +171,11 @@ func inferDeviceType(ctx context.Context, database *sql.DB, clientIP, name strin
 	return inferDeviceTypeFromSignals(name, clientIP, domains)
 }
 
+func inferDeviceTypeForDevice(ctx context.Context, database *sql.DB, deviceID int64, primaryAddress, name string) (string, string) {
+	domains := topLabels(ctx, database, `SELECT domain, COUNT(*) FROM dns_queries WHERE device_id = ? GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 80`, deviceID)
+	return inferDeviceTypeFromSignals(name, primaryAddress, domains)
+}
+
 func inferDeviceTypeFromSignals(name, clientIP string, domains []string) (string, string) {
 	tokens := signalTokens(name)
 	if tokens["appletv"] || (tokens["apple"] && tokens["tv"]) {

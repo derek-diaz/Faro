@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/derek/faro/internal/db"
+	deviceidentity "github.com/derek/faro/internal/devices"
 )
 
 func TestExplainDomainCapturesMatchingRulesAndPrecedence(t *testing.T) {
@@ -118,6 +119,42 @@ func TestRenderRoutesAssignedClientsBeforeHome(t *testing.T) {
 	homeDecision := ExplainDomainForClient(context.Background(), store, "games.example", "192.168.7.24")
 	if homeDecision.Action != "allowed" || homeDecision.Protection == nil || homeDecision.Protection.Name != "Home" {
 		t.Fatalf("Home should not inherit the custom rule: %#v", homeDecision)
+	}
+}
+
+func TestProtectionFollowsCorrelatedAddress(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB.Exec(`
+		INSERT INTO dns_records(hostname, type, value) VALUES('tablet.home', 'A', '192.168.7.30');
+		INSERT INTO dns_records(hostname, type, value) VALUES('tablet.home', 'AAAA', '2001:db8::30')`); err != nil {
+		t.Fatal(err)
+	}
+	deviceID, err := deviceidentity.ResolveAddress(context.Background(), store, "192.168.7.30", "dns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.DB.Exec(`INSERT INTO protection_profiles(name, icon) VALUES('Children', 'baby')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	protectionID, _ := result.LastInsertId()
+	if _, err := store.DB.Exec(`INSERT INTO protection_block_entries(protection_id, domain) VALUES(?, 'games.example'); INSERT INTO device_protection_memberships(device_id, protection_id) VALUES(?, ?)`, protectionID, deviceID, protectionID); err != nil {
+		t.Fatal(err)
+	}
+	correlatedID, err := deviceidentity.ResolveAddress(context.Background(), store, "2001:db8::30", "dns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if correlatedID != deviceID {
+		t.Fatalf("correlated address belongs to device %d, want %d", correlatedID, deviceID)
+	}
+	decision := ExplainDomainForClient(context.Background(), store, "games.example", "2001:db8::30")
+	if decision.Action != "blocked" || decision.Protection == nil || decision.Protection.ID != protectionID {
+		t.Fatalf("protection did not follow correlated address: %#v", decision)
 	}
 }
 

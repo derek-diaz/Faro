@@ -112,6 +112,57 @@ func (s *Store) migrate(ctx context.Context) error {
 			FOREIGN KEY(protection_id) REFERENCES protection_profiles(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_device_protection_profile ON device_protection_assignments(protection_id);`,
+		`CREATE TABLE IF NOT EXISTS devices (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL DEFAULT '',
+			location TEXT,
+			notes TEXT,
+			device_type TEXT NOT NULL DEFAULT '',
+			type_source TEXT NOT NULL DEFAULT '',
+			confirmed INTEGER NOT NULL DEFAULT 0 CHECK(confirmed IN (0, 1)),
+			first_seen_at TEXT,
+			last_seen_at TEXT,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS device_addresses (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			device_id INTEGER NOT NULL,
+			address TEXT NOT NULL UNIQUE,
+			family TEXT NOT NULL CHECK(family IN ('ipv4', 'ipv6')),
+			source TEXT NOT NULL DEFAULT 'dns',
+			confidence TEXT NOT NULL DEFAULT 'observed',
+			first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_device_addresses_device ON device_addresses(device_id);`,
+		`CREATE TABLE IF NOT EXISTS device_identifiers (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			device_id INTEGER NOT NULL,
+			kind TEXT NOT NULL,
+			value TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT '',
+			confidence TEXT NOT NULL DEFAULT 'observed',
+			first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE,
+			UNIQUE(kind, value)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_device_identifiers_device ON device_identifiers(device_id);`,
+		`CREATE TABLE IF NOT EXISTS device_protection_memberships (
+			device_id INTEGER PRIMARY KEY,
+			protection_id INTEGER NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE,
+			FOREIGN KEY(protection_id) REFERENCES protection_profiles(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_device_membership_protection ON device_protection_memberships(protection_id);`,
 		`CREATE TABLE IF NOT EXISTS allowlist_entries (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			domain TEXT NOT NULL UNIQUE,
@@ -230,12 +281,134 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE dns_queries ADD COLUMN rcode TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE dns_queries ADD COLUMN decision_reason TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE dns_queries ADD COLUMN decision_metadata TEXT NOT NULL DEFAULT '{}'`,
+		`ALTER TABLE dns_queries ADD COLUMN device_id INTEGER`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, column); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err
 		}
 	}
+	if _, err := s.DB.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_dns_queries_device_timestamp ON dns_queries(device_id, timestamp)`); err != nil {
+		return err
+	}
+	if err := s.migrateDeviceIdentities(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+type legacyDeviceIdentity struct {
+	address   string
+	name      string
+	location  sql.NullString
+	notes     sql.NullString
+	firstSeen sql.NullString
+	lastSeen  sql.NullString
+}
+
+// migrateDeviceIdentities moves the original IP-keyed device data into stable
+// device records. The original tables deliberately remain available so older
+// backups and clients can still be restored while the application transitions.
+func (s *Store) migrateDeviceIdentities(ctx context.Context) error {
+	var completed string
+	err := s.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'device_identity_migration_completed'`).Scan(&completed)
+	if err == nil && completed == "true" {
+		return nil
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+
+	rows, err := s.DB.QueryContext(ctx, `
+		WITH known_addresses AS (
+			SELECT client_ip FROM dns_queries
+			UNION SELECT client_ip FROM device_aliases
+			UNION SELECT client_ip FROM device_protection_assignments
+		)
+		SELECT k.client_ip,
+		       COALESCE(a.name, ''), a.location, a.notes,
+		       MIN(q.timestamp), MAX(q.timestamp)
+		FROM known_addresses k
+		LEFT JOIN device_aliases a ON a.client_ip = k.client_ip
+		LEFT JOIN dns_queries q ON q.client_ip = k.client_ip
+		WHERE TRIM(k.client_ip) <> ''
+		GROUP BY k.client_ip, a.name, a.location, a.notes
+		ORDER BY k.client_ip`)
+	if err != nil {
+		return err
+	}
+	var identities []legacyDeviceIdentity
+	for rows.Next() {
+		var identity legacyDeviceIdentity
+		if err := rows.Scan(&identity.address, &identity.name, &identity.location, &identity.notes, &identity.firstSeen, &identity.lastSeen); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		identities = append(identities, identity)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, identity := range identities {
+		family := "ipv4"
+		if strings.Contains(identity.address, ":") {
+			family = "ipv6"
+		}
+		var deviceID int64
+		err := tx.QueryRowContext(ctx, `SELECT device_id FROM device_addresses WHERE address = ?`, identity.address).Scan(&deviceID)
+		if err == sql.ErrNoRows {
+			result, insertErr := tx.ExecContext(ctx, `
+				INSERT INTO devices(name, location, notes, confirmed, first_seen_at, last_seen_at)
+				VALUES(?, ?, ?, CASE WHEN ? <> '' THEN 1 ELSE 0 END, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))`,
+				identity.name, identity.location, identity.notes, identity.name, identity.firstSeen, identity.lastSeen)
+			if insertErr != nil {
+				return insertErr
+			}
+			deviceID, err = result.LastInsertId()
+			if err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO device_addresses(device_id, address, family, source, confidence, first_seen_at, last_seen_at)
+				VALUES(?, ?, ?, 'migration', 'observed', COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))`,
+				deviceID, identity.address, family, identity.firstSeen, identity.lastSeen); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE dns_queries
+		SET device_id = (SELECT device_id FROM device_addresses WHERE address = dns_queries.client_ip)
+		WHERE device_id IS NULL`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO device_protection_memberships(device_id, protection_id, created_at, updated_at)
+		SELECT da.device_id, legacy.protection_id, legacy.created_at, legacy.updated_at
+		FROM device_protection_assignments legacy
+		JOIN device_addresses da ON da.address = legacy.client_ip
+		ON CONFLICT(device_id) DO UPDATE SET
+			protection_id = excluded.protection_id,
+			updated_at = excluded.updated_at`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO settings(key, value, updated_at)
+		VALUES('device_identity_migration_completed', 'true', CURRENT_TIMESTAMP)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) migrateProtection(ctx context.Context) error {

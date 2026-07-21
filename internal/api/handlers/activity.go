@@ -365,7 +365,7 @@ func queryEvents(ctx context.Context, database *sql.DB, limit int, search, scope
 		SELECT q.id, q.timestamp, q.client_ip, q.domain, q.query_type, q.action, q.source, q.upstream, q.latency_ms,
 		       q.rcode, q.decision_reason, q.decision_metadata, COALESCE(a.name, '')
 		FROM dns_queries q
-		LEFT JOIN device_aliases a ON a.client_ip = q.client_ip
+		LEFT JOIN devices a ON a.id = q.device_id
 	`
 	clauses := []string{}
 	args := []any{}
@@ -451,7 +451,7 @@ func firstSeenDeviceEvents(ctx context.Context, database *sql.DB, limit int, sea
 	query := `
 		SELECT q.client_ip, MIN(q.timestamp) AS first_seen, COALESCE(a.name, '') AS name, a.location
 		FROM dns_queries q
-		LEFT JOIN device_aliases a ON a.client_ip = q.client_ip
+		LEFT JOIN devices a ON a.id = q.device_id
 		GROUP BY q.client_ip
 	`
 	args := []any{}
@@ -506,7 +506,7 @@ func activityCounts(ctx context.Context, database *sql.DB, search string) map[st
 		       COALESCE(SUM(CASE WHEN q.source = 'upstream' THEN 1 ELSE 0 END), 0),
 		       COALESCE(SUM(CASE WHEN q.action = 'blocked' THEN 1 ELSE 0 END), 0)
 		FROM dns_queries q
-		LEFT JOIN device_aliases a ON a.client_ip = q.client_ip
+		LEFT JOIN devices a ON a.id = q.device_id
 	`
 	args := []any{}
 	if search != "" {
@@ -543,7 +543,7 @@ func firstSeenDeviceEventCount(ctx context.Context, database *sql.DB, search str
 		SELECT COUNT(*) FROM (
 			SELECT q.client_ip
 			FROM dns_queries q
-			LEFT JOIN device_aliases a ON a.client_ip = q.client_ip
+			LEFT JOIN devices a ON a.id = q.device_id
 			GROUP BY q.client_ip
 	`
 	args := []any{}

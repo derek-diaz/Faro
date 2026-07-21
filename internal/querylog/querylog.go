@@ -18,6 +18,7 @@ import (
 
 	"github.com/derek/faro/internal/coredns"
 	"github.com/derek/faro/internal/db"
+	deviceidentity "github.com/derek/faro/internal/devices"
 )
 
 var logPattern = regexp.MustCompile(`\s(\d+\.\d+\.\d+\.\d+|\[[0-9a-fA-F:]+\]|[0-9a-fA-F:]+):\d+\s+-\s+\d+\s+"([A-Z]+)\s+IN\s+([^"\s]+).*"\s+([A-Z]+).*\s([0-9.]+)s`)
@@ -250,6 +251,10 @@ func (t *Tailer) insert(ctx context.Context, line string) {
 		return
 	}
 
+	deviceID, identityErr := deviceidentity.ResolveAddress(ctx, t.Store, entry.clientIP, "dns")
+	if identityErr != nil {
+		log.Printf("resolve DNS client identity failed: %v", identityErr)
+	}
 	decision := coredns.ExplainDomainForClient(ctx, t.Store, entry.domain, entry.clientIP)
 	action := decision.Action
 	source := ""
@@ -277,9 +282,9 @@ func (t *Tailer) insert(ctx context.Context, line string) {
 	}
 
 	_, err = t.Store.DB.ExecContext(ctx, `
-		INSERT INTO dns_queries(timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, time.Now().UTC().Format(time.RFC3339), entry.clientIP, entry.domain, entry.queryType, action, source, entry.upstream, entry.latencyMS, entry.rcode, decision.Reason, string(metadata))
+		INSERT INTO dns_queries(timestamp, client_ip, device_id, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata)
+		VALUES(?, ?, NULLIF(?, 0), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, time.Now().UTC().Format(time.RFC3339), entry.clientIP, deviceID, entry.domain, entry.queryType, action, source, entry.upstream, entry.latencyMS, entry.rcode, decision.Reason, string(metadata))
 	if err != nil {
 		log.Printf("insert dns query failed: %v", err)
 	}

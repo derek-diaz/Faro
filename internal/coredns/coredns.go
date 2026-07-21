@@ -303,7 +303,12 @@ func (m *Manager) protections(ctx context.Context) ([]protectionRender, error) {
 	for index := range protections {
 		protection := &protections[index]
 		protection.HostsFile = fmt.Sprintf("protection-%d.hosts", protection.ID)
-		protection.ClientIPs, err = domains(ctx, m.Store, `SELECT client_ip FROM device_protection_assignments WHERE protection_id = ?`, protection.ID)
+		protection.ClientIPs, err = domains(ctx, m.Store, `
+			SELECT address FROM device_addresses a
+			JOIN device_protection_memberships m ON m.device_id = a.device_id
+			WHERE m.protection_id = ?
+			UNION
+			SELECT client_ip FROM device_protection_assignments WHERE protection_id = ?`, protection.ID, protection.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -469,11 +474,13 @@ func ExplainDomainForClient(ctx context.Context, store *db.Store, domain, client
 	err = store.DB.QueryRowContext(ctx, `
 		SELECT p.id, p.name
 		FROM protection_profiles p
-		LEFT JOIN device_protection_assignments a ON a.protection_id = p.id AND a.client_ip = ?
-		WHERE a.client_ip IS NOT NULL OR p.is_default = 1
-		ORDER BY CASE WHEN a.client_ip IS NOT NULL THEN 0 ELSE 1 END
+		LEFT JOIN device_addresses da ON da.address = ?
+		LEFT JOIN device_protection_memberships m ON m.protection_id = p.id AND m.device_id = da.device_id
+		LEFT JOIN device_protection_assignments legacy ON legacy.protection_id = p.id AND legacy.client_ip = ?
+		WHERE m.device_id IS NOT NULL OR legacy.client_ip IS NOT NULL OR p.is_default = 1
+		ORDER BY CASE WHEN m.device_id IS NOT NULL THEN 0 WHEN legacy.client_ip IS NOT NULL THEN 1 ELSE 2 END
 		LIMIT 1
-	`, clientIP).Scan(&protectionID, &protectionName)
+	`, clientIP, clientIP).Scan(&protectionID, &protectionName)
 	if err != nil {
 		return decision
 	}

@@ -188,3 +188,48 @@ func TestNormalizeRecordRejectsMismatchedAddressFamilies(t *testing.T) {
 		}
 	}
 }
+
+func TestDeviceIdentityMigrationPreservesLegacyData(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	var protectionID int64
+	if err := store.DB.QueryRow(`SELECT id FROM protection_profiles WHERE is_default = 1`).Scan(&protectionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`
+		INSERT INTO device_aliases(client_ip, name, location, notes) VALUES('192.168.1.44', 'Living room TV', 'Living room', 'OLED');
+		INSERT INTO device_protection_assignments(client_ip, protection_id) VALUES('192.168.1.44', ?);
+		INSERT INTO dns_queries(timestamp, client_ip, domain, query_type, action, source)
+		VALUES('2026-07-18T10:00:00Z', '192.168.1.44', 'stream.example', 'A', 'allowed', 'upstream');
+		DELETE FROM settings WHERE key = 'device_identity_migration_completed'`, protectionID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateDeviceIdentities(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var deviceID, queryDeviceID, membershipID int64
+	var name, location, notes string
+	if err := store.DB.QueryRow(`
+		SELECT d.id, d.name, d.location, d.notes
+		FROM devices d JOIN device_addresses a ON a.device_id = d.id
+		WHERE a.address = '192.168.1.44'`).Scan(&deviceID, &name, &location, &notes); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Living room TV" || location != "Living room" || notes != "OLED" {
+		t.Fatalf("legacy alias was not preserved: name=%q location=%q notes=%q", name, location, notes)
+	}
+	if err := store.DB.QueryRow(`SELECT device_id FROM dns_queries WHERE client_ip = '192.168.1.44'`).Scan(&queryDeviceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.QueryRow(`SELECT device_id FROM device_protection_memberships WHERE protection_id = ?`, protectionID).Scan(&membershipID); err != nil {
+		t.Fatal(err)
+	}
+	if queryDeviceID != deviceID || membershipID != deviceID {
+		t.Fatalf("stable references = query %d membership %d, want device %d", queryDeviceID, membershipID, deviceID)
+	}
+}

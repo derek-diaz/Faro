@@ -47,6 +47,20 @@ func (s *Handler) blocklists(w http.ResponseWriter, r *http.Request) {
 			writeBadRequest(w, err)
 			return
 		}
+		var existingID int64
+		err = s.store.DB.QueryRowContext(r.Context(), `
+			SELECT id FROM blocklists
+			WHERE lower(name) = lower(?) OR lower(url) = lower(?)
+			LIMIT 1
+		`, strings.TrimSpace(input.Name), sourceURL).Scan(&existingID)
+		if err == nil {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": "that blocklist is already installed"})
+			return
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			writeError(w, err)
+			return
+		}
 		enabled := boolInt(input.Enabled == nil || *input.Enabled)
 		result, err := s.store.DB.ExecContext(r.Context(), `INSERT INTO blocklists(name, url, enabled) VALUES(?, ?, ?)`, strings.TrimSpace(input.Name), sourceURL, enabled)
 		if err != nil {

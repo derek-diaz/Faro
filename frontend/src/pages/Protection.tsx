@@ -9,9 +9,11 @@ import {
   House,
   Laptop,
   Lightbulb,
+  ListFilter,
   MonitorPlay,
   Plus,
   Save,
+  Settings2,
   Shield,
   Smartphone,
   Trash2,
@@ -74,11 +76,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  const selected = protections.find((item) => item.id === selectedID) ?? protections[0];
-
-  useEffect(() => {
-    if (!selectedID && protections[0]) setSelectedID(protections[0].id);
-  }, [protections, selectedID]);
+  const selected = protections.find((item) => item.id === selectedID) ?? null;
 
   useEffect(() => {
     if (selected) setEditor(protectionDraft(selected));
@@ -116,9 +114,9 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
     setBusy(true);
     setError("");
     try {
-      const result = await api.createProtection(cleanInput(draft));
+      await api.createProtection(cleanInput(draft));
       await refresh();
-      setSelectedID(result.id);
+      setSelectedID(null);
       setWizard(false);
       setNotice(`${draft.name} is ready.`);
     } catch (caught) {
@@ -134,7 +132,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
     setError("");
     try {
       await api.deleteProtection(selected.id);
-      setSelectedID(protections.find((item) => item.is_default)?.id ?? null);
+      setSelectedID(null);
       await refresh();
       setNotice(`${selected.name} was deleted. Its devices now use Home.`);
     } catch (caught) {
@@ -144,7 +142,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
     }
   }
 
-  if (!selected) return <div className="panel protection-empty">Preparing Home protection…</div>;
+  if (!protections.length) return <div className="panel protection-empty">Preparing Home protection…</div>;
 
   return (
     <div className="protection-page">
@@ -155,19 +153,15 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
 
       {(error || notice) && <div className={`protection-message ${error ? "error" : "success"}`} role="status"><span>{error || notice}</span><button className="icon-button" type="button" aria-label="Dismiss" onClick={() => { setError(""); setNotice(""); }}><X size={15} /></button></div>}
 
-      <div className="protection-workspace">
-        <aside className="protection-list" aria-label="Protection setups">
-          {protections.map((protection) => (
-            <button key={protection.id} type="button" className={selected.id === protection.id ? "active" : ""} onClick={() => { setSelectedID(protection.id); setError(""); setNotice(""); }}>
-              <ProtectionIcon name={protection.icon} />
-              <span><strong>{protection.name}</strong><small>{protection.is_default ? "Default for your network" : `${protection.device_ips.length} device${protection.device_ips.length === 1 ? "" : "s"}`}</small></span>
-              <ChevronRight size={16} />
-            </button>
-          ))}
-          <button className="add" type="button" onClick={openWizard}><Plus size={16} /><span><strong>Add another</strong><small>Create a custom setup</small></span></button>
-        </aside>
-
-        <form className="protection-editor panel" onSubmit={(event) => void saveSelected(event)}>
+      {!selected ? (
+        <ProtectionOverview protections={protections} blocklists={blocklists} devices={devices} homeDevices={homeDevices} onManage={(id) => { setSelectedID(id); setError(""); setNotice(""); }} onCreate={openWizard} />
+      ) : (
+        <div className="protection-edit-view">
+          <div className="protection-edit-nav">
+            <button className="secondary" type="button" onClick={() => { setSelectedID(null); setError(""); }}><ChevronLeft size={16} />All protection setups</button>
+            <span><small>Editing setup</small><strong>{selected.name}</strong></span>
+          </div>
+          <form className="protection-editor panel" onSubmit={(event) => void saveSelected(event)}>
           <div className="protection-editor-heading">
             <div className="protection-title-icon"><ProtectionIcon name={editor.icon} /></div>
             <div><span>{selected.is_default ? "NETWORK DEFAULT" : "CUSTOM PROTECTION"}</span><input value={editor.name} disabled={selected.is_default} maxLength={40} aria-label="Protection name" onChange={(event) => setEditor({ ...editor, name: event.target.value })} /><p>{selected.is_default ? "Any device not assigned elsewhere uses Home." : "Only the devices selected below use these choices."}</p></div>
@@ -203,11 +197,55 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
           </EditorSection>
 
           <footer className="protection-save-bar"><span>Changes apply to DNS as soon as they are saved.</span><button type="submit" disabled={busy || !editor.name.trim()}><Save size={16} />{busy ? "Applying…" : "Save changes"}</button></footer>
-        </form>
-      </div>
+          </form>
+        </div>
+      )}
 
       {wizard && <ProtectionWizard step={step} setStep={setStep} draft={draft} setDraft={setDraft} blocklists={blocklists} devices={devices} busy={busy} error={error} onManageBlocklists={() => { setWizard(false); onManageBlocklists(); }} onClose={() => { if (!busy) { setWizard(false); setError(""); } }} onFinish={() => void finishWizard()} />}
     </div>
+  );
+}
+
+function ProtectionOverview({ protections, blocklists, devices, homeDevices, onManage, onCreate }: {
+  protections: Protection[];
+  blocklists: Blocklist[];
+  devices: DeviceSummary[];
+  homeDevices: DeviceSummary[];
+  onManage: (id: number) => void;
+  onCreate: () => void;
+}) {
+  return (
+    <section className="protection-overview" aria-labelledby="protection-overview-title">
+      <header className="protection-overview-heading">
+        <div><span className="eyebrow">Your network</span><h2 id="protection-overview-title">Protection setups</h2><p>See what each setup does. Open one only when you want to make changes.</p></div>
+        <span className="protection-overview-count"><strong>{protections.length}</strong> active setup{protections.length === 1 ? "" : "s"}</span>
+      </header>
+
+      <div className="protection-card-grid">
+        {protections.map((protection) => {
+          const installed = blocklists.filter((item) => protection.blocklist_ids.includes(item.id));
+          const protectedDevices = protection.is_default ? homeDevices : devices.filter((device) => protection.device_ips.includes(device.client_ip));
+          const exceptionCount = protection.allow_entries.length + protection.block_entries.length;
+          return (
+            <article className={`protection-summary-card panel ${protection.is_default ? "default" : ""}`} key={protection.id}>
+              <div className="protection-card-top">
+                <span className="protection-card-icon"><ProtectionIcon name={protection.icon} /></span>
+                <span className="protection-card-copy"><small>{protection.is_default ? "Network default" : "Custom setup"}</small><strong>{protection.name}</strong><p>{protection.is_default ? "Automatically protects every device that does not use another setup." : "Applies only to the devices assigned below."}</p></span>
+              </div>
+              <div className="protection-card-facts">
+                <div><ListFilter size={16} /><span><small>Blocking</small><strong>{installed.length ? installed.map((item) => item.name).join(", ") : "No lists selected"}</strong></span></div>
+                <div><MonitorPlay size={16} /><span><small>Devices</small><strong>{protectedDevices.length ? `${protectedDevices.length} currently covered` : protection.is_default ? "Waiting for devices" : "Assign later"}</strong></span></div>
+                <div><Shield size={16} /><span><small>Exceptions</small><strong>{exceptionCount ? `${exceptionCount} custom rule${exceptionCount === 1 ? "" : "s"}` : "None"}</strong></span></div>
+              </div>
+              <footer><button className="secondary" type="button" onClick={() => onManage(protection.id)}><Settings2 size={16} />Manage {protection.name}</button></footer>
+            </article>
+          );
+        })}
+        <button className="protection-create-card" type="button" onClick={onCreate}>
+          <span><Plus size={22} /></span><strong>Create another setup</strong><small>For children, guests, work devices, smart home gear, or anything else that needs different rules.</small>
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -257,7 +295,7 @@ function IconPicker({ value, onChange, compact = false }: { value: ProtectionIco
   return <div className={`protection-icon-picker ${compact ? "compact" : ""}`}>{icons.map((item) => { const Icon = item.icon; return <button type="button" className={value === item.key ? "selected" : ""} title={item.label} aria-label={item.label} aria-pressed={value === item.key} key={item.key} onClick={() => onChange(item.key)}><Icon size={compact ? 18 : 22} />{!compact && <span>{item.label}</span>}</button>; })}</div>;
 }
 
-export function ProtectionIcon({ name }: { name: ProtectionIconKey }) { const Icon = icons.find((item) => item.key === name)?.icon ?? Shield; return <Icon size={20} />; }
+export function ProtectionIcon({ name, size = 20 }: { name: ProtectionIconKey; size?: number }) { const Icon = icons.find((item) => item.key === name)?.icon ?? Shield; return <Icon size={size} />; }
 
 function DeviceChoices({ devices, selected, onChange }: { devices: DeviceSummary[]; selected: string[]; onChange: (selected: string[]) => void }) {
   if (!devices.length) return <p className="protection-inline-empty">No devices have been observed yet. You can assign devices later.</p>;

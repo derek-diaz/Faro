@@ -1,5 +1,5 @@
 import { AlertCircle, Check, CheckCircle2, Database, Download, Filter, Info, Plus, RefreshCw, Search, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
-import { useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { api, type Blocklist } from "../api/client";
 import { EmptyState } from "../components/EmptyState";
 import { blocklistCatalog, blocklistCategories, type BlocklistCategory, type CatalogBlocklist } from "../data/blocklists";
@@ -11,13 +11,15 @@ type BlocklistsProps = {
 
 type View = "installed" | "available";
 type Notice = { tone: "success" | "error"; text: string } | null;
+type Installation = { id: string; name: string; stage: "Adding source" | "Downloading and checking domains" | "Updating Faro's library" };
 
 export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
   const [view, setView] = useState<View>("installed");
   const [form, setForm] = useState({ name: "", url: "", enabled: true });
   const [showCustom, setShowCustom] = useState(false);
   const [busy, setBusy] = useState<number | null>(null);
-  const [installing, setInstalling] = useState<string | null>(null);
+  const [installing, setInstalling] = useState<Installation | null>(null);
+  const installationLock = useRef(false);
   const [updatingAll, setUpdatingAll] = useState(false);
   const [catalogQuery, setCatalogQuery] = useState("");
   const [catalogCategory, setCatalogCategory] = useState<"All" | BlocklistCategory>("All");
@@ -40,16 +42,22 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
   const filteredCatalog = catalogCandidates.filter((item) => catalogCategory === "All" || item.category === catalogCategory);
   const visibleCategories = blocklistCategories.filter((category) => filteredCatalog.some((item) => item.category === category.id));
   const hasCatalogFilters = Boolean(catalogQuery || catalogCategory !== "All" || catalogProvider !== "All" || catalogCompatibility !== "All");
+  const isInstalling = installing !== null;
 
   async function add(event: FormEvent) {
     event.preventDefault();
-    setInstalling("custom");
+    if (installationLock.current) return;
+    installationLock.current = true;
+    const installingName = form.name.trim() || "Custom blocklist";
+    setInstalling({ id: "custom", name: installingName, stage: "Adding source" });
     setNotice(null);
     let created = false;
     try {
       const result = await api.createBlocklist({ ...form, assign_to_default: false });
       created = true;
+      setInstalling({ id: "custom", name: installingName, stage: "Downloading and checking domains" });
       await api.refreshBlocklist(result.id);
+      setInstalling({ id: "custom", name: installingName, stage: "Updating Faro's library" });
       setForm({ name: "", url: "", enabled: true });
       setShowCustom(false);
       setView("installed");
@@ -57,8 +65,12 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
     } catch (caught) {
       setNotice({ tone: "error", text: created ? "The list was added, but its first update failed. Try updating it from Installed." : errorMessage(caught, "Could not add the blocklist.") });
     } finally {
-      await refresh();
-      setInstalling(null);
+      try {
+        await refresh();
+      } finally {
+        setInstalling(null);
+        installationLock.current = false;
+      }
     }
   }
 
@@ -104,13 +116,17 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
   }
 
   async function installCatalog(item: CatalogBlocklist) {
-    setInstalling(item.id);
+    if (installationLock.current) return;
+    installationLock.current = true;
+    setInstalling({ id: item.id, name: item.name, stage: "Adding source" });
     setNotice(null);
     let created = false;
     try {
       const result = await api.createBlocklist({ name: item.name, url: item.url, enabled: true, assign_to_default: false });
       created = true;
+      setInstalling({ id: item.id, name: item.name, stage: "Downloading and checking domains" });
       await api.refreshBlocklist(result.id);
+      setInstalling({ id: item.id, name: item.name, stage: "Updating Faro's library" });
       await refresh();
       setNotice({ tone: "success", text: `${item.name} was installed. Choose it from a Protection setup when you want to use it.` });
     } catch (caught) {
@@ -118,6 +134,7 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
       setNotice({ tone: "error", text: created ? `${item.name} was added, but its first update failed.` : errorMessage(caught, `Could not install ${item.name}.`) });
     } finally {
       setInstalling(null);
+      installationLock.current = false;
     }
   }
 
@@ -146,12 +163,17 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
           <button type="button" role="tab" aria-selected={view === "available"} className={view === "available" ? "active" : ""} onClick={() => setView("available")}>Available <span>{available.length}</span></button>
         </div>
         <div className="blocklist-primary-actions">
-          {view === "installed" && <button type="button" className="secondary" disabled={updatingAll || enabledCount === 0} onClick={() => void refreshAll()}><RefreshCw className={updatingAll ? "spinning" : ""} size={16} /><span>{updatingAll ? "Updating" : "Update all"}</span></button>}
-          <button type="button" onClick={() => setShowCustom(true)}><Plus size={16} /><span>Add custom</span></button>
+          {view === "installed" && <button type="button" className="secondary" disabled={updatingAll || isInstalling || enabledCount === 0} onClick={() => void refreshAll()}><RefreshCw className={updatingAll ? "spinning" : ""} size={16} /><span>{updatingAll ? "Updating" : "Update all"}</span></button>}
+          <button type="button" disabled={isInstalling} onClick={() => setShowCustom(true)}><Plus size={16} /><span>Add custom</span></button>
         </div>
       </div>
 
       {notice && <div className={`blocklist-notice ${notice.tone}`} role="status">{notice.tone === "success" ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}<span>{notice.text}</span><button type="button" className="icon-button" aria-label="Dismiss message" onClick={() => setNotice(null)}><X size={15} /></button></div>}
+
+      {installing && <div className="blocklist-install-progress" role="status" aria-live="polite" aria-label={`Installing ${installing.name}`}>
+        <span className="blocklist-install-spinner"><RefreshCw className="spinning" size={18} /></span>
+        <div><strong>Installing {installing.name}</strong><span>{installing.stage}. Keep this page open; other installations will be available when this finishes.</span><i aria-hidden="true"><b /></i></div>
+      </div>}
 
       {view === "installed" ? (
         <>
@@ -178,13 +200,13 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
                     <div className="installed-list-metric"><strong>{formatNumber(blocklist.entry_count ?? 0)}</strong><span>entries</span></div>
                     <div className="installed-list-updated"><strong>{formatUpdated(blocklist.last_refreshed_at)}</strong><span>{isStale(blocklist.last_refreshed_at) ? "Update recommended" : "Current"}</span></div>
                     <label className="blocklist-switch" title={blocklist.enabled ? "Disable list" : "Enable list"}>
-                      <input type="checkbox" checked={blocklist.enabled} disabled={busy === blocklist.id} onChange={() => void toggle(blocklist)} aria-label={`${blocklist.enabled ? "Disable" : "Enable"} ${blocklist.name}`} />
+                      <input type="checkbox" checked={blocklist.enabled} disabled={isInstalling || busy === blocklist.id} onChange={() => void toggle(blocklist)} aria-label={`${blocklist.enabled ? "Disable" : "Enable"} ${blocklist.name}`} />
                       <span aria-hidden="true" />
                       <em>{blocklist.enabled ? "Enabled" : "Paused"}</em>
                     </label>
                     <div className="installed-list-actions">
-                      <button type="button" className="icon-button" title="Update now" aria-label={`Update ${blocklist.name}`} disabled={busy === blocklist.id} onClick={() => void refreshList(blocklist)}><RefreshCw className={busy === blocklist.id ? "spinning" : ""} size={16} /></button>
-                      <button type="button" className="icon-button danger-icon" title="Remove" aria-label={`Remove ${blocklist.name}`} disabled={busy === blocklist.id} onClick={() => void remove(blocklist)}><Trash2 size={16} /></button>
+                      <button type="button" className="icon-button" title="Update now" aria-label={`Update ${blocklist.name}`} disabled={isInstalling || busy === blocklist.id} onClick={() => void refreshList(blocklist)}><RefreshCw className={busy === blocklist.id ? "spinning" : ""} size={16} /></button>
+                      <button type="button" className="icon-button danger-icon" title="Remove" aria-label={`Remove ${blocklist.name}`} disabled={isInstalling || busy === blocklist.id} onClick={() => void remove(blocklist)}><Trash2 size={16} /></button>
                     </div>
                   </article>
                 ))}
@@ -218,7 +240,7 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
                   <header><div><h3>{category.label}</h3><p>{category.description}</p></div><span>{filteredCatalog.filter((item) => item.category === category.id).length} available</span></header>
                   <div className="blocklist-catalog-grid">
                     {filteredCatalog.filter((item) => item.category === category.id).map((item) => (
-                      <article className={`catalog-blocklist-card ${item.recommended ? "recommended" : ""}`} key={item.id}>
+                      <article className={`catalog-blocklist-card ${item.recommended ? "recommended" : ""} ${installing?.id === item.id ? "installing" : ""}`} aria-busy={installing?.id === item.id} key={item.id}>
                         <div className="catalog-card-top"><span className={`compatibility-badge ${item.compatibility.toLowerCase()}`}>{item.compatibility === "Easy" ? "Easy to use" : item.compatibility}</span>{item.recommended && <span className="catalog-recommended"><CheckCircle2 size={13} /> Recommended</span>}</div>
                         <div><h4>{item.name}</h4><span className="catalog-provider">By {item.provider}</span></div>
                         <p>{item.description}</p>
@@ -226,7 +248,7 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
                         {item.caution && <div className="catalog-caution"><Info size={13} /><span>{item.caution}</span></div>}
                         <div className="catalog-card-footer">
                           <div className="catalog-tags">{item.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
-                          <button type="button" className="secondary catalog-install-button" disabled={installing === item.id} onClick={() => void installCatalog(item)}><Download size={15} /><span>{installing === item.id ? "Installing" : "Install"}</span></button>
+                          <button type="button" className="secondary catalog-install-button" disabled={isInstalling} onClick={() => void installCatalog(item)}>{installing?.id === item.id ? <RefreshCw className="spinning" size={15} /> : <Download size={15} />}<span>{installing?.id === item.id ? "Installing…" : "Install"}</span></button>
                         </div>
                       </article>
                     ))}
@@ -241,12 +263,12 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
       {showCustom && (
         <div className="blocklist-modal-backdrop" role="presentation">
           <section className="blocklist-modal" role="dialog" aria-modal="true" aria-labelledby="custom-blocklist-title">
-            <header><div><h2 id="custom-blocklist-title">Add custom blocklist</h2><p>Use a public hosts file or plain domain list URL.</p></div><button type="button" className="icon-button" aria-label="Close custom blocklist form" onClick={() => setShowCustom(false)}><X size={18} /></button></header>
+            <header><div><h2 id="custom-blocklist-title">Add custom blocklist</h2><p>Use a public hosts file or plain domain list URL.</p></div><button type="button" className="icon-button" aria-label="Close custom blocklist form" disabled={installing?.id === "custom"} onClick={() => setShowCustom(false)}><X size={18} /></button></header>
             <form className="stack-form" onSubmit={(event) => void add(event)}>
               <label>Name<input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="My blocklist" /></label>
               <label>URL<input required type="url" value={form.url} onChange={(event) => setForm({ ...form, url: event.target.value })} placeholder="https://example.com/hosts.txt" /></label>
               <label className="checkbox-row"><input type="checkbox" checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} />Enable after installation</label>
-              <div className="blocklist-modal-actions"><button type="button" className="secondary" onClick={() => setShowCustom(false)}>Cancel</button><button type="submit" disabled={installing === "custom"}><Plus size={16} /><span>{installing === "custom" ? "Adding and updating" : "Add blocklist"}</span></button></div>
+              <div className="blocklist-modal-actions"><button type="button" className="secondary" disabled={installing?.id === "custom"} onClick={() => setShowCustom(false)}>Cancel</button><button type="submit" disabled={isInstalling}>{installing?.id === "custom" ? <RefreshCw className="spinning" size={16} /> : <Plus size={16} />}<span>{installing?.id === "custom" ? "Installing…" : "Add blocklist"}</span></button></div>
             </form>
           </section>
         </div>

@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	deviceidentity "github.com/derek/faro/internal/devices"
 )
 
 func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
@@ -18,24 +20,19 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 	}
 	start := todayStart(r)
 	rows, err := s.store.DB.QueryContext(r.Context(), `
-		WITH clients AS (
-			SELECT client_ip FROM dns_queries
-			UNION
-			SELECT client_ip FROM device_aliases
-		)
 		SELECT
-			clients.client_ip,
-			COALESCE(a.name, '') AS name,
-			a.location,
-			a.notes,
+			d.id,
+			COALESCE((SELECT address FROM device_addresses WHERE device_id = d.id ORDER BY last_seen_at DESC, id DESC LIMIT 1), '') AS client_ip,
+			d.name,
+			d.location,
+			d.notes,
 			COUNT(CASE WHEN q.timestamp >= ? THEN 1 END) AS total_queries_today,
 			COALESCE(SUM(CASE WHEN q.timestamp >= ? AND q.action = 'blocked' THEN 1 ELSE 0 END), 0) AS blocked_queries_today,
-			MAX(q.timestamp) AS last_seen
-		FROM clients
-		LEFT JOIN device_aliases a ON a.client_ip = clients.client_ip
-		LEFT JOIN dns_queries q ON q.client_ip = clients.client_ip
-		GROUP BY clients.client_ip
-		ORDER BY last_seen DESC, clients.client_ip
+			COALESCE(MAX(q.timestamp), strftime('%Y-%m-%dT%H:%M:%SZ', d.last_seen_at)) AS last_seen
+		FROM devices d
+		LEFT JOIN dns_queries q ON q.device_id = d.id
+		GROUP BY d.id
+		ORDER BY last_seen DESC, client_ip
 	`, start, start)
 	if err != nil {
 		writeError(w, err)
@@ -44,6 +41,7 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type baseDevice struct {
+		deviceID int64
 		clientIP string
 		name     string
 		location any
@@ -57,11 +55,13 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 		var clientIP, name string
 		var location, notes, lastSeen sql.NullString
 		var total, blocked int
-		if err := rows.Scan(&clientIP, &name, &location, &notes, &total, &blocked, &lastSeen); err != nil {
+		var deviceID int64
+		if err := rows.Scan(&deviceID, &clientIP, &name, &location, &notes, &total, &blocked, &lastSeen); err != nil {
 			writeError(w, err)
 			return
 		}
 		baseDevices = append(baseDevices, baseDevice{
+			deviceID: deviceID,
 			clientIP: clientIP,
 			name:     name,
 			location: nullableString(location),
@@ -78,21 +78,32 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 	rows.Close()
 
 	items := []map[string]any{}
-	clientIPs := make([]string, 0, len(baseDevices))
+	clientIPs := make([]string, 0, len(baseDevices)*2)
+	addressesByDevice := make(map[int64][]string, len(baseDevices))
 	for _, device := range baseDevices {
-		clientIPs = append(clientIPs, device.clientIP)
+		addresses, addressErr := deviceidentity.Addresses(r.Context(), s.store, device.deviceID)
+		if addressErr != nil {
+			writeError(w, addressErr)
+			return
+		}
+		addressesByDevice[device.deviceID] = addresses
+		clientIPs = append(clientIPs, addresses...)
 	}
 	discoveredNames := s.discoverDeviceNames(r.Context(), clientIPs)
 	for _, device := range baseDevices {
-		identity := discoveredNames[device.clientIP]
+		addresses := addressesByDevice[device.deviceID]
+		identity := bestDeviceIdentity(discoveredNames, addresses, device.clientIP)
 		if strings.TrimSpace(device.name) != "" {
 			identity.DisplayName = device.name
 			identity.NameSource = "manual"
 		}
-		identity.DeviceType, identity.TypeConfidence = inferDeviceType(r.Context(), s.store.DB, device.clientIP, identity.DisplayName)
+		identity.DeviceType, identity.TypeConfidence = inferDeviceTypeForDevice(r.Context(), s.store.DB, device.deviceID, device.clientIP, identity.DisplayName)
 		protectionID, protectionName, protectionIcon := protectionForClient(r.Context(), s.store.DB, device.clientIP)
 		items = append(items, map[string]any{
+			"device_id":             device.deviceID,
 			"client_ip":             device.clientIP,
+			"addresses":             addresses,
+			"identity_source":       deviceIdentitySource(r.Context(), s.store.DB, device.deviceID, identity.NameSource),
 			"name":                  device.name,
 			"display_name":          identity.DisplayName,
 			"name_source":           identity.NameSource,
@@ -103,7 +114,7 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 			"total_queries_today":   device.total,
 			"blocked_queries_today": device.blocked,
 			"block_percentage":      percentage(device.blocked, device.total),
-			"top_domains":           grouped(r.Context(), s.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC, domain LIMIT 5`, device.clientIP, start),
+			"top_domains":           grouped(r.Context(), s.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE device_id = ? AND timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC, domain LIMIT 5`, device.deviceID, start),
 			"last_seen":             device.lastSeen,
 			"profile":               protectionName,
 			"protection":            protectionName,
@@ -112,6 +123,59 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, items)
+}
+
+func bestDeviceIdentity(discovered map[string]deviceIdentity, addresses []string, fallback string) deviceIdentity {
+	for _, address := range addresses {
+		if identity := discovered[address]; strings.TrimSpace(identity.DisplayName) != "" {
+			return identity
+		}
+	}
+	return deviceIdentity{DisplayName: fallback, NameSource: "address"}
+}
+
+func deviceIdentitySource(ctx context.Context, database *sql.DB, deviceID int64, nameSource string) string {
+	if nameSource == "manual" {
+		return "confirmed by you"
+	}
+	var kind string
+	if err := database.QueryRowContext(ctx, `
+		SELECT kind FROM device_identifiers WHERE device_id = ?
+		ORDER BY CASE kind WHEN 'mac' THEN 0 WHEN 'local_dns' THEN 1 ELSE 2 END, last_seen_at DESC LIMIT 1`, deviceID).Scan(&kind); err == nil {
+		switch kind {
+		case "mac":
+			return "local network identity"
+		case "local_dns":
+			return "Local DNS"
+		}
+	}
+	if nameSource == "reverse_dns" {
+		return "router name"
+	}
+	return "DNS activity"
+}
+
+func deviceAddressHistory(ctx context.Context, database *sql.DB, deviceID int64) []map[string]any {
+	rows, err := database.QueryContext(ctx, `
+		SELECT address, family, source, confidence,
+		       strftime('%Y-%m-%dT%H:%M:%SZ', first_seen_at),
+		       strftime('%Y-%m-%dT%H:%M:%SZ', last_seen_at)
+		FROM device_addresses WHERE device_id = ? ORDER BY last_seen_at DESC, id DESC`, deviceID)
+	if err != nil {
+		return []map[string]any{}
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	for rows.Next() {
+		var address, family, source, confidence, firstSeen, lastSeen string
+		if rows.Scan(&address, &family, &source, &confidence, &firstSeen, &lastSeen) == nil {
+			items = append(items, map[string]any{
+				"address": address, "family": family, "source": source, "confidence": confidence,
+				"first_seen": firstSeen, "last_seen": lastSeen,
+			})
+		}
+	}
+	return items
 }
 
 func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
@@ -159,23 +223,42 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, errors.New("invalid client ip"))
 		return
 	}
+	deviceID, found, lookupErr := deviceidentity.DeviceIDForAddress(r.Context(), s.store, clientIP)
+	if lookupErr != nil {
+		writeBadRequest(w, lookupErr)
+		return
+	}
+	if !found {
+		writeBadRequest(w, errors.New("device was not found"))
+		return
+	}
+	addresses, addressErr := deviceidentity.Addresses(r.Context(), s.store, deviceID)
+	if addressErr != nil {
+		writeError(w, addressErr)
+		return
+	}
 	start := todayStart(r)
 	var name string
 	var location, notes sql.NullString
-	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT name, location, notes FROM device_aliases WHERE client_ip = ?`, clientIP).Scan(&name, &location, &notes)
-	total := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE client_ip = ? AND timestamp >= ?`, clientIP, start)
-	blocked := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? AND action = 'blocked'`, clientIP, start)
+	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT name, location, notes FROM devices WHERE id = ?`, deviceID).Scan(&name, &location, &notes)
+	total := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE device_id = ? AND timestamp >= ?`, deviceID, start)
+	blocked := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE device_id = ? AND timestamp >= ? AND action = 'blocked'`, deviceID, start)
 	var firstSeen, lastSeen sql.NullString
-	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT MIN(timestamp), MAX(timestamp) FROM dns_queries WHERE client_ip = ?`, clientIP).Scan(&firstSeen, &lastSeen)
-	identity := s.discoverDeviceNames(r.Context(), []string{clientIP})[clientIP]
+	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT MIN(timestamp), MAX(timestamp) FROM dns_queries WHERE device_id = ?`, deviceID).Scan(&firstSeen, &lastSeen)
+	discovered := s.discoverDeviceNames(r.Context(), addresses)
+	identity := bestDeviceIdentity(discovered, addresses, clientIP)
 	if strings.TrimSpace(name) != "" {
 		identity.DisplayName = name
 		identity.NameSource = "manual"
 	}
-	identity.DeviceType, identity.TypeConfidence = inferDeviceType(r.Context(), s.store.DB, clientIP, identity.DisplayName)
+	identity.DeviceType, identity.TypeConfidence = inferDeviceTypeForDevice(r.Context(), s.store.DB, deviceID, clientIP, identity.DisplayName)
 	protectionID, protectionName, protectionIcon := protectionForClient(r.Context(), s.store.DB, clientIP)
 	writeJSON(w, http.StatusOK, map[string]any{
+		"device_id":             deviceID,
 		"client_ip":             clientIP,
+		"addresses":             addresses,
+		"address_history":       deviceAddressHistory(r.Context(), s.store.DB, deviceID),
+		"identity_source":       deviceIdentitySource(r.Context(), s.store.DB, deviceID, identity.NameSource),
 		"name":                  name,
 		"display_name":          identity.DisplayName,
 		"name_source":           identity.NameSource,
@@ -186,14 +269,14 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 		"total_queries_today":   total,
 		"blocked_queries_today": blocked,
 		"block_percentage":      percentage(blocked, total),
-		"top_domains":           grouped(r.Context(), s.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC, domain LIMIT 8`, clientIP, start),
+		"top_domains":           grouped(r.Context(), s.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE device_id = ? AND timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC, domain LIMIT 8`, deviceID, start),
 		"first_seen":            nullableString(firstSeen),
 		"last_seen":             nullableString(lastSeen),
 		"profile":               protectionName,
 		"protection":            protectionName,
 		"protection_id":         protectionID,
 		"protection_icon":       protectionIcon,
-		"recent_activity":       recentQueriesFor(r.Context(), s.store.DB, `client_ip = ?`, clientIP),
+		"recent_activity":       recentQueriesFor(r.Context(), s.store.DB, `device_id = ?`, deviceID),
 	})
 }
 
@@ -203,7 +286,12 @@ func (s *Handler) deviceReplay(w http.ResponseWriter, r *http.Request, clientIP 
 		return
 	}
 
-	from, to, bucket, rangeLabel, err := replayWindow(r.Context(), s.store.DB, clientIP, r)
+	deviceID, found, err := deviceidentity.DeviceIDForAddress(r.Context(), s.store, clientIP)
+	if err != nil || !found {
+		writeBadRequest(w, errors.New("device was not found"))
+		return
+	}
+	from, to, bucket, rangeLabel, err := replayWindow(r.Context(), s.store.DB, deviceID, r)
 	if err != nil {
 		writeBadRequest(w, err)
 		return
@@ -211,9 +299,9 @@ func (s *Handler) deviceReplay(w http.ResponseWriter, r *http.Request, clientIP 
 	fromText := from.UTC().Format(time.RFC3339)
 	toText := to.UTC().Format(time.RFC3339)
 
-	total := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?`, clientIP, fromText, toText)
-	blocked := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ? AND action = 'blocked'`, clientIP, fromText, toText)
-	uniqueDomains := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(DISTINCT domain) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?`, clientIP, fromText, toText)
+	total := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE device_id = ? AND timestamp >= ? AND timestamp <= ?`, deviceID, fromText, toText)
+	blocked := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE device_id = ? AND timestamp >= ? AND timestamp <= ? AND action = 'blocked'`, deviceID, fromText, toText)
+	uniqueDomains := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(DISTINCT domain) FROM dns_queries WHERE device_id = ? AND timestamp >= ? AND timestamp <= ?`, deviceID, fromText, toText)
 
 	bucketCount := int((to.Sub(from) + bucket - 1) / bucket)
 	if bucketCount < 1 {
@@ -233,10 +321,10 @@ func (s *Handler) deviceReplay(w http.ResponseWriter, r *http.Request, clientIP 
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END), 0)
 		FROM dns_queries
-		WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?
+		WHERE device_id = ? AND timestamp >= ? AND timestamp <= ?
 		GROUP BY bucket_index
 		ORDER BY bucket_index
-	`, fromText, int(bucket.Seconds()), clientIP, fromText, toText)
+	`, fromText, int(bucket.Seconds()), deviceID, fromText, toText)
 	if queryErr == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -251,14 +339,14 @@ func (s *Handler) deviceReplay(w http.ResponseWriter, r *http.Request, clientIP 
 		}
 	}
 
-	events, truncated := replayQueries(r.Context(), s.store.DB, clientIP, fromText, toText, 2500)
+	events, truncated := replayQueries(r.Context(), s.store.DB, deviceID, fromText, toText, 2500)
 	durationMinutes := to.Sub(from).Minutes()
 	queriesPerMinute := 0.0
 	if durationMinutes > 0 {
 		queriesPerMinute = float64(total) / durationMinutes
 	}
 	var firstSeen, lastSeen sql.NullString
-	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT MIN(timestamp), MAX(timestamp) FROM dns_queries WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?`, clientIP, fromText, toText).Scan(&firstSeen, &lastSeen)
+	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT MIN(timestamp), MAX(timestamp) FROM dns_queries WHERE device_id = ? AND timestamp >= ? AND timestamp <= ?`, deviceID, fromText, toText).Scan(&firstSeen, &lastSeen)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"client_ip":          clientIP,
@@ -275,20 +363,20 @@ func (s *Handler) deviceReplay(w http.ResponseWriter, r *http.Request, clientIP 
 		"buckets":            buckets,
 		"top_domains": grouped(r.Context(), s.store.DB, `
 			SELECT domain, COUNT(*) FROM dns_queries
-			WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?
+			WHERE device_id = ? AND timestamp >= ? AND timestamp <= ?
 			GROUP BY domain ORDER BY COUNT(*) DESC, domain LIMIT 10
-		`, clientIP, fromText, toText),
+		`, deviceID, fromText, toText),
 		"sources": grouped(r.Context(), s.store.DB, `
 			SELECT source, COUNT(*) FROM dns_queries
-			WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?
+			WHERE device_id = ? AND timestamp >= ? AND timestamp <= ?
 			GROUP BY source ORDER BY COUNT(*) DESC, source
-		`, clientIP, fromText, toText),
+		`, deviceID, fromText, toText),
 		"events":    events,
 		"truncated": truncated,
 	})
 }
 
-func replayWindow(ctx context.Context, database *sql.DB, clientIP string, r *http.Request) (time.Time, time.Time, time.Duration, string, error) {
+func replayWindow(ctx context.Context, database *sql.DB, deviceID int64, r *http.Request) (time.Time, time.Time, time.Duration, string, error) {
 	now := time.Now().UTC()
 	if fromRaw, toRaw := strings.TrimSpace(r.URL.Query().Get("from")), strings.TrimSpace(r.URL.Query().Get("to")); fromRaw != "" || toRaw != "" {
 		from, fromErr := time.Parse(time.RFC3339, fromRaw)
@@ -315,7 +403,7 @@ func replayWindow(ctx context.Context, database *sql.DB, clientIP string, r *htt
 		from = now.Add(-30 * 24 * time.Hour)
 	case "all":
 		var firstSeen sql.NullString
-		_ = database.QueryRowContext(ctx, `SELECT MIN(timestamp) FROM dns_queries WHERE client_ip = ?`, clientIP).Scan(&firstSeen)
+		_ = database.QueryRowContext(ctx, `SELECT MIN(timestamp) FROM dns_queries WHERE device_id = ?`, deviceID).Scan(&firstSeen)
 		if firstSeen.Valid {
 			if parsed, parseErr := time.Parse(time.RFC3339, firstSeen.String); parseErr == nil {
 				from = parsed.UTC()
@@ -349,14 +437,14 @@ func replayBucketSize(duration time.Duration) time.Duration {
 	}
 }
 
-func replayQueries(ctx context.Context, database *sql.DB, clientIP, from, to string, limit int) ([]map[string]any, bool) {
+func replayQueries(ctx context.Context, database *sql.DB, deviceID int64, from, to string, limit int) ([]map[string]any, bool) {
 	rows, err := database.QueryContext(ctx, `
 		SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata
 		FROM dns_queries
-		WHERE client_ip = ? AND timestamp >= ? AND timestamp <= ?
+		WHERE device_id = ? AND timestamp >= ? AND timestamp <= ?
 		ORDER BY timestamp ASC, id ASC
 		LIMIT ?
-	`, clientIP, from, to, limit+1)
+	`, deviceID, from, to, limit+1)
 	if err != nil {
 		return []map[string]any{}, false
 	}
@@ -405,6 +493,17 @@ func (s *Handler) deviceAlias(w http.ResponseWriter, r *http.Request, clientIP s
 		writeBadRequest(w, errors.New("name is required"))
 		return
 	}
+	deviceID, err := deviceidentity.ResolveAddress(r.Context(), s.store, clientIP, "manual")
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	if _, err := s.store.DB.ExecContext(r.Context(), `
+		UPDATE devices SET name = ?, location = ?, notes = ?, confirmed = 1, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`, name, nullableInput(input.Location), nullableInput(input.Notes), deviceID); err != nil {
+		writeError(w, err)
+		return
+	}
 	if _, err := s.store.DB.ExecContext(r.Context(), `
 		INSERT INTO device_aliases(client_ip, name, location, notes, updated_at)
 		VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -431,6 +530,11 @@ func (s *Handler) deviceAlias(w http.ResponseWriter, r *http.Request, clientIP s
 
 func displayDeviceName(ctx context.Context, database *sql.DB, clientIP string) string {
 	var name string
+	if err := database.QueryRowContext(ctx, `
+		SELECT d.name FROM devices d JOIN device_addresses a ON a.device_id = d.id
+		WHERE a.address = ?`, clientIP).Scan(&name); err == nil && strings.TrimSpace(name) != "" {
+		return name
+	}
 	if err := database.QueryRowContext(ctx, `SELECT name FROM device_aliases WHERE client_ip = ?`, clientIP).Scan(&name); err == nil && strings.TrimSpace(name) != "" {
 		return name
 	}

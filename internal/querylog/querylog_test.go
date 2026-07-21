@@ -80,14 +80,18 @@ func TestInsertPersistsDecisionSnapshot(t *testing.T) {
 	tailer.insert(context.Background(), `[INFO] FARO|192.168.7.22|A|telemetry.example.|NOERROR|0.000250s|-`)
 
 	var action, source, rcode, reason, rawMetadata string
+	var deviceID int64
 	if err := store.DB.QueryRow(`
-		SELECT action, source, rcode, decision_reason, decision_metadata
+		SELECT action, source, rcode, decision_reason, decision_metadata, device_id
 		FROM dns_queries WHERE domain = 'telemetry.example'
-	`).Scan(&action, &source, &rcode, &reason, &rawMetadata); err != nil {
+	`).Scan(&action, &source, &rcode, &reason, &rawMetadata, &deviceID); err != nil {
 		t.Fatal(err)
 	}
 	if action != "blocked" || source != "blocklist" || rcode != "NOERROR" {
 		t.Fatalf("unexpected persisted result: action=%q source=%q rcode=%q", action, source, rcode)
+	}
+	if deviceID == 0 {
+		t.Fatal("DNS query was not attached to a stable device")
 	}
 	if !strings.Contains(reason, "Telemetry protection") {
 		t.Fatalf("expected specific decision reason, got %q", reason)

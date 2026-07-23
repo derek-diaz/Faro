@@ -70,6 +70,10 @@ docker compose up -d
 
 For port customization, verification, troubleshooting, backups, local development, architecture, and release publishing, see the [technical and deployment guide](docs/README.md).
 
+### Unraid
+
+Unraid runs the same `tabierto/faro` image as standard Docker Compose. The Community Applications template only translates Faro's normal ports, volume, and environment settings into the Unraid interface. See the [Unraid installation notes](docs/unraid.md).
+
 ## License
 
 Copyright 2026 Derek Diaz Correa.

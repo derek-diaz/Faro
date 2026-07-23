@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommunityApplications>
+  <Profile>Faro is a friendly, self-hosted DNS protection and network visibility application. This repository contains the maintained Faro container template for Unraid. Support and issue tracking are available through the project repository.</Profile>
+  <Icon>https://raw.githubusercontent.com/derek-diaz/Faro/main/frontend/public/logos/web/icon-512.png</Icon>
+  <WebPage>https://github.com/derek-diaz/Faro</WebPage>
+  <Forum>https://github.com/derek-diaz/Faro/issues</Forum>
+</CommunityApplications>

@@ -3,10 +3,15 @@ package coredns
 import (
 	"bytes"
 	"context"
+	"crypto/sha512"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -14,6 +19,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"text/template"
+	"time"
 
 	"github.com/derek/faro/internal/db"
 )
@@ -22,9 +28,18 @@ var reloadTotal atomic.Uint64
 var reloadFailedTotal atomic.Uint64
 
 type Manager struct {
-	Store     *db.Store
-	ConfigDir string
-	applyMu   sync.Mutex
+	Store             *db.Store
+	ConfigDir         string
+	CoreDNSBinary     string
+	MetricsURL        string
+	ValidationTimeout time.Duration
+	ReloadTimeout     time.Duration
+	HTTPClient        *http.Client
+	applyMu           sync.Mutex
+	bootstrapped      bool
+	validateGenerated func(context.Context, map[string][]byte) error
+	readLiveHash      func(context.Context) (string, error)
+	waitForLiveHash   func(context.Context, string) error
 }
 
 type renderState struct {
@@ -71,7 +86,19 @@ type DomainDecision struct {
 }
 
 func NewManager(store *db.Store, configDir string) *Manager {
-	return &Manager{Store: store, ConfigDir: configDir}
+	manager := &Manager{
+		Store:             store,
+		ConfigDir:         configDir,
+		CoreDNSBinary:     env("FARO_COREDNS_BINARY", "/usr/local/bin/coredns"),
+		MetricsURL:        env("FARO_COREDNS_METRICS_URL", "http://dns:9153/metrics"),
+		ValidationTimeout: 15 * time.Second,
+		ReloadTimeout:     10 * time.Second,
+		HTTPClient:        &http.Client{Timeout: 2 * time.Second},
+	}
+	manager.validateGenerated = manager.validateWithCoreDNS
+	manager.readLiveHash = manager.liveCorefileHash
+	manager.waitForLiveHash = manager.waitUntilLiveHash
+	return manager
 }
 
 func (m *Manager) Apply(ctx context.Context) error {
@@ -97,7 +124,22 @@ func (m *Manager) Apply(ctx context.Context) error {
 	for name, content := range state.ProtectionHosts {
 		files[name] = []byte(content)
 	}
-	if err := validate(files); err != nil {
+	if err := validateGeneratedFiles(files); err != nil {
+		reloadFailedTotal.Add(1)
+		return err
+	}
+	if err := m.validateGenerated(ctx, files); err != nil {
+		reloadFailedTotal.Add(1)
+		return fmt.Errorf("CoreDNS rejected the staged configuration: %w", err)
+	}
+
+	previousHash, liveErr := m.readLiveHash(ctx)
+	if m.bootstrapped && liveErr != nil {
+		reloadFailedTotal.Add(1)
+		return fmt.Errorf("could not verify the running DNS engine before applying configuration: %w", liveErr)
+	}
+	backups, err := snapshotFiles(m.ConfigDir, files)
+	if err != nil {
 		reloadFailedTotal.Add(1)
 		return err
 	}
@@ -105,6 +147,20 @@ func (m *Manager) Apply(ctx context.Context) error {
 		reloadFailedTotal.Add(1)
 		return err
 	}
+	if liveErr == nil {
+		expectedHash := corefileHash(files["Corefile"])
+		if err := m.waitForLiveHash(ctx, expectedHash); err != nil {
+			names := fileNames(files)
+			rollback(m.ConfigDir, backups, names)
+			rollbackErr := m.waitForLiveHash(context.WithoutCancel(ctx), previousHash)
+			reloadFailedTotal.Add(1)
+			if rollbackErr != nil {
+				return fmt.Errorf("CoreDNS did not accept the new configuration and rollback could not be verified: %v; rollback verification: %w", err, rollbackErr)
+			}
+			return fmt.Errorf("CoreDNS did not accept the new configuration; the previous configuration was restored: %w", err)
+		}
+	}
+	m.bootstrapped = true
 	return nil
 }
 
@@ -379,13 +435,278 @@ func splitCSV(value string) []string {
 	return result
 }
 
-func validate(files map[string][]byte) error {
+func validateGeneratedFiles(files map[string][]byte) error {
 	corefile := string(files["Corefile"])
 	if !strings.Contains(corefile, ".:53") || !strings.Contains(corefile, "forward .") {
 		return fmt.Errorf("generated Corefile is missing required server or forward block")
 	}
-	// TODO: Run `coredns -conf <temp Corefile> -dns.port=0` when the binary is available in the API container.
+	hostsReferences := 0
+	for _, line := range strings.Split(corefile, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 || fields[0] != "hosts" || !strings.HasPrefix(fields[1], "/etc/coredns/") {
+			continue
+		}
+		hostsReferences++
+		name := strings.TrimPrefix(fields[1], "/etc/coredns/")
+		if _, ok := files[name]; !ok {
+			return fmt.Errorf("generated Corefile references missing hosts file %q", name)
+		}
+	}
+	if hostsReferences == 0 {
+		return errors.New("generated Corefile has no Faro hosts files")
+	}
 	return nil
+}
+
+// validateWithCoreDNS starts the same CoreDNS binary used by the DNS service
+// against a private staged copy of every generated file. CoreDNS only prints
+// its startup banner after the complete plugin chain has parsed and initialized,
+// which gives Faro a real syntax and startup check without touching live files.
+func (m *Manager) validateWithCoreDNS(ctx context.Context, files map[string][]byte) error {
+	stagingDir, err := os.MkdirTemp("", "faro-coredns-validation-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stagingDir)
+
+	staged, err := validationFiles(stagingDir, files)
+	if err != nil {
+		return err
+	}
+	for name, content := range staged {
+		if err := os.WriteFile(filepath.Join(stagingDir, name), content, 0o600); err != nil {
+			return err
+		}
+	}
+
+	timeout := m.ValidationTimeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	validationCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	command := exec.CommandContext(validationCtx, m.CoreDNSBinary, "-conf", filepath.Join(stagingDir, "Corefile"))
+	output := &lockedBuffer{}
+	command.Stdout = output
+	command.Stderr = output
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("start %s: %w", m.CoreDNSBinary, err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-done:
+			return commandExitError(err, output.String())
+		case <-ticker.C:
+			if strings.Contains(output.String(), "CoreDNS-") {
+				_ = command.Process.Kill()
+				<-done
+				return nil
+			}
+		case <-validationCtx.Done():
+			_ = command.Process.Kill()
+			<-done
+			return fmt.Errorf("CoreDNS validation timed out: %s", compactOutput(output.String()))
+		}
+	}
+}
+
+func validationFiles(stagingDir string, files map[string][]byte) (map[string][]byte, error) {
+	if err := validateGeneratedFiles(files); err != nil {
+		return nil, err
+	}
+	staged := make(map[string][]byte, len(files))
+	for name, content := range files {
+		staged[name] = append([]byte(nil), content...)
+	}
+	corefile := string(staged["Corefile"])
+	stagedPath := filepath.ToSlash(stagingDir) + "/"
+	corefile = strings.ReplaceAll(corefile, "/etc/coredns/", stagedPath)
+	corefile = strings.ReplaceAll(corefile, ".:53 {", ".:0 {")
+	corefile = strings.ReplaceAll(corefile, "prometheus 0.0.0.0:9153", "prometheus 127.0.0.1:0")
+	staged["Corefile"] = []byte(corefile)
+	return staged, nil
+}
+
+func commandExitError(err error, output string) error {
+	detail := compactOutput(output)
+	if detail == "" {
+		detail = "CoreDNS exited before completing startup"
+	}
+	if err == nil {
+		return errors.New(detail)
+	}
+	return fmt.Errorf("%s: %w", detail, err)
+}
+
+func compactOutput(output string) string {
+	output = strings.TrimSpace(output)
+	if len(output) > 4096 {
+		output = output[len(output)-4096:]
+	}
+	return output
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(input []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(input)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+func (m *Manager) liveCorefileHash(ctx context.Context) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.MetricsURL, nil)
+	if err != nil {
+		return "", err
+	}
+	client := m.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 2 * time.Second}
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("CoreDNS metrics returned %s", response.Status)
+	}
+	hash, ok, err := reloadHashFromMetrics(response.Body)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", errors.New("CoreDNS reload hash is unavailable")
+	}
+	return hash, nil
+}
+
+func (m *Manager) waitUntilLiveHash(ctx context.Context, expected string) error {
+	timeout := m.ReloadTimeout
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	var lastHash string
+	var lastErr error
+	for {
+		hash, err := m.liveCorefileHash(waitCtx)
+		if err == nil {
+			lastHash = hash
+			if strings.EqualFold(hash, expected) {
+				return nil
+			}
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-waitCtx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("timed out waiting for CoreDNS reload: %w", lastErr)
+			}
+			return fmt.Errorf("timed out waiting for CoreDNS reload (running %s, expected %s)", shortHash(lastHash), shortHash(expected))
+		case <-ticker.C:
+		}
+	}
+}
+
+func reloadHashFromMetrics(reader io.Reader) (string, bool, error) {
+	data, err := io.ReadAll(io.LimitReader(reader, 4<<20))
+	if err != nil {
+		return "", false, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "coredns_reload_version_info{") {
+			continue
+		}
+		labelsEnd := strings.IndexByte(line, '}')
+		if labelsEnd < 0 {
+			continue
+		}
+		labels := line[:labelsEnd]
+		if !strings.EqualFold(metricLabel(labels, "hash"), "sha512") {
+			continue
+		}
+		value := metricLabel(labels, "value")
+		if value != "" {
+			return value, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func metricLabel(labels, name string) string {
+	needle := name + "=\""
+	start := strings.Index(labels, needle)
+	if start < 0 {
+		return ""
+	}
+	start += len(needle)
+	end := strings.IndexByte(labels[start:], '"')
+	if end < 0 {
+		return ""
+	}
+	return labels[start : start+end]
+}
+
+func corefileHash(corefile []byte) string {
+	sum := sha512.Sum512(corefile)
+	return hex.EncodeToString(sum[:])
+}
+
+func shortHash(hash string) string {
+	if len(hash) <= 12 {
+		return hash
+	}
+	return hash[:12]
+}
+
+func snapshotFiles(dir string, files map[string][]byte) (map[string][]byte, error) {
+	backups := map[string][]byte{}
+	for name := range files {
+		content, err := os.ReadFile(filepath.Join(dir, name))
+		if err == nil {
+			backups[name] = content
+			continue
+		}
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+	}
+	return backups, nil
+}
+
+func fileNames(files map[string][]byte) []string {
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func env(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
 }
 
 func replaceWithRollback(dir string, files map[string][]byte) error {

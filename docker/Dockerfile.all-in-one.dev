@@ -1,0 +1,52 @@
+FROM coredns/coredns:1.11.3 AS coredns
+
+FROM golang:1.25-bookworm AS air
+
+ARG AIR_VERSION=v1.65.1
+RUN go install github.com/air-verse/air@${AIR_VERSION}
+
+FROM node:24-bookworm-slim AS node
+
+FROM golang:1.22-bookworm AS build
+
+WORKDIR /src
+COPY go.mod ./
+COPY cmd/faro-logtee ./cmd/faro-logtee
+RUN CGO_ENABLED=0 go build -o /out/faro-logtee ./cmd/faro-logtee
+
+FROM golang:1.22-bookworm
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl tini && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=air /go/bin/air /usr/local/bin/air
+COPY --from=coredns /coredns /usr/local/bin/coredns
+COPY --from=build /out/faro-logtee /usr/local/bin/faro-logtee
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY docker/faro-dev-entrypoint.sh /usr/local/bin/faro-dev-entrypoint
+COPY docker/faro-dev-healthcheck.sh /usr/local/bin/faro-dev-healthcheck
+RUN chmod 0755 /usr/local/bin/faro-dev-entrypoint /usr/local/bin/faro-dev-healthcheck
+
+ENV FARO_DB_PATH=/data/faro.db \
+    FARO_FAVICON_DIR=/data/favicons \
+    FARO_COREDNS_CONFIG_DIR=/coredns \
+    FARO_COREDNS_LOG_PATH=/var/log/coredns/query.log \
+    FARO_COREDNS_METRICS_URL=http://127.0.0.1:9153/metrics \
+    FARO_API_ADDR=127.0.0.1:8080 \
+    FARO_TRUST_PROXY=true \
+    VITE_API_PROXY_TARGET=http://127.0.0.1:8080 \
+    VITE_USE_POLLING=true
+
+EXPOSE 1787 53/tcp 53/udp
+HEALTHCHECK --interval=5s --timeout=3s --start-period=60s --retries=10 CMD ["/usr/local/bin/faro-dev-healthcheck"]
+
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/faro-dev-entrypoint"]

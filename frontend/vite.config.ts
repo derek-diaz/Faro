@@ -13,7 +13,8 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     server: {
-      port: 5173,
+      port: 1787,
+      strictPort: true,
       watch: {
         usePolling: env.VITE_USE_POLLING === "true"
       },

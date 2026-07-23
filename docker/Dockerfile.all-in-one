@@ -1,0 +1,75 @@
+# Faro's production and Unraid image. Components remain separate processes but
+# ship, upgrade, and persist as one application.
+FROM coredns/coredns:1.11.3 AS coredns
+
+FROM --platform=$BUILDPLATFORM golang:1.22-bookworm AS go-build
+
+ARG TARGETOS
+ARG TARGETARCH
+ARG BUILDARCH
+
+WORKDIR /app
+COPY go.mod go.sum* ./
+RUN go mod download
+RUN if [ "$BUILDARCH" != "$TARGETARCH" ]; then \
+      case "$TARGETARCH" in \
+        amd64) packages="gcc-x86-64-linux-gnu libc6-dev-amd64-cross" ;; \
+        arm64) packages="gcc-aarch64-linux-gnu libc6-dev-arm64-cross" ;; \
+        *) echo "Unsupported target architecture: $TARGETARCH" >&2; exit 1 ;; \
+      esac && \
+      apt-get update && \
+      apt-get install -y --no-install-recommends $packages && \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
+COPY . .
+RUN case "$BUILDARCH/$TARGETARCH" in \
+      amd64/amd64|arm64/arm64) CC=gcc ;; \
+      */amd64) CC=x86_64-linux-gnu-gcc ;; \
+      */arm64) CC=aarch64-linux-gnu-gcc ;; \
+      *) echo "Unsupported build: $BUILDARCH -> $TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    CGO_ENABLED=1 GOOS="$TARGETOS" GOARCH="$TARGETARCH" CC="$CC" \
+      go build -o /out/faro-api ./cmd/faro-api && \
+    CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
+      go build -o /out/faro-logtee ./cmd/faro-logtee
+
+FROM --platform=$BUILDPLATFORM node:24-alpine AS web-build
+
+WORKDIR /app
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend .
+RUN npm run build
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates curl nginx-light tini && \
+    rm -rf /var/lib/apt/lists/* /etc/nginx/sites-enabled/default && \
+    mkdir -p /config/coredns /config/logs /config/favicons
+
+COPY --from=go-build /out/faro-api /usr/local/bin/faro-api
+COPY --from=go-build /out/faro-logtee /usr/local/bin/faro-logtee
+COPY --from=coredns /coredns /usr/local/bin/coredns
+COPY --from=web-build /app/dist /usr/share/nginx/html
+COPY docker/nginx.all-in-one.conf /etc/nginx/nginx.conf
+COPY docker/faro-proxy-headers.conf /etc/nginx/faro-proxy-headers.conf
+COPY docker/faro-entrypoint.sh /usr/local/bin/faro-entrypoint
+COPY docker/faro-healthcheck.sh /usr/local/bin/faro-healthcheck
+COPY coredns/sample-blocklist.txt /app/coredns/sample-blocklist.txt
+
+RUN chmod 0755 /usr/local/bin/faro-entrypoint /usr/local/bin/faro-healthcheck
+
+ENV FARO_DB_PATH=/config/faro.db \
+    FARO_FAVICON_DIR=/config/favicons \
+    FARO_COREDNS_CONFIG_DIR=/config/coredns \
+    FARO_COREDNS_LOG_PATH=/config/logs/query.log \
+    FARO_COREDNS_METRICS_URL=http://127.0.0.1:9153/metrics \
+    FARO_API_ADDR=127.0.0.1:8080 \
+    FARO_TRUST_PROXY=true
+
+VOLUME ["/config"]
+EXPOSE 1787 53/tcp 53/udp
+HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=4 CMD ["/usr/local/bin/faro-healthcheck"]
+
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/faro-entrypoint"]

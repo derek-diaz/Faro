@@ -46,20 +46,10 @@ jobs:
         run: npm run build
 
   publish:
-    name: Publish faro-${{ matrix.image }}
+    name: Publish Faro image
     needs: verify
     runs-on: ubuntu-latest
     environment: Faro CI
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image: api
-            dockerfile: docker/Dockerfile.backend
-          - image: ui
-            dockerfile: docker/Dockerfile.frontend
-          - image: dns
-            dockerfile: docker/Dockerfile.coredns
 
     steps:
       - name: Check out repository
@@ -81,7 +71,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.DOCKERHUB_NAMESPACE }}/faro-${{ matrix.image }}
+          images: ${{ env.DOCKERHUB_NAMESPACE }}/faro
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -91,10 +81,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: ${{ matrix.dockerfile }}
+          file: docker/Dockerfile.all-in-one
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          cache-from: type=gha,scope=all-in-one
+          cache-to: type=gha,mode=max,scope=all-in-one

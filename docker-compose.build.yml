@@ -1,21 +1,7 @@
 services:
-  api:
-    image: faro-api:dev
+  faro:
+    image: faro:dev
     pull_policy: never
     build:
       context: .
-      dockerfile: docker/Dockerfile.backend
-
-  ui:
-    image: faro-ui:dev
-    pull_policy: never
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.frontend
-
-  dns:
-    image: faro-dns:dev
-    pull_policy: never
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.coredns
+      dockerfile: docker/Dockerfile.all-in-one

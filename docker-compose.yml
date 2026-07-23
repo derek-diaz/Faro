@@ -1,83 +1,25 @@
 name: faro
 
 services:
-  api:
-    image: ${FARO_IMAGE_NAMESPACE:-tabierto}/faro-api:${FARO_VERSION:-latest}
-    pull_policy: always
-    environment:
-      FARO_DB_PATH: /data/faro.db
-      FARO_COREDNS_CONFIG_DIR: /coredns
-      FARO_COREDNS_LOG_PATH: /var/log/coredns/query.log
-      FARO_COREDNS_METRICS_URL: http://dns:9153/metrics
-      FARO_TRUST_PROXY: "true"
-    volumes:
-      - faro-data:/data
-      - coredns-config:/coredns
-      - coredns-logs:/var/log/coredns
-    expose:
-      - "8080"
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
-    logging:
-      driver: json-file
-      options:
-        max-size: "${FARO_DOCKER_LOG_MAX_SIZE:-10m}"
-        max-file: "${FARO_DOCKER_LOG_BACKUPS:-3}"
-    restart: unless-stopped
-
-  ui:
-    image: ${FARO_IMAGE_NAMESPACE:-tabierto}/faro-ui:${FARO_VERSION:-latest}
-    pull_policy: always
-    depends_on:
-      api:
-        condition: service_healthy
-    ports:
-      - "${FARO_BIND_ADDRESS:-0.0.0.0}:${FARO_UI_PORT:-1787}:80"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-    logging:
-      driver: json-file
-      options:
-        max-size: "${FARO_DOCKER_LOG_MAX_SIZE:-10m}"
-        max-file: "${FARO_DOCKER_LOG_BACKUPS:-3}"
-    restart: unless-stopped
-
-  dns:
-    image: ${FARO_IMAGE_NAMESPACE:-tabierto}/faro-dns:${FARO_VERSION:-latest}
+  faro:
+    image: ${FARO_IMAGE_NAMESPACE:-tabierto}/faro:${FARO_VERSION:-latest}
     pull_policy: always
     environment:
       FARO_QUERY_LOG_MAX_BYTES: ${FARO_QUERY_LOG_MAX_BYTES:-10485760}
       FARO_QUERY_LOG_BACKUPS: ${FARO_QUERY_LOG_BACKUPS:-2}
-    depends_on:
-      api:
-        condition: service_healthy
     volumes:
-      - coredns-config:/etc/coredns
-      - coredns-logs:/var/log/coredns
+      - faro-config:/config
     ports:
+      - "${FARO_BIND_ADDRESS:-0.0.0.0}:${FARO_UI_PORT:-1787}:1787"
       - "${FARO_BIND_ADDRESS:-0.0.0.0}:${FARO_DNS_PORT:-53}:53/udp"
       - "${FARO_BIND_ADDRESS:-0.0.0.0}:${FARO_DNS_PORT:-53}:53/tcp"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9153/metrics"]
-      interval: 15s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
     logging:
       driver: json-file
       options:
         max-size: "${FARO_DOCKER_LOG_MAX_SIZE:-10m}"
         max-file: "${FARO_DOCKER_LOG_BACKUPS:-3}"
+    stop_grace_period: 20s
     restart: unless-stopped
 
 volumes:
-  faro-data:
-  coredns-config:
-  coredns-logs:
+  faro-config:

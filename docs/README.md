@@ -17,7 +17,7 @@ Faro reads optional deployment settings from a `.env` file beside `docker-compos
 | `FARO_DOCKER_LOG_MAX_SIZE` | `10m` | Maximum size of each Docker stdout/stderr log file |
 | `FARO_DOCKER_LOG_BACKUPS` | `3` | Number of rotated Docker log files retained per container |
 | `FARO_IMAGE_NAMESPACE` | `tabierto` | Docker Hub image namespace |
-| `FARO_VERSION` | `latest` | Image tag used by all Faro services |
+| `FARO_VERSION` | `latest` | Faro image tag |
 
 Example:
 
@@ -33,9 +33,27 @@ FARO_DOCKER_LOG_BACKUPS=3
 FARO_VERSION=latest
 ```
 
-The API remains inside the Compose network and is accessed through the web container. It is not exposed as a separate host port. Use a nonstandard DNS port only for testing because routers normally cannot specify a port other than `53`.
+The API remains internal to the Faro container and is accessed through its web server. It is not exposed as a separate host port. Use a nonstandard DNS port only for testing because routers normally cannot specify a port other than `53`.
 
 Faro automatically accepts DNS clients from standard home and private networks while preventing an accidentally internet-exposed host from becoming an open resolver. Most installations need no configuration. Advanced networks using another routed IPv4 or IPv6 prefix can add it under **Settings → DNS & interface → Network access → Advanced**.
+
+## Deployment model
+
+Faro always runs as one application container. The web interface, API, CoreDNS resolver, and bounded query logger remain separate supervised processes inside it, but they install, restart, and upgrade atomically. Standard Docker Compose and Unraid run the same `tabierto/faro` image; Unraid's XML file is only an installation template for that image. Development follows the same topology with Air and Vite added for hot reload.
+
+Run the published image:
+
+```sh
+docker compose up -d
+```
+
+Build the same production container from a repository checkout:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+An installation created from Faro's older three-service preview uses a different volume layout. Create an encrypted Faro backup before replacing that Compose file, then restore the backup into the current container.
 
 ## Protection setups
 
@@ -60,8 +78,8 @@ nslookup example.com YOUR-FARO-IP
 Confirm that Docker published both DNS protocols:
 
 ```sh
-docker compose port dns 53 --protocol udp
-docker compose port dns 53 --protocol tcp
+docker compose port faro 53 --protocol udp
+docker compose port faro 53 --protocol tcp
 ```
 
 Both commands should report the Faro host on port `53`.
@@ -78,8 +96,8 @@ Useful endpoints:
 # Follow all logs
 docker compose logs -f
 
-# Show recent service logs
-docker compose logs --tail=200 api ui dns
+# Show recent application logs
+docker compose logs --tail=200
 
 # Pull and run the latest configured release
 docker compose pull
@@ -93,17 +111,13 @@ Do not run `docker compose down -v` unless you intend to permanently delete Faro
 
 ## Persistent data
 
-Faro stores state in named Docker volumes:
-
-- `faro-data`: SQLite database and cached domain icons
-- `coredns-config`: generated CoreDNS configuration
-- `coredns-logs`: bounded DNS query-log buffer consumed by Faro; retained history is stored in `faro-data`
+Faro stores its database, generated resolver configuration, cached icons, and bounded raw query logs in the `faro-config` volume mounted at `/config`.
 
 For routine Faro backups, open **Settings → Health & data → Encrypted backup & restore**. Faro downloads a portable `.faro-backup` file containing the SQLite database, including DNS settings, local records, rules, blocklists, account data, and retained history. The file is protected with a passphrase-derived key using Argon2id and AES-256-GCM.
 
 Keep the backup passphrase separately: Faro cannot recover it. Restoring replaces the live database atomically, reloads CoreDNS, and signs out every browser session. Active login sessions, cached favicon files, and the bounded raw query-log buffer are deliberately excluded; Faro recreates those operational files as needed.
 
-Volume-level backups are still useful for full host disaster recovery, especially if you also want cached favicons and generated runtime files. Back up the three volumes above as part of the Docker host's normal backup process.
+Volume-level backups are still useful for full host disaster recovery, especially if you also want cached favicons and generated runtime files. Back up `faro-config` as part of the Docker host's normal backup process.
 
 ## Troubleshooting
 
@@ -154,7 +168,7 @@ sudo lsof -nP -iUDP:53
 
 Development Compose publishes DNS on port `5354` by default, so test it with `dig @127.0.0.1 -p 5354 example.com`. Override `FARO_DEV_DNS_PORT` if needed. Production and router-wide DNS still require the standard port `53`.
 
-### The DNS container is healthy but has no published port
+### Faro is healthy but DNS has no published port
 
 First confirm that the rendered Compose configuration contains `published: "53"` for both protocols:
 
@@ -162,13 +176,13 @@ First confirm that the rendered Compose configuration contains `published: "53"`
 docker compose config
 ```
 
-Then refresh the standalone Compose file and recreate only the DNS container:
+Then refresh the standalone Compose file and recreate Faro:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/derek-diaz/Faro/main/docker-compose.yml -o docker-compose.yml
-docker compose up -d --pull always --force-recreate dns
-docker compose port dns 53 --protocol udp
-docker compose port dns 53 --protocol tcp
+docker compose up -d --pull always --force-recreate faro
+docker compose port faro 53 --protocol udp
+docker compose port faro 53 --protocol tcp
 ```
 
 If recreation reports that port `53` is already allocated, identify the host DNS service before changing it:
@@ -187,7 +201,7 @@ Inspect status and logs:
 
 ```sh
 docker compose ps
-docker compose logs --tail=200 api ui dns
+docker compose logs --tail=200
 ```
 
 ## Local development
@@ -207,7 +221,7 @@ To run the full development stack in containers with hot reload:
 docker compose -f docker-compose.dev.yml up --build
 ```
 
-Open `http://localhost:1787`. Vite applies frontend edits with hot module replacement, while Air rebuilds and restarts the Go API after Go source changes. Both watchers use polling for reliable Windows and macOS bind-mount detection through Docker Desktop. Stop the stack with `Ctrl-C`, or run `make dev-down` from another terminal.
+Development also runs as one container, matching the production and Unraid process topology. Open `http://localhost:1787`. Vite applies frontend edits with hot module replacement, while Air rebuilds and restarts the Go API after Go source changes. CoreDNS and the bounded query logger run alongside them under the same supervisor. Both source watchers use polling for reliable Windows and macOS bind-mount detection through Docker Desktop. Stop the stack with `Ctrl-C`, or run `make dev-down` from another terminal.
 
 Development DNS is published on host port `5354` by default to avoid privileged/system DNS listeners. Test it with `dig @127.0.0.1 -p 5354 example.com`, or set `FARO_DEV_DNS_PORT` to another available port. You can also use `make dev` as a shortcut for the command above.
 
@@ -229,7 +243,7 @@ npm run dev
 
 The frontend development server proxies `/api`, `/healthz`, and `/metrics` to the Go API on port `8080`.
 
-To build all containers from source:
+To build the production container from source:
 
 ```sh
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
@@ -237,21 +251,21 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 ## Architecture
 
-Faro uses a Go API, React and TypeScript frontend, SQLite database, and CoreDNS. The API generates CoreDNS configuration into a shared volume and safely replaces active files. CoreDNS handles local records, blocked domains, caching, upstream forwarding, query logs, metrics, and configuration reloads.
+Faro uses a Go API, React and TypeScript frontend, SQLite database, and CoreDNS. Before replacing active files, the API starts the same CoreDNS binary against a private staged copy of the complete generated configuration. After replacement, it verifies CoreDNS's SHA-512 reload hash through the resolver's metrics endpoint. If the live resolver does not accept the new Corefile, Faro restores and verifies the previous configuration. CoreDNS handles local records, blocked domains, caching, upstream forwarding, query logs, metrics, and configuration reloads.
 
-The Compose application contains three services:
+The application keeps three internal responsibilities:
 
 - `api`: Faro's control plane, persistence, and configuration generation
 - `ui`: the web application and reverse proxy for the API
 - `dns`: CoreDNS resolution and filtering engine
 
+The production and development images supervise those responsibilities together and expose only the web and DNS ports. If any required infrastructure process exits, the container stops so Docker can restart the complete application. In development, Air and Vite retain backend and frontend hot reload inside that same topology.
+
 ## Publishing Docker releases
 
-Repository maintainers need these Docker Hub repositories in the target namespace:
+Repository maintainers need this Docker Hub repository in the target namespace:
 
-- `faro-api`
-- `faro-ui`
-- `faro-dns`
+- `faro`
 
 Configure a GitHub environment named `Faro CI` with:
 
@@ -259,7 +273,7 @@ Configure a GitHub environment named `Faro CI` with:
 - Optional variable `DOCKERHUB_USERNAME`: login account, defaults to `tabierto`
 - Optional variable `DOCKERHUB_NAMESPACE`: image namespace, defaults to `tabierto`
 
-Push a semantic version tag to publish all three images:
+Push a semantic version tag to publish the Faro image:
 
 ```sh
 git tag v1.0.0

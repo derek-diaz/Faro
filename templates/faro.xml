@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>Faro</Name>
+  <Repository>tabierto/faro:latest</Repository>
+  <Registry>https://hub.docker.com/r/tabierto/faro</Registry>
+  <Network>bridge</Network>
+  <MyIP/>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/derek-diaz/Faro/issues</Support>
+  <Project>https://github.com/derek-diaz/Faro</Project>
+  <Overview>Friendly, self-hosted DNS protection and network visibility. This template runs the same Faro application image used by standard Docker Compose.</Overview>
+  <Description>Faro makes network-wide DNS protection approachable. It includes guided setup, device visibility, custom protection setups, curated blocklists, local DNS, activity explanations, encrypted backups, and upstream health monitoring. Give Faro a fixed address, then configure your router to distribute that address as the network DNS server.</Description>
+  <Category>Network:Management</Category>
+  <WebUI>http://[IP]:[PORT:1787]/</WebUI>
+  <TemplateURL>https://raw.githubusercontent.com/derek-diaz/Faro/main/templates/faro.xml</TemplateURL>
+  <Icon>https://raw.githubusercontent.com/derek-diaz/Faro/main/frontend/public/logos/web/icon-512.png</Icon>
+  <ExtraParams>--log-opt max-size=10m --log-opt max-file=3</ExtraParams>
+  <PostArgs/>
+  <CPUset/>
+  <Requires>TCP and UDP port 53 must be available. A dedicated static IP on an Unraid custom ipvlan or macvlan network is recommended when the host already uses port 53.</Requires>
+  <Config Name="Application Data" Target="/config" Default="/mnt/user/appdata/faro" Mode="rw" Description="Faro's database, generated DNS configuration, cached icons, and bounded raw query logs." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/faro</Config>
+  <Config Name="Web Interface" Target="1787" Default="1787" Mode="tcp" Description="Faro web interface port. Change the host port when using bridge networking; custom-IP installations use Faro's internal port 1787." Type="Port" Display="always" Required="true" Mask="false">1787</Config>
+  <Config Name="DNS (UDP)" Target="53" Default="53" Mode="udp" Description="DNS service over UDP. Keep this at port 53 for router-wide DNS." Type="Port" Display="always" Required="true" Mask="false">53</Config>
+  <Config Name="DNS (TCP)" Target="53" Default="53" Mode="tcp" Description="DNS service over TCP. Use the same host port as UDP." Type="Port" Display="always" Required="true" Mask="false">53</Config>
+  <Config Name="Query Log Size" Target="FARO_QUERY_LOG_MAX_BYTES" Default="10485760" Mode="" Description="Maximum size in bytes of each raw CoreDNS query-log file." Type="Variable" Display="advanced" Required="true" Mask="false">10485760</Config>
+  <Config Name="Query Log Backups" Target="FARO_QUERY_LOG_BACKUPS" Default="2" Mode="" Description="Number of rotated raw DNS query-log files retained." Type="Variable" Display="advanced" Required="true" Mask="false">2</Config>
+</Container>

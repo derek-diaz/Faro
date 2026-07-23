@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha512"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,11 +22,13 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/coredns/caddy/caddyfile"
 	"github.com/derek/faro/internal/db"
 )
 
 var reloadTotal atomic.Uint64
 var reloadFailedTotal atomic.Uint64
+var errReloadHashUnavailable = errors.New("CoreDNS reload hash is unavailable")
 
 type Manager struct {
 	Store             *db.Store
@@ -92,8 +95,11 @@ func NewManager(store *db.Store, configDir string) *Manager {
 		CoreDNSBinary:     env("FARO_COREDNS_BINARY", "/usr/local/bin/coredns"),
 		MetricsURL:        env("FARO_COREDNS_METRICS_URL", "http://dns:9153/metrics"),
 		ValidationTimeout: 15 * time.Second,
-		ReloadTimeout:     10 * time.Second,
-		HTTPClient:        &http.Client{Timeout: 2 * time.Second},
+		// CoreDNS temporarily stops serving metrics while a reload parses large
+		// hosts files. Ten seconds is too short even for the starter OISD list on
+		// slower disks, causing Faro to roll back a configuration CoreDNS accepts.
+		ReloadTimeout: 45 * time.Second,
+		HTTPClient:    &http.Client{Timeout: 2 * time.Second},
 	}
 	manager.validateGenerated = manager.validateWithCoreDNS
 	manager.readLiveHash = manager.liveCorefileHash
@@ -134,7 +140,8 @@ func (m *Manager) Apply(ctx context.Context) error {
 	}
 
 	previousHash, liveErr := m.readLiveHash(ctx)
-	if m.bootstrapped && liveErr != nil {
+	hashNotInitialized := errors.Is(liveErr, errReloadHashUnavailable)
+	if m.bootstrapped && liveErr != nil && !hashNotInitialized {
 		reloadFailedTotal.Add(1)
 		return fmt.Errorf("could not verify the running DNS engine before applying configuration: %w", liveErr)
 	}
@@ -143,18 +150,27 @@ func (m *Manager) Apply(ctx context.Context) error {
 		reloadFailedTotal.Add(1)
 		return err
 	}
+	corefilePath := filepath.Join(m.ConfigDir, "Corefile")
+	expectedHash, err := corefileHash(corefilePath, files["Corefile"])
+	if err != nil {
+		reloadFailedTotal.Add(1)
+		return fmt.Errorf("calculate generated CoreDNS reload hash: %w", err)
+	}
+	previousFileHash, previousFileHashErr := corefileHash(corefilePath, backups["Corefile"])
+	corefileChanged := previousFileHashErr != nil || previousFileHash != expectedHash
 	if err := replaceWithRollback(m.ConfigDir, files); err != nil {
 		reloadFailedTotal.Add(1)
 		return err
 	}
-	if liveErr == nil {
-		expectedHash := corefileHash(files["Corefile"])
+	if liveErr == nil || (m.bootstrapped && hashNotInitialized && corefileChanged) {
 		if err := m.waitForLiveHash(ctx, expectedHash); err != nil {
 			names := fileNames(files)
 			rollback(m.ConfigDir, backups, names)
-			rollbackErr := m.waitForLiveHash(context.WithoutCancel(ctx), previousHash)
 			reloadFailedTotal.Add(1)
-			if rollbackErr != nil {
+			if previousHash == "" {
+				return fmt.Errorf("CoreDNS did not accept the new configuration; the previous files were restored but no prior reload hash was available: %w", err)
+			}
+			if rollbackErr := m.waitForLiveHash(context.WithoutCancel(ctx), previousHash); rollbackErr != nil {
 				return fmt.Errorf("CoreDNS did not accept the new configuration and rollback could not be verified: %v; rollback verification: %w", err, rollbackErr)
 			}
 			return fmt.Errorf("CoreDNS did not accept the new configuration; the previous configuration was restored: %w", err)
@@ -589,7 +605,7 @@ func (m *Manager) liveCorefileHash(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if !ok {
-		return "", errors.New("CoreDNS reload hash is unavailable")
+		return "", errReloadHashUnavailable
 	}
 	return hash, nil
 }
@@ -597,7 +613,7 @@ func (m *Manager) liveCorefileHash(ctx context.Context) (string, error) {
 func (m *Manager) waitUntilLiveHash(ctx context.Context, expected string) error {
 	timeout := m.ReloadTimeout
 	if timeout <= 0 {
-		timeout = 10 * time.Second
+		timeout = 45 * time.Second
 	}
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -666,9 +682,17 @@ func metricLabel(labels, name string) string {
 	return labels[start : start+end]
 }
 
-func corefileHash(corefile []byte) string {
-	sum := sha512.Sum512(corefile)
-	return hex.EncodeToString(sum[:])
+func corefileHash(filename string, corefile []byte) (string, error) {
+	serverBlocks, err := caddyfile.Parse(filename, bytes.NewReader(corefile), nil)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := json.Marshal(serverBlocks)
+	if err != nil {
+		return "", err
+	}
+	sum := sha512.Sum512(parsed)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func shortHash(hash string) string {

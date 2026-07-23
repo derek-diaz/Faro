@@ -73,6 +73,24 @@ coredns_reload_version_info{hash="sha512",value="` + expected + `"} 1
 	}
 }
 
+func TestCorefileHashMatchesCoreDNSReloadMetric(t *testing.T) {
+	corefile := []byte(`.:0 {
+    errors
+    prometheus 127.0.0.1:0
+    reload 2s
+    forward . 1.1.1.1
+}
+`)
+	hash, err := corefileHash("/config/Corefile", corefile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const expected = "5b5ac0a6f04113e28173c8430db83019b6e6fe65ad4d87b4af4c3bb63bb04df071593012f779d20cde521cc3971017d33b1ab12f4bcd224ecb80a8ca06dee414"
+	if hash != expected {
+		t.Fatalf("Corefile hash = %s; want CoreDNS reload metric %s", hash, expected)
+	}
+}
+
 func TestApplyDoesNotReplaceFilesWhenCoreDNSValidationFails(t *testing.T) {
 	store := openValidationStore(t)
 	defer store.Close()
@@ -141,6 +159,66 @@ func TestApplyRestoresPreviousFilesWhenLiveReloadIsNotAccepted(t *testing.T) {
 	}
 	if content != "last known good" {
 		t.Fatalf("Corefile was not restored: %q", content)
+	}
+}
+
+func TestApplyBootstrapsMissingLiveReloadHash(t *testing.T) {
+	store := openValidationStore(t)
+	defer store.Close()
+	configDir := t.TempDir()
+	corefilePath := filepath.Join(configDir, "Corefile")
+	if err := writeTestFile(corefilePath, "previous Corefile"); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(store, configDir)
+	manager.bootstrapped = true
+	manager.validateGenerated = func(context.Context, map[string][]byte) error { return nil }
+	manager.readLiveHash = func(context.Context) (string, error) {
+		return "", errReloadHashUnavailable
+	}
+	waits := 0
+	manager.waitForLiveHash = func(_ context.Context, expected string) error {
+		waits++
+		if expected == "" {
+			t.Fatal("expected generated Corefile hash")
+		}
+		return nil
+	}
+
+	if err := manager.Apply(context.Background()); err != nil {
+		t.Fatalf("Apply returned bootstrap error: %v", err)
+	}
+	if waits != 1 {
+		t.Fatalf("reload verification calls = %d, want 1", waits)
+	}
+}
+
+func TestApplyAllowsUnchangedCorefileBeforeReloadHashIsInitialized(t *testing.T) {
+	store := openValidationStore(t)
+	defer store.Close()
+	configDir := t.TempDir()
+
+	manager := NewManager(store, configDir)
+	state, err := manager.render(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeTestFile(filepath.Join(configDir, "Corefile"), state.Corefile); err != nil {
+		t.Fatal(err)
+	}
+	manager.bootstrapped = true
+	manager.validateGenerated = func(context.Context, map[string][]byte) error { return nil }
+	manager.readLiveHash = func(context.Context) (string, error) {
+		return "", errReloadHashUnavailable
+	}
+	manager.waitForLiveHash = func(context.Context, string) error {
+		t.Fatal("unchanged Corefile should not require a reload hash")
+		return nil
+	}
+
+	if err := manager.Apply(context.Background()); err != nil {
+		t.Fatalf("Apply returned unchanged-Corefile error: %v", err)
 	}
 }
 

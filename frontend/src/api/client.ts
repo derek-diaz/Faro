@@ -110,8 +110,27 @@ export type DeviceSummary = {
   location?: string | null;
   notes?: string | null;
   device_type: string;
+  device_icon?: string;
+  type_category?: string;
   type_confidence?: "high" | "medium" | "unknown" | string;
   type_source?: "manual" | "automatic" | string;
+  classification?: {
+    source: "manual" | "automatic" | string;
+    definition_id: string;
+    predicted_type: string;
+    category: string;
+    icon: string;
+    confidence: "high" | "medium" | "unknown" | string;
+    score: number;
+    catalog_version: string;
+    evidence: Array<{
+      kind: "hostname" | "domain" | "address" | "conflict" | string;
+      value: string;
+      description: string;
+      weight: number;
+    }>;
+    evaluated_at: string;
+  };
   total_queries_today: number;
   blocked_queries_today: number;
   block_percentage: number;
@@ -123,6 +142,29 @@ export type DeviceSummary = {
   protection_id: number;
   protection_icon: ProtectionIconKey;
   recent_activity?: DNSQuery[];
+};
+
+export type DeviceInventoryPage = {
+  items: DeviceSummary[];
+  page: number;
+  page_size: number;
+  total: number;
+  total_pages: number;
+  revision: string;
+  summary: {
+    observed: number;
+    active_today: number;
+    requests_today: number;
+    blocked_today: number;
+    most_active_name: string;
+    most_active_requests: number;
+  };
+};
+
+export type DeviceInventoryResult = {
+  page: DeviceInventoryPage | null;
+  etag: string;
+  notModified: boolean;
 };
 
 export type ReplayBucket = {
@@ -359,6 +401,46 @@ export type BackupRestoreResult = {
   requires_login: boolean;
 };
 
+export type UnifiSite = {
+  id: string;
+  internalReference?: string;
+  name: string;
+};
+
+export type UnifiCertificate = {
+  fingerprint_sha256: string;
+  subject: string;
+  issuer: string;
+  expires_at: string;
+};
+
+export type UnifiConnectionTest = {
+  ok: boolean;
+  sites: UnifiSite[];
+  requires_certificate_trust: boolean;
+  certificate?: UnifiCertificate;
+};
+
+export type UnifiStatus = {
+  configured: boolean;
+  enabled: boolean;
+  base_url: string;
+  site_id: string;
+  site_name: string;
+  api_key_configured: boolean;
+  tls_mode: "verified" | "pinned" | string;
+  tls_fingerprint?: string;
+  last_sync_at?: string;
+  last_error?: string;
+  synced_devices: number;
+};
+
+export type UnifiSyncResult = {
+  synced_devices: number;
+  skipped: number;
+  completed_at: string;
+};
+
 export type AuthStatus = {
   configured: boolean;
   authenticated: boolean;
@@ -382,6 +464,42 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(body.error ?? response.statusText);
   }
   return response.json() as Promise<T>;
+}
+
+async function deviceInventoryRequest(
+  options: { page: number; pageSize: number; search: string; sort: string; direction: string },
+  etag = "",
+  signal?: AbortSignal
+): Promise<DeviceInventoryResult> {
+  const query = new URLSearchParams({
+    format: "page",
+    page: String(options.page),
+    page_size: String(options.pageSize),
+    search: options.search,
+    sort: options.sort,
+    direction: options.direction
+  });
+  const response = await fetch(`${API_BASE}/api/devices?${query}`, {
+    signal,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Faro-Timezone": BROWSER_TIMEZONE,
+      ...(etag ? { "If-None-Match": etag } : {})
+    }
+  });
+  if (response.status === 401) window.dispatchEvent(new Event("faro:unauthorized"));
+  if (response.status === 304) {
+    return { page: null, etag: response.headers.get("ETag") ?? etag, notModified: true };
+  }
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: response.statusText }));
+    throw new Error(body.error ?? response.statusText);
+  }
+  return {
+    page: await response.json() as DeviceInventoryPage,
+    etag: response.headers.get("ETag") ?? "",
+    notModified: false
+  };
 }
 
 async function backupRequest(path: string, init: RequestInit): Promise<Response> {
@@ -414,6 +532,7 @@ export const api = {
   markAllNotificationsRead: () => request<{ ok: boolean }>("/api/notifications/read-all", { method: "POST" }),
   probeUpstreams: (addresses: string[]) => request<UpstreamProbeResponse>("/api/upstreams/probe", { method: "POST", body: JSON.stringify({ addresses }) }),
   devices: () => request<DeviceSummary[]>("/api/devices"),
+  deviceInventory: deviceInventoryRequest,
   device: (clientIP: string) => request<DeviceSummary>(`/api/devices/${encodeURIComponent(clientIP)}`),
   deviceReplay: (clientIP: string, range = "7d") => request<DeviceReplay>(`/api/devices/${encodeURIComponent(clientIP)}/replay?range=${encodeURIComponent(range)}`),
   updateDeviceAlias: (clientIP: string, alias: { name: string; location?: string; notes?: string; device_type?: string }) =>
@@ -452,6 +571,13 @@ export const api = {
   settings: () => request<Setting[]>("/api/settings"),
   updateSettings: (settings: Record<string, string>) =>
     request<{ ok: boolean }>("/api/settings", { method: "PUT", body: JSON.stringify(settings) }),
+  unifiStatus: () => request<UnifiStatus>("/api/integrations/unifi"),
+  testUnifi: (input: { base_url: string; api_key: string; tls_fingerprint?: string }) =>
+    request<UnifiConnectionTest>("/api/integrations/unifi/test", { method: "POST", body: JSON.stringify(input) }),
+  configureUnifi: (input: { base_url: string; api_key: string; site_id: string; tls_fingerprint?: string }) =>
+    request<UnifiStatus>("/api/integrations/unifi", { method: "PUT", body: JSON.stringify(input) }),
+  syncUnifi: () => request<UnifiSyncResult>("/api/integrations/unifi/sync", { method: "POST" }),
+  disconnectUnifi: () => request<{ ok: boolean }>("/api/integrations/unifi", { method: "DELETE" }),
   maintenance: () => request<MaintenanceStatus>("/api/maintenance"),
   prune: (retentionDays: number, compact: boolean) =>
     request<PruneResult>("/api/maintenance", { method: "POST", body: JSON.stringify({ retention_days: retentionDays, compact }) }),

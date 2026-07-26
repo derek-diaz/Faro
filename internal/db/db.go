@@ -154,6 +154,62 @@ func (s *Store) migrate(ctx context.Context) error {
 			UNIQUE(kind, value)
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_device_identifiers_device ON device_identifiers(device_id);`,
+		`CREATE TABLE IF NOT EXISTS device_names (
+			device_id INTEGER NOT NULL,
+			source TEXT NOT NULL,
+			name TEXT NOT NULL,
+			first_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(device_id, source),
+			FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
+		);`,
+		`CREATE TABLE IF NOT EXISTS integration_configs (
+			kind TEXT PRIMARY KEY,
+			enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0, 1)),
+			base_url TEXT NOT NULL DEFAULT '',
+			secret_ciphertext TEXT NOT NULL DEFAULT '',
+			site_id TEXT NOT NULL DEFAULT '',
+			site_name TEXT NOT NULL DEFAULT '',
+			tls_fingerprint TEXT NOT NULL DEFAULT '',
+			last_sync_at TEXT,
+			last_error TEXT NOT NULL DEFAULT '',
+			synced_devices INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE TABLE IF NOT EXISTS unifi_client_snapshots (
+			client_id TEXT NOT NULL,
+			site_id TEXT NOT NULL,
+			device_id INTEGER NOT NULL,
+			mac_address TEXT NOT NULL DEFAULT '',
+			ip_address TEXT NOT NULL DEFAULT '',
+			name TEXT NOT NULL DEFAULT '',
+			connection_type TEXT NOT NULL DEFAULT '',
+			uplink_device_id TEXT NOT NULL DEFAULT '',
+			connected_at TEXT,
+			last_synced_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(site_id, client_id),
+			FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_unifi_client_snapshots_device ON unifi_client_snapshots(device_id);`,
+		`CREATE TABLE IF NOT EXISTS device_classifications (
+			device_id INTEGER PRIMARY KEY,
+			catalog_version TEXT NOT NULL,
+			definition_id TEXT NOT NULL DEFAULT '',
+			predicted_type TEXT NOT NULL DEFAULT 'Unknown',
+			category TEXT NOT NULL DEFAULT 'unknown',
+			icon TEXT NOT NULL DEFAULT 'monitor',
+			confidence TEXT NOT NULL DEFAULT 'unknown',
+			score INTEGER NOT NULL DEFAULT 0,
+			signal_hash TEXT NOT NULL,
+			evidence_json TEXT NOT NULL DEFAULT '[]',
+			evaluated_at TEXT NOT NULL,
+			classified_query_id INTEGER NOT NULL DEFAULT 0,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_device_classifications_catalog ON device_classifications(catalog_version);`,
 		`CREATE TABLE IF NOT EXISTS device_protection_memberships (
 			device_id INTEGER PRIMARY KEY,
 			protection_id INTEGER NOT NULL,
@@ -282,6 +338,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`ALTER TABLE dns_queries ADD COLUMN decision_reason TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE dns_queries ADD COLUMN decision_metadata TEXT NOT NULL DEFAULT '{}'`,
 		`ALTER TABLE dns_queries ADD COLUMN device_id INTEGER`,
+		`ALTER TABLE device_classifications ADD COLUMN classified_query_id INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, column); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return err

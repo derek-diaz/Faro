@@ -37,6 +37,7 @@ COPY docker/faro-dev-healthcheck.sh /usr/local/bin/faro-dev-healthcheck
 RUN chmod 0755 /usr/local/bin/faro-dev-entrypoint /usr/local/bin/faro-dev-healthcheck
 
 ENV FARO_DB_PATH=/data/faro.db \
+    FARO_DEVICE_CATALOG_PATH=/data/device-catalog.json \
     FARO_FAVICON_DIR=/data/favicons \
     FARO_COREDNS_CONFIG_DIR=/coredns \
     FARO_COREDNS_LOG_PATH=/var/log/coredns/query.log \

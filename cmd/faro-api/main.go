@@ -14,6 +14,8 @@ import (
 	"github.com/derek/faro/internal/blocklists"
 	"github.com/derek/faro/internal/coredns"
 	"github.com/derek/faro/internal/db"
+	"github.com/derek/faro/internal/devicecatalog"
+	"github.com/derek/faro/internal/integrations/unifi"
 	"github.com/derek/faro/internal/querylog"
 	"github.com/derek/faro/internal/retention"
 	"github.com/derek/faro/internal/upstreamhealth"
@@ -51,10 +53,15 @@ func main() {
 	go blocklistManager.Run(ctx)
 	upstreamMonitor := upstreamhealth.NewMonitor(store, upstreamhealth.DefaultInterval, nil)
 	go upstreamMonitor.Run(ctx)
+	unifiManager := unifi.NewManager(store, env("FARO_SECRET_KEY_PATH", filepath.Join(filepath.Dir(dbPath), "faro-secrets.key")))
+	go unifiManager.Run(ctx)
+	deviceCatalog := devicecatalog.NewManager(env("FARO_DEVICE_CATALOG_PATH", ""))
+	deviceClassifier := devicecatalog.NewClassifier(store, deviceCatalog)
+	go deviceClassifier.Run(ctx)
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           api.NewServer(store, reloader, upstreamMonitor),
+		Handler:           api.NewServer(store, reloader, upstreamMonitor, unifiManager, deviceClassifier),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,

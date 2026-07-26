@@ -1,0 +1,407 @@
+{
+  "schema_version": 1,
+  "catalog_version": "2026.07.17",
+  "confidence": {
+    "medium_score": 3,
+    "high_score": 7
+  },
+  "definitions": [
+    {
+      "id": "apple-tv",
+      "name": "Apple TV",
+      "category": "tv",
+      "icon": "tv",
+      "name_signals": [
+        { "tokens": ["appletv"], "mode": "any", "weight": 15 },
+        { "tokens": ["apple", "tv"], "mode": "all", "weight": 15 }
+      ],
+      "requirements": { "minimum_score": 7 }
+    },
+    {
+      "id": "tesla-vehicle",
+      "name": "Tesla",
+      "category": "vehicle",
+      "icon": "car",
+      "name_signals": [
+        { "tokens": ["tesla"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "tesla.com", "weight": 4 },
+        { "suffix": "teslamotors.com", "weight": 4 }
+      ],
+      "requirements": { "minimum_score": 3 }
+    },
+    {
+      "id": "synology-nas",
+      "name": "NAS",
+      "category": "server",
+      "icon": "hard-drive",
+      "name_signals": [
+        { "tokens": ["synology", "diskstation", "nas", "plex"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "synology.com", "weight": 4 },
+        { "suffix": "quickconnect.to", "weight": 4 }
+      ],
+      "requirements": { "minimum_score": 3 }
+    },
+    {
+      "id": "roku-player",
+      "name": "Roku",
+      "category": "tv",
+      "icon": "tv",
+      "name_signals": [
+        { "tokens": ["roku"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "roku.com", "weight": 4 },
+        { "suffix": "rokutime.com", "weight": 4 }
+      ],
+      "requirements": { "minimum_score": 3 }
+    },
+    {
+      "id": "smart-tv",
+      "name": "Smart TV",
+      "category": "tv",
+      "icon": "tv",
+      "name_signals": [
+        { "tokens": ["tv", "smarttv", "webos", "tizen"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "samsungacr.com", "weight": 4 },
+        { "suffix": "samsungcloudsolution.com", "weight": 4 },
+        { "suffix": "lgtvsdp.com", "weight": 4 },
+        { "suffix": "samsung.com", "weight": 2 },
+        { "suffix": "lg.com", "weight": 2 }
+      ],
+      "requirements": { "minimum_score": 3 }
+    },
+    {
+      "id": "sony-playstation",
+      "name": "PlayStation",
+      "category": "game-console",
+      "icon": "gamepad",
+      "name_signals": [
+        { "tokens": ["playstation", "ps4", "ps5"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "playstation.net", "weight": 4 },
+        { "suffix": "playstation.com", "weight": 4 }
+      ],
+      "requirements": { "minimum_score": 3 }
+    },
+    {
+      "id": "microsoft-xbox",
+      "name": "Xbox",
+      "category": "game-console",
+      "icon": "gamepad",
+      "name_signals": [
+        { "tokens": ["xbox"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "update.xboxlive.com", "weight": 4 },
+        { "suffix": "xccs.xboxlive.com", "weight": 4 },
+        { "suffix": "xsts.auth.xboxlive.com", "weight": 3 },
+        { "suffix": "notify.xboxlive.com", "weight": 3 },
+        { "suffix": "catalog.gamepass.com", "weight": 4 }
+      ],
+      "requirements": {
+        "minimum_score": 8,
+        "minimum_domain_signatures": 3
+      }
+    },
+    {
+      "id": "nintendo-console",
+      "name": "Nintendo",
+      "category": "game-console",
+      "icon": "gamepad",
+      "name_signals": [
+        { "tokens": ["nintendo", "switch"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "nintendo.net", "weight": 4 },
+        { "suffix": "nintendo.com", "weight": 4 }
+      ],
+      "requirements": { "minimum_score": 3 }
+    },
+    {
+      "id": "sonos-speaker",
+      "name": "Sonos",
+      "category": "speaker",
+      "icon": "speaker",
+      "name_signals": [
+        { "tokens": ["sonos"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "sonos.com", "weight": 4 }
+      ],
+      "requirements": { "minimum_score": 3 }
+    },
+    {
+      "id": "enphase-solar-system",
+      "name": "Enphase Solar System",
+      "category": "smart-home",
+      "icon": "sun",
+      "name_signals": [
+        { "tokens": ["enphase", "iqgateway"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "ping-udp.enphaseenergy.com", "weight": 5 },
+        { "suffix": "reports.enphaseenergy.com", "weight": 4 },
+        { "suffix": "provisioning.enphaseenergy.com", "weight": 4 }
+      ],
+      "requirements": {
+        "minimum_score": 5,
+        "minimum_domain_signatures": 2
+      }
+    },
+    {
+      "id": "midea-smart-appliance",
+      "name": "Midea Smart Appliance",
+      "category": "smart-home",
+      "icon": "snowflake",
+      "name_signals": [
+        { "tokens": ["midea"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "module.appsmb.com", "weight": 7 }
+      ],
+      "requirements": { "minimum_score": 7 }
+    },
+    {
+      "id": "petlibro-smart-pet-device",
+      "name": "Petlibro Smart Pet Device",
+      "category": "pet-care",
+      "icon": "paw-print",
+      "name_signals": [
+        { "tokens": ["petlibro"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "mqtt.us.petlibro.com", "weight": 7 }
+      ],
+      "requirements": { "minimum_score": 7 }
+    },
+    {
+      "id": "eufy-security-device",
+      "name": "Eufy Security Device",
+      "category": "security",
+      "icon": "camera",
+      "name_signals": [
+        { "tokens": ["eufy"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "security-app.eufylife.com", "weight": 7 },
+        { "suffix": "webrtc-signal-us.eufylife.com", "weight": 7 }
+      ],
+      "requirements": { "minimum_score": 7 }
+    },
+    {
+      "id": "aqara-smart-home-device",
+      "name": "Aqara Smart Home Device",
+      "category": "smart-home",
+      "icon": "lightbulb",
+      "name_signals": [
+        { "tokens": ["aqara"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "aiot-coap-usa.aqara.com", "weight": 7 }
+      ],
+      "requirements": { "minimum_score": 7 }
+    },
+    {
+      "id": "tuya-smart-home-device",
+      "name": "Tuya Smart Home Device",
+      "category": "smart-home",
+      "icon": "lightbulb",
+      "name_signals": [
+        { "tokens": ["tuya"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "a3.tuyaus.com", "weight": 4 },
+        { "suffix": "m2.tuyaus.com", "weight": 4 }
+      ],
+      "requirements": {
+        "minimum_score": 7,
+        "minimum_domain_signatures": 2
+      }
+    },
+    {
+      "id": "myq-garage-door-controller",
+      "name": "MyQ Garage Door Controller",
+      "category": "smart-home",
+      "icon": "door-open",
+      "name_signals": [
+        { "tokens": ["myq"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "connect-ca.myqdevice.com", "weight": 7 }
+      ],
+      "requirements": { "minimum_score": 7 }
+    },
+    {
+      "id": "unifi-network-device",
+      "name": "UniFi Network Device",
+      "category": "network",
+      "icon": "router",
+      "name_signals": [
+        { "tokens": ["unifi", "ubiquiti", "ubnt"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "ping.ui.com", "weight": 7 }
+      ],
+      "requirements": { "minimum_score": 7 }
+    },
+    {
+      "id": "tplink-smart-home-device",
+      "name": "TP-Link Smart Home Device",
+      "category": "smart-home",
+      "icon": "lightbulb",
+      "name_signals": [
+        { "tokens": ["kasa", "tapo", "tplink"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "security.iot.i.tplinknbu.com", "weight": 7 }
+      ],
+      "requirements": { "minimum_score": 7 }
+    },
+    {
+      "id": "meta-hardware",
+      "name": "Meta Hardware",
+      "category": "wearable",
+      "icon": "monitor-smartphone",
+      "name_signals": [
+        { "tokens": ["rayban", "metaquest", "oculus"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "graph.facebook-hardware.com", "weight": 5 },
+        { "suffix": "portal.fb.com", "weight": 4 },
+        { "suffix": "ar.graph.meta.com", "weight": 3 }
+      ],
+      "requirements": {
+        "minimum_score": 8,
+        "minimum_domain_signatures": 2
+      }
+    },
+    {
+      "id": "neakasa-smart-pet-device",
+      "name": "Neakasa Smart Pet Device",
+      "category": "pet-care",
+      "icon": "paw-print",
+      "name_signals": [
+        { "tokens": ["neakasa"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "devus.neakasa.com", "weight": 7 }
+      ],
+      "requirements": { "minimum_score": 7 }
+    },
+    {
+      "id": "amazon-alexa-device",
+      "name": "Amazon Alexa Device",
+      "category": "speaker",
+      "icon": "speaker",
+      "name_signals": [
+        { "tokens": ["echo", "alexa"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "api.amazonalexa.com", "weight": 5 },
+        { "suffix": "unagi-na.amazon.com", "weight": 4 },
+        { "suffix": "msh.amazon.com", "weight": 4 },
+        { "suffix": "mmechocaptiveportal.com", "weight": 4 },
+        { "suffix": "dcape-na.amazon.com", "weight": 4 }
+      ],
+      "requirements": {
+        "minimum_score": 8,
+        "minimum_domain_signatures": 2
+      }
+    },
+    {
+      "id": "philips-hue-bridge",
+      "name": "Philips Hue Bridge",
+      "category": "smart-home",
+      "icon": "lightbulb",
+      "name_signals": [
+        { "tokens": ["huebridge", "hue", "philips"], "mode": "any", "weight": 10 }
+      ],
+      "domain_signals": [
+        { "suffix": "diag.meethue.com", "weight": 4 },
+        { "suffix": "data.meethue.com", "weight": 4 },
+        { "suffix": "prod.huedatastore.com", "weight": 4 },
+        { "suffix": "mqtt-eu-03.iot.meethue.com", "weight": 4 }
+      ],
+      "requirements": {
+        "minimum_score": 8,
+        "minimum_domain_signatures": 2
+      }
+    },
+    {
+      "id": "android-device",
+      "name": "Android Device",
+      "category": "mobile",
+      "icon": "smartphone",
+      "name_signals": [
+        { "tokens": ["android", "pixel"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "android.clients.google.com", "weight": 3 },
+        { "suffix": "connectivitycheck.gstatic.com", "weight": 3 },
+        { "suffix": "connectivitycheck.android.com", "weight": 3 },
+        { "suffix": "mtalk.google.com", "weight": 3 }
+      ],
+      "requirements": { "minimum_score": 3 }
+    },
+    {
+      "id": "apple-device",
+      "name": "Apple Device",
+      "category": "mobile",
+      "icon": "smartphone",
+      "name_signals": [
+        { "tokens": ["iphone", "ipad", "mac", "macbook", "imac", "apple"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "mesu.apple.com", "weight": 4 },
+        { "suffix": "gdmf.apple.com", "weight": 4 },
+        { "suffix": "xp.apple.com", "weight": 3 },
+        { "suffix": "captive.apple.com", "weight": 3 }
+      ],
+      "requirements": { "minimum_score": 3 }
+    },
+    {
+      "id": "windows-pc",
+      "name": "Windows PC",
+      "category": "computer",
+      "icon": "laptop",
+      "name_signals": [
+        { "tokens": ["windows", "winpc"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "windowsupdate.com", "weight": 3 },
+        { "suffix": "microsoftconnecttest.com", "weight": 3 },
+        { "suffix": "msftconnecttest.com", "weight": 3 },
+        { "suffix": "settings-win.data.microsoft.com", "weight": 3 }
+      ],
+      "requirements": { "minimum_score": 3 }
+    },
+    {
+      "id": "linux-server",
+      "name": "Linux Server",
+      "category": "server",
+      "icon": "server",
+      "name_signals": [
+        { "tokens": ["ubuntu", "debian", "fedora", "linux"], "mode": "any", "weight": 8 }
+      ],
+      "domain_signals": [
+        { "suffix": "archive.ubuntu.com", "weight": 3 },
+        { "suffix": "security.ubuntu.com", "weight": 3 },
+        { "suffix": "connectivity-check.ubuntu.com", "weight": 3 },
+        { "suffix": "deb.debian.org", "weight": 3 },
+        { "suffix": "mirrors.fedoraproject.org", "weight": 3 }
+      ],
+      "address_signals": [
+        { "address": "127.0.0.1", "weight": 10 },
+        { "address": "::1", "weight": 10 }
+      ],
+      "requirements": { "minimum_score": 3 }
+    }
+  ]
+}

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/derek/faro/internal/devicecatalog"
 	deviceidentity "github.com/derek/faro/internal/devices"
 )
 
@@ -18,123 +19,7 @@ func (s *Handler) devices(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	start := todayStart(r)
-	rows, err := s.store.DB.QueryContext(r.Context(), `
-		SELECT
-			d.id,
-			COALESCE((SELECT address FROM device_addresses WHERE device_id = d.id ORDER BY last_seen_at DESC, id DESC LIMIT 1), '') AS client_ip,
-			d.name,
-			d.location,
-			d.notes,
-			d.device_type,
-			d.type_source,
-			COUNT(CASE WHEN q.timestamp >= ? THEN 1 END) AS total_queries_today,
-			COALESCE(SUM(CASE WHEN q.timestamp >= ? AND q.action = 'blocked' THEN 1 ELSE 0 END), 0) AS blocked_queries_today,
-			COALESCE(MAX(q.timestamp), strftime('%Y-%m-%dT%H:%M:%SZ', d.last_seen_at)) AS last_seen
-		FROM devices d
-		LEFT JOIN dns_queries q ON q.device_id = d.id
-		GROUP BY d.id
-		ORDER BY last_seen DESC, client_ip
-	`, start, start)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	defer rows.Close()
-
-	type baseDevice struct {
-		deviceID   int64
-		clientIP   string
-		name       string
-		location   any
-		notes      any
-		deviceType string
-		typeSource string
-		total      int
-		blocked    int
-		lastSeen   any
-	}
-	baseDevices := []baseDevice{}
-	for rows.Next() {
-		var clientIP, name, deviceType, typeSource string
-		var location, notes, lastSeen sql.NullString
-		var total, blocked int
-		var deviceID int64
-		if err := rows.Scan(&deviceID, &clientIP, &name, &location, &notes, &deviceType, &typeSource, &total, &blocked, &lastSeen); err != nil {
-			writeError(w, err)
-			return
-		}
-		baseDevices = append(baseDevices, baseDevice{
-			deviceID:   deviceID,
-			clientIP:   clientIP,
-			name:       name,
-			location:   nullableString(location),
-			notes:      nullableString(notes),
-			deviceType: deviceType,
-			typeSource: typeSource,
-			total:      total,
-			blocked:    blocked,
-			lastSeen:   nullableString(lastSeen),
-		})
-	}
-	if err := rows.Err(); err != nil {
-		writeError(w, err)
-		return
-	}
-	rows.Close()
-
-	items := []map[string]any{}
-	clientIPs := make([]string, 0, len(baseDevices)*2)
-	addressesByDevice := make(map[int64][]string, len(baseDevices))
-	for _, device := range baseDevices {
-		addresses, addressErr := deviceidentity.Addresses(r.Context(), s.store, device.deviceID)
-		if addressErr != nil {
-			writeError(w, addressErr)
-			return
-		}
-		addressesByDevice[device.deviceID] = addresses
-		clientIPs = append(clientIPs, addresses...)
-	}
-	discoveredNames := s.discoverDeviceNames(r.Context(), clientIPs)
-	for _, device := range baseDevices {
-		addresses := addressesByDevice[device.deviceID]
-		identity := bestDeviceIdentity(discoveredNames, addresses, device.clientIP)
-		if strings.TrimSpace(device.name) != "" {
-			identity.DisplayName = device.name
-			identity.NameSource = "manual"
-		}
-		typeSource := "automatic"
-		if device.typeSource == "manual" && validManualDeviceType(device.deviceType) {
-			identity.DeviceType, identity.TypeConfidence, typeSource = device.deviceType, "high", "manual"
-		} else {
-			identity.DeviceType, identity.TypeConfidence = inferDeviceTypeForDevice(r.Context(), s.store.DB, device.deviceID, device.clientIP, identity.DisplayName)
-		}
-		protectionID, protectionName, protectionIcon := protectionForClient(r.Context(), s.store.DB, device.clientIP)
-		items = append(items, map[string]any{
-			"device_id":             device.deviceID,
-			"client_ip":             device.clientIP,
-			"addresses":             addresses,
-			"identity_source":       deviceIdentitySource(r.Context(), s.store.DB, device.deviceID, identity.NameSource),
-			"name":                  device.name,
-			"display_name":          identity.DisplayName,
-			"name_source":           identity.NameSource,
-			"location":              device.location,
-			"notes":                 device.notes,
-			"device_type":           identity.DeviceType,
-			"type_confidence":       identity.TypeConfidence,
-			"type_source":           typeSource,
-			"total_queries_today":   device.total,
-			"blocked_queries_today": device.blocked,
-			"block_percentage":      percentage(device.blocked, device.total),
-			"top_domains":           grouped(r.Context(), s.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE device_id = ? AND timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC, domain LIMIT 5`, device.deviceID, start),
-			"last_seen":             device.lastSeen,
-			"profile":               protectionName,
-			"protection":            protectionName,
-			"protection_id":         protectionID,
-			"protection_icon":       protectionIcon,
-		})
-	}
-	writeJSON(w, http.StatusOK, items)
+	s.deviceInventory(w, r)
 }
 
 func bestDeviceIdentity(discovered map[string]deviceIdentity, addresses []string, fallback string) deviceIdentity {
@@ -149,6 +34,9 @@ func bestDeviceIdentity(discovered map[string]deviceIdentity, addresses []string
 func deviceIdentitySource(ctx context.Context, database *sql.DB, deviceID int64, nameSource string) string {
 	if nameSource == "manual" {
 		return "confirmed by you"
+	}
+	if nameSource == "unifi" {
+		return "UniFi"
 	}
 	var kind string
 	if err := database.QueryRowContext(ctx, `
@@ -263,11 +151,25 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 		identity.DisplayName = name
 		identity.NameSource = "manual"
 	}
+	classification, classificationErr := devicecatalog.Classification(r.Context(), s.store.DB, deviceID)
+	if classificationErr != nil && !errors.Is(classificationErr, sql.ErrNoRows) {
+		writeError(w, classificationErr)
+		return
+	}
+	if errors.Is(classificationErr, sql.ErrNoRows) {
+		classification = devicecatalog.Prediction{
+			DeviceType:     "Unknown",
+			Category:       "unknown",
+			Icon:           "monitor",
+			Confidence:     "unknown",
+			CatalogVersion: s.activeDeviceCatalog().Info().CatalogVersion,
+			Evidence:       []devicecatalog.Evidence{},
+		}
+	}
+	identity.DeviceType, identity.TypeConfidence = classification.DeviceType, classification.Confidence
 	typeSource := "automatic"
 	if storedTypeSource == "manual" && validManualDeviceType(storedDeviceType) {
 		identity.DeviceType, identity.TypeConfidence, typeSource = storedDeviceType, "high", "manual"
-	} else {
-		identity.DeviceType, identity.TypeConfidence = inferDeviceTypeForDevice(r.Context(), s.store.DB, deviceID, clientIP, identity.DisplayName)
 	}
 	protectionID, protectionName, protectionIcon := protectionForClient(r.Context(), s.store.DB, clientIP)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -282,8 +184,11 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 		"location":              nullableString(location),
 		"notes":                 nullableString(notes),
 		"device_type":           identity.DeviceType,
+		"device_icon":           classification.Icon,
+		"type_category":         classification.Category,
 		"type_confidence":       identity.TypeConfidence,
 		"type_source":           typeSource,
+		"classification":        classificationResponse(classification, typeSource),
 		"total_queries_today":   total,
 		"blocked_queries_today": blocked,
 		"block_percentage":      percentage(blocked, total),
@@ -544,6 +449,13 @@ func (s *Handler) deviceAlias(w http.ResponseWriter, r *http.Request, clientIP s
 			notes = excluded.notes,
 			updated_at = CURRENT_TIMESTAMP
 	`, clientIP, name, nullableInput(input.Location), nullableInput(input.Notes)); err != nil {
+		writeError(w, err)
+		return
+	}
+	// A changed friendly name can materially improve catalog matching. Mark the
+	// cached prediction stale; the background classifier will rebuild it without
+	// making this request wait for domain aggregation.
+	if _, err := s.store.DB.ExecContext(r.Context(), `DELETE FROM device_classifications WHERE device_id = ?`, deviceID); err != nil {
 		writeError(w, err)
 		return
 	}

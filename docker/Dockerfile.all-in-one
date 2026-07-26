@@ -61,6 +61,7 @@ COPY coredns/sample-blocklist.txt /app/coredns/sample-blocklist.txt
 RUN chmod 0755 /usr/local/bin/faro-entrypoint /usr/local/bin/faro-healthcheck
 
 ENV FARO_DB_PATH=/config/faro.db \
+    FARO_DEVICE_CATALOG_PATH=/config/device-catalog.json \
     FARO_FAVICON_DIR=/config/favicons \
     FARO_COREDNS_CONFIG_DIR=/config/coredns \
     FARO_COREDNS_LOG_PATH=/config/logs/query.log \

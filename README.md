@@ -23,6 +23,7 @@ Faro pairs CoreDNS with an approachable web app so you can understand and contro
 - Guided first-run setup and local administrator authentication
 - Live dashboard and searchable network activity
 - Device inventory, friendly names, and activity replay
+- Local, read-only UniFi integration for stable device identity across IP changes
 - Home protection plus custom per-device protection setups
 - Local DNS records, per-protection exceptions, and curated blocklists
 - Upstream DNS selection with live latency comparisons

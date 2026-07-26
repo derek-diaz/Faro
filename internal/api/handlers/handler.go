@@ -12,6 +12,8 @@ import (
 	farobackup "github.com/derek/faro/internal/backup"
 	"github.com/derek/faro/internal/blocklists"
 	"github.com/derek/faro/internal/db"
+	"github.com/derek/faro/internal/devicecatalog"
+	"github.com/derek/faro/internal/integrations/unifi"
 	"github.com/derek/faro/internal/upstreamhealth"
 )
 
@@ -20,31 +22,51 @@ type CoreDNSManager interface {
 }
 
 type Handler struct {
-	store        *db.Store
-	reloader     CoreDNSManager
-	refresher    blocklists.Refresher
-	deviceNames  *deviceNameResolver
-	faviconDir   string
-	faviconLocks [32]sync.Mutex
-	metricsURL   string
-	upstreams    *upstreamhealth.Monitor
-	backups      *farobackup.Service
-	startedAt    time.Time
-	configMu     sync.Mutex
+	store         *db.Store
+	reloader      CoreDNSManager
+	refresher     blocklists.Refresher
+	deviceNames   *deviceNameResolver
+	deviceCatalog *devicecatalog.Manager
+	faviconDir    string
+	faviconLocks  [32]sync.Mutex
+	metricsURL    string
+	upstreams     *upstreamhealth.Monitor
+	backups       *farobackup.Service
+	unifi         *unifi.Manager
+	classifier    *devicecatalog.Classifier
+	startedAt     time.Time
+	configMu      sync.Mutex
 }
 
-func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Monitor) http.Handler {
+func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Monitor, dependencies ...any) http.Handler {
 	authManager := auth.NewManager(store)
+	var unifiManager *unifi.Manager
+	var classifier *devicecatalog.Classifier
+	for _, dependency := range dependencies {
+		switch value := dependency.(type) {
+		case *unifi.Manager:
+			unifiManager = value
+		case *devicecatalog.Classifier:
+			classifier = value
+		}
+	}
+	catalog := devicecatalog.NewManager(env("FARO_DEVICE_CATALOG_PATH", ""))
+	if classifier != nil {
+		catalog = classifier.Catalog()
+	}
 	handler := &Handler{
-		store:       store,
-		reloader:    reloader,
-		refresher:   blocklists.Refresher{Store: store},
-		deviceNames: newDeviceNameResolver(),
-		faviconDir:  env("FARO_FAVICON_DIR", "/data/favicons"),
-		metricsURL:  env("FARO_COREDNS_METRICS_URL", "http://coredns:9153/metrics"),
-		upstreams:   upstreams,
-		backups:     farobackup.NewService(store),
-		startedAt:   time.Now(),
+		store:         store,
+		reloader:      reloader,
+		refresher:     blocklists.Refresher{Store: store},
+		deviceNames:   newDeviceNameResolver(),
+		deviceCatalog: catalog,
+		faviconDir:    env("FARO_FAVICON_DIR", "/data/favicons"),
+		metricsURL:    env("FARO_COREDNS_METRICS_URL", "http://coredns:9153/metrics"),
+		upstreams:     upstreams,
+		backups:       farobackup.NewService(store),
+		unifi:         unifiManager,
+		classifier:    classifier,
+		startedAt:     time.Now(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handler.health)
@@ -71,11 +93,15 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 	mux.HandleFunc("/api/upstreams/probe", handler.upstreamProbes)
 	mux.HandleFunc("/api/devices", handler.devices)
 	mux.HandleFunc("/api/devices/", handler.device)
+	mux.HandleFunc("/api/device-catalog", handler.deviceCatalogInfo)
 	mux.HandleFunc("/api/domains/", handler.domainSummary)
 	mux.HandleFunc("/api/search", handler.search)
 	mux.HandleFunc("/api/dashboard", handler.dashboard)
 	mux.HandleFunc("/api/favicons/", handler.favicon)
 	mux.HandleFunc("/api/settings", handler.settings)
+	mux.HandleFunc("/api/integrations/unifi", handler.unifiIntegration)
+	mux.HandleFunc("/api/integrations/unifi/test", handler.unifiTest)
+	mux.HandleFunc("/api/integrations/unifi/sync", handler.unifiSync)
 	mux.HandleFunc("/api/maintenance", handler.maintenance)
 	mux.HandleFunc("/api/backups", handler.backupExport)
 	mux.HandleFunc("/api/backups/restore", handler.backupRestore)

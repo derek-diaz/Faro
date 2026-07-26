@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   type Blocklist,
@@ -109,6 +109,7 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
   const [selectedClientIP, setSelectedClientIPState] = useState<string | null>(initialRoute.clientIP);
   const [searchOpen, setSearchOpen] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
+  const liveRefreshBusy = useRef(false);
 
   const apiState = useMemo(() => (loading ? "checking" : error ? "offline" : "online"), [loading, error]);
 
@@ -163,7 +164,7 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
   useEffect(() => {
     const timer = window.setInterval(() => {
       void refreshLiveData();
-    }, 5000);
+    }, 10000);
     return () => window.clearInterval(timer);
   }, [page]);
 
@@ -183,15 +184,17 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
   }, []);
 
   async function refreshLiveData() {
+    if (liveRefreshBusy.current) return;
+    liveRefreshBusy.current = true;
     try {
-      setSummary(await api.dashboard());
-      if (page === "devices") {
-        setDevices(await api.devices());
-      }
-      setNotifications(await api.notifications());
+      const [nextSummary, nextNotifications] = await Promise.all([api.dashboard(), api.notifications()]);
+      setSummary(nextSummary);
+      setNotifications(nextNotifications);
       setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Failed to refresh live data");
+    } finally {
+      liveRefreshBusy.current = false;
     }
   }
 

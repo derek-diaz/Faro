@@ -136,7 +136,7 @@ func (s *Service) Create(ctx context.Context, passphrase string) (string, Manife
 		FormatVersion: FormatVersion,
 		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
 		DatabaseBytes: info.Size(),
-		Excluded:      []string{"auth_sessions", "favicon cache files", "raw query-log buffer"},
+		Excluded:      []string{"auth_sessions", "integration credentials and derived router observations", "favicon cache files", "raw query-log buffer"},
 	}
 	archivePath := filepath.Join(tempDir, "payload.zip")
 	if err := writeArchive(archivePath, databasePath, manifest); err != nil {

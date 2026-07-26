@@ -26,6 +26,13 @@ type Identifier struct {
 // device ID. It uses only strong, passive local evidence (an exact Local DNS
 // record or an ARP/neighbor MAC) to connect a new address to an existing device.
 func ResolveAddress(ctx context.Context, store *db.Store, address, source string) (int64, error) {
+	return ObserveAddress(ctx, store, address, source, nil)
+}
+
+// ObserveAddress records an address together with strong identifiers supplied
+// by a trusted local integration. Explicit identifiers are combined with
+// Faro's passive evidence and pass through the same conflict-safe merge rules.
+func ObserveAddress(ctx context.Context, store *db.Store, address, source string, explicit []Identifier) (int64, error) {
 	address = normalizeAddress(address)
 	if address == "" {
 		return 0, ErrInvalidAddress
@@ -37,6 +44,8 @@ func ResolveAddress(ctx context.Context, store *db.Store, address, source string
 	if err != nil {
 		return 0, err
 	}
+	identifiers = append(identifiers, explicit...)
+	identifiers = normalizedIdentifiers(identifiers)
 
 	tx, err := store.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -93,6 +102,31 @@ func ResolveAddress(ctx context.Context, store *db.Store, address, source string
 		return 0, err
 	}
 	return deviceID, nil
+}
+
+func normalizedIdentifiers(input []Identifier) []Identifier {
+	result := make([]Identifier, 0, len(input))
+	seen := map[string]bool{}
+	for _, identifier := range input {
+		identifier.Kind = strings.ToLower(strings.TrimSpace(identifier.Kind))
+		identifier.Value = strings.ToLower(strings.TrimSpace(identifier.Value))
+		if identifier.Kind == "" || identifier.Value == "" {
+			continue
+		}
+		key := identifier.Kind + "\x00" + identifier.Value
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		result = append(result, identifier)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Kind == result[j].Kind {
+			return result[i].Value < result[j].Value
+		}
+		return result[i].Kind < result[j].Kind
+	})
+	return result
 }
 
 func DeviceIDForAddress(ctx context.Context, store *db.Store, address string) (int64, bool, error) {
@@ -288,6 +322,15 @@ func safeMerge(ctx context.Context, tx *sql.Tx, targetID, sourceID int64) (bool,
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE device_identifiers SET device_id = ?, updated_at = CURRENT_TIMESTAMP WHERE device_id = ?`, targetID, sourceID); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM device_names WHERE device_id = ? AND source IN (SELECT source FROM device_names WHERE device_id = ?)`, sourceID, targetID); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE device_names SET device_id = ?, updated_at = CURRENT_TIMESTAMP WHERE device_id = ?`, targetID, sourceID); err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE unifi_client_snapshots SET device_id = ? WHERE device_id = ?`, targetID, sourceID); err != nil {
 		return false, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM device_protection_memberships WHERE device_id = ?`, sourceID); err != nil {

@@ -1,11 +1,14 @@
 import {
   Activity,
+  ArrowDown,
+  ArrowUp,
   Check,
   Car,
   Camera,
   ChevronDown,
   ChevronRight,
   Clock3,
+  DoorOpen,
   Gauge,
   Globe2,
   Edit3,
@@ -17,20 +20,23 @@ import {
   Network,
   Gamepad2,
   Lightbulb,
+  PawPrint,
   Printer,
   Router,
   Search,
   Server,
   ShieldCheck,
+  Snowflake,
   Speaker,
   Sparkles,
   Smartphone,
+  Sun,
   Tablet,
   Tv,
   X
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { api, type DeviceReplay as DeviceReplayData, type DeviceSummary, type DNSQuery, type Protection, type ReplayBucket } from "../api/client";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { api, type DeviceInventoryPage, type DeviceReplay as DeviceReplayData, type DeviceSummary, type DNSQuery, type Protection, type ReplayBucket } from "../api/client";
 import { DeviceReplay } from "../components/DeviceReplay";
 import { DomainFavicon } from "../components/DomainFavicon";
 import { EmptyState } from "../components/EmptyState";
@@ -49,6 +55,8 @@ type DevicesProps = {
 
 type DeviceView = "overview" | "replay";
 type DeviceEditForm = { name: string; location: string; notes: string; device_type: string };
+type DeviceSortKey = "device" | "requests" | "blocked" | "last_seen" | "protection";
+type SortDirection = "asc" | "desc";
 
 const deviceTypeChoices = [
   "Computer",
@@ -75,15 +83,73 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
   const [aliasSaving, setAliasSaving] = useState(false);
   const [view, setView] = useState<DeviceView>("overview");
   const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<{ key: DeviceSortKey; direction: SortDirection }>({ key: "device", direction: "asc" });
+  const [page, setPage] = useState(1);
+  const [inventory, setInventory] = useState<DeviceInventoryPage>(() => inventoryFromDevices(devices));
+  const [inventoryLoading, setInventoryLoading] = useState(true);
+  const [inventoryError, setInventoryError] = useState("");
   const [protectionBusy, setProtectionBusy] = useState(false);
   const [protectionMenuOpen, setProtectionMenuOpen] = useState(false);
   const protectionMenuRef = useRef<HTMLDivElement>(null);
-  const mostActiveDevice = useMemo(() => devices.reduce<DeviceSummary | null>((current, device) => {
-    if (!current || device.total_queries_today > current.total_queries_today) return device;
-    return current;
-  }, null), [devices]);
+  const inventoryRequest = useRef<AbortController | null>(null);
+  const inventoryETag = useRef("");
+  const inventoryBusy = useRef(false);
+  const inventoryDevices = inventory.items;
   const activeProtection = detail ? protections.find((protection) => protection.id === detail.protection_id) : null;
   const activeProtectionName = activeProtection?.name ?? detail?.protection ?? detail?.profile ?? "Protection";
+
+  const loadInventory = useCallback(async (conditional: boolean) => {
+    if (conditional && inventoryBusy.current) return;
+    if (!conditional) inventoryRequest.current?.abort();
+    const controller = new AbortController();
+    inventoryRequest.current = controller;
+    inventoryBusy.current = true;
+    if (!conditional) setInventoryLoading(true);
+    try {
+      const result = await api.deviceInventory({
+        page,
+        pageSize: 50,
+        search: search.trim(),
+        sort: sort.key,
+        direction: sort.direction
+      }, conditional ? inventoryETag.current : "", controller.signal);
+      if (result.page) {
+        setInventory(result.page);
+        inventoryETag.current = result.etag;
+      }
+      setInventoryError("");
+    } catch (caught) {
+      if (caught instanceof DOMException && caught.name === "AbortError") return;
+      setInventoryError(caught instanceof Error ? caught.message : "Could not refresh the device inventory.");
+    } finally {
+      if (inventoryRequest.current === controller) {
+        inventoryBusy.current = false;
+        setInventoryLoading(false);
+      }
+    }
+  }, [page, search, sort.direction, sort.key]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      inventoryETag.current = "";
+      void loadInventory(false);
+    }, search ? 250 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      inventoryRequest.current?.abort();
+    };
+  }, [loadInventory, search]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadInventory(true);
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [loadInventory]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search, sort]);
 
   useEffect(() => {
     if (!selectedClientIP) {
@@ -143,23 +209,20 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [protectionMenuOpen]);
 
-  const filteredDevices = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    if (!term) return devices;
-    return devices.filter((device) => [device.name, device.display_name, device.client_ip, ...(device.addresses ?? []), device.device_type, device.location, device.profile]
-      .some((value) => value?.toLowerCase().includes(term)));
-  }, [devices, search]);
+  function changeSort(key: DeviceSortKey) {
+    setSort((current) => current.key === key
+      ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
+      : { key, direction: key === "device" || key === "protection" ? "asc" : "desc" });
+  }
 
-  const totals = useMemo(() => {
-    const requests = devices.reduce((sum, device) => sum + device.total_queries_today, 0);
-    const blocked = devices.reduce((sum, device) => sum + device.blocked_queries_today, 0);
-    return {
-      active: devices.filter((device) => device.total_queries_today > 0).length,
-      requests,
-      blocked,
-      blockedRate: requests > 0 ? (blocked / requests) * 100 : 0
-    };
-  }, [devices]);
+  const totals = {
+    active: inventory.summary.active_today,
+    requests: inventory.summary.requests_today,
+    blocked: inventory.summary.blocked_today,
+    blockedRate: inventory.summary.requests_today > 0
+      ? (inventory.summary.blocked_today / inventory.summary.requests_today) * 100
+      : 0
+  };
 
   async function saveAlias(event: FormEvent) {
     event.preventDefault();
@@ -170,6 +233,8 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
       await api.updateDeviceAlias(selectedClientIP, form);
       setEditing(false);
       await refresh();
+      inventoryETag.current = "";
+      await loadInventory(false);
       setDetail(await api.device(selectedClientIP));
     } catch (caught) {
       setDetailError(caught instanceof Error ? caught.message : "Could not save this device.");
@@ -186,6 +251,8 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
     try {
       await api.assignDeviceProtection(selectedClientIP, protectionID);
       await refresh();
+      inventoryETag.current = "";
+      await loadInventory(false);
       setDetail(await api.device(selectedClientIP));
     } catch (caught) {
       setDetailError(caught instanceof Error ? caught.message : "Could not change protection.");
@@ -194,20 +261,20 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
     }
   }
 
-  if (devices.length === 0) {
+  if (!inventoryLoading && inventory.summary.observed === 0) {
     return <EmptyState title="No devices yet" body="Point a device or router at Faro to start seeing clients, names, blocked requests, and top domains." />;
   }
 
   return (
     <div className="devices-page">
       <section className="device-summary-strip" aria-label="Device activity summary">
-        <DeviceSummaryMetric icon={<MonitorSmartphone size={18} />} label="Observed devices" value={devices.length} detail={`${totals.active} active today`} />
+        <DeviceSummaryMetric icon={<MonitorSmartphone size={18} />} label="Observed devices" value={inventory.summary.observed} detail={`${totals.active} active today`} />
         <DeviceSummaryMetric icon={<Activity size={18} />} label="Requests today" value={totals.requests.toLocaleString()} detail="Across all devices" />
         <DeviceSummaryMetric icon={<ShieldCheck size={18} />} label="Blocked today" value={totals.blocked.toLocaleString()} detail={`${totals.blockedRate.toFixed(1)}% of requests`} tone={totals.blocked > 0 ? "blocked" : "default"} />
-        <DeviceSummaryMetric icon={<Clock3 size={18} />} label="Most active" value={deviceDisplayName(mostActiveDevice) || "None"} detail={`${mostActiveDevice?.total_queries_today.toLocaleString() ?? "0"} requests today`} compact />
+        <DeviceSummaryMetric icon={<Clock3 size={18} />} label="Most active" value={inventory.summary.most_active_name || "None"} detail={`${inventory.summary.most_active_requests.toLocaleString()} requests today`} compact />
       </section>
 
-	  {devices.length === 1 && totals.requests > 0 && (
+	  {inventory.summary.observed === 1 && totals.requests > 0 && (
 		<section className="device-visibility-note" aria-label="Device visibility status">
 		  <Network size={19} />
 		  <div><strong>Faro currently sees one DNS source</strong><span>If that source is your router, Faro will keep protecting the network, but the router is hiding which device made each request.</span></div>
@@ -224,15 +291,21 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
             <span className="sr-only">Search devices</span>
             <Search size={16} />
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search devices" />
-            <kbd>{filteredDevices.length}</kbd>
+            <kbd>{inventory.total}</kbd>
           </label>
         </div>
 
+        {inventoryError && <div className="device-inventory-error" role="alert">{inventoryError}</div>}
         <div className="device-table">
-          <div className="device-table-header" aria-hidden="true">
-            <span>Device</span><span>Requests today</span><span>Blocked</span><span>Last seen</span><span>Protection</span><span />
+          <div className="device-table-header">
+            <DeviceSortHeader label="Device" sortKey="device" sort={sort} onSort={changeSort} />
+            <DeviceSortHeader label="Requests today" sortKey="requests" sort={sort} onSort={changeSort} />
+            <DeviceSortHeader label="Blocked" sortKey="blocked" sort={sort} onSort={changeSort} />
+            <DeviceSortHeader label="Last seen" sortKey="last_seen" sort={sort} onSort={changeSort} />
+            <DeviceSortHeader label="Protection" sortKey="protection" sort={sort} onSort={changeSort} />
+            <span aria-hidden="true" />
           </div>
-          {filteredDevices.map((device) => (
+          {inventoryDevices.map((device) => (
             <button
               className={selectedClientIP === device.client_ip ? "device-table-row active" : "device-table-row"}
               key={device.device_id || device.client_ip}
@@ -256,8 +329,18 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
           ))}
         </div>
 
-        {filteredDevices.length === 0 && (
+        {!inventoryLoading && inventoryDevices.length === 0 && (
           <div className="device-filter-empty"><Search size={20} /><strong>No matching devices</strong><span>Try a name, IP address, device type, or location.</span></div>
+        )}
+        {inventory.total_pages > 1 && (
+          <div className="device-pagination" aria-label="Device inventory pages">
+            <span>Showing {(inventory.page - 1) * inventory.page_size + 1}–{Math.min(inventory.page * inventory.page_size, inventory.total)} of {inventory.total}</span>
+            <div>
+              <button type="button" className="secondary" disabled={inventory.page <= 1 || inventoryLoading} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button>
+              <span>Page {inventory.page} of {inventory.total_pages}</span>
+              <button type="button" className="secondary" disabled={inventory.page >= inventory.total_pages || inventoryLoading} onClick={() => setPage((current) => current + 1)}>Next</button>
+            </div>
+          </div>
         )}
       </section>
 
@@ -346,6 +429,37 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
   );
 }
 
+function DeviceSortHeader({ label, sortKey, sort, onSort }: { label: string; sortKey: DeviceSortKey; sort: { key: DeviceSortKey; direction: SortDirection }; onSort: (key: DeviceSortKey) => void }) {
+  const active = sort.key === sortKey;
+  const DirectionIcon = sort.direction === "asc" ? ArrowUp : ArrowDown;
+  return <button type="button" className={active ? "device-sort-header active" : "device-sort-header"} onClick={() => onSort(sortKey)} aria-label={`Sort by ${label}${active ? `, currently ${sort.direction === "asc" ? "ascending" : "descending"}` : ""}`}>
+    <span>{label}</span>{active && <DirectionIcon size={13} strokeWidth={2.5} aria-hidden="true" />}
+  </button>;
+}
+
+function inventoryFromDevices(devices: DeviceSummary[]): DeviceInventoryPage {
+  const requests = devices.reduce((sum, device) => sum + device.total_queries_today, 0);
+  const blocked = devices.reduce((sum, device) => sum + device.blocked_queries_today, 0);
+  const mostActive = devices.reduce<DeviceSummary | null>((current, device) =>
+    !current || device.total_queries_today > current.total_queries_today ? device : current, null);
+  return {
+    items: devices.slice(0, 50),
+    page: 1,
+    page_size: 50,
+    total: devices.length,
+    total_pages: devices.length ? Math.ceil(devices.length / 50) : 0,
+    revision: "",
+    summary: {
+      observed: devices.length,
+      active_today: devices.filter((device) => device.total_queries_today > 0).length,
+      requests_today: requests,
+      blocked_today: blocked,
+      most_active_name: deviceDisplayName(mostActive) || "None",
+      most_active_requests: mostActive?.total_queries_today ?? 0
+    }
+  };
+}
+
 function DeviceSummaryMetric({ icon, label, value, detail, tone = "default", compact = false }: {
   icon: React.ReactNode;
   label: string;
@@ -426,14 +540,33 @@ function DeviceOverview({ detail, form, setForm, editing, saving, saveAlias, onD
         <button className="secondary" type="button" onClick={onOpenReplay}><History size={16} /><span>Open replay</span></button>
       </section>
 
-	  <section className="device-identity-evidence">
-		<div className="device-section-heading"><div><h3>How Faro recognizes this device</h3><p>{detail.identity_source || "DNS activity"} · address changes stay connected automatically when Faro has a strong match</p></div></div>
-		<div className="device-address-history">
-		  {(detail.address_history?.length ? detail.address_history : (detail.addresses ?? [detail.client_ip]).map((address) => ({ address, family: address.includes(":") ? "ipv6" : "ipv4", source: "dns", confidence: "observed", first_seen: detail.first_seen ?? "", last_seen: detail.last_seen ?? "" }))).map((item, index) => (
-			<div key={item.address}><span className={index === 0 ? "current" : ""}>{index === 0 ? "Current" : "Seen before"}</span><code>{item.address}</code><small>{item.family.toUpperCase()} · Last seen {formatLastSeen(item.last_seen, true)}</small></div>
-		  ))}
-		</div>
-	  </section>
+      <section className="device-identity-evidence">
+        <div className="device-section-heading"><div><h3>How Faro recognizes this device</h3><p>{detail.identity_source || "DNS activity"} · address changes stay connected automatically when Faro has a strong match</p></div></div>
+        {detail.classification && (
+          <div className={`device-classification ${detail.type_source === "manual" ? "manual" : ""}`}>
+            <span className="device-classification-icon">{detail.type_source === "manual" ? <Check size={17} /> : <Sparkles size={17} />}</span>
+            <div>
+              <small>{detail.type_source === "manual" ? "Chosen by you" : "Automatic detection"}</small>
+              <strong>{detail.type_source === "manual" ? detail.device_type : detail.classification.predicted_type}</strong>
+              <p>
+                {detail.type_source === "manual"
+                  ? "Faro will keep your choice and will not replace it automatically."
+                  : detail.classification.evidence.length
+                    ? `Based on ${detail.classification.evidence.map((item) => item.description.toLowerCase()).join(" and ")}.`
+                    : "Faro has not seen enough distinctive activity to identify this device yet."}
+              </p>
+            </div>
+            <span className={`device-confidence ${detail.classification.confidence}`}>
+              {detail.type_source === "manual" ? "Manual" : `${detail.classification.confidence} confidence`}
+            </span>
+          </div>
+        )}
+        <div className="device-address-history">
+          {(detail.address_history?.length ? detail.address_history : (detail.addresses ?? [detail.client_ip]).map((address) => ({ address, family: address.includes(":") ? "ipv6" : "ipv4", source: "dns", confidence: "observed", first_seen: detail.first_seen ?? "", last_seen: detail.last_seen ?? "" }))).map((item, index) => (
+            <div key={item.address}><span className={index === 0 ? "current" : ""}>{index === 0 ? "Current" : "Seen before"}</span><code>{item.address}</code><small>{item.family.toUpperCase()} · Last seen {formatLastSeen(item.last_seen, true)}</small></div>
+          ))}
+        </div>
+      </section>
 
       <div className="device-overview-kpis">
         <OverviewKpi icon={<Activity size={17} />} label="Queries today" value={detail.total_queries_today.toLocaleString()} detail="DNS requests" />
@@ -582,6 +715,19 @@ function deviceTypeIcon(type: string, size = 20) {
     case "Printer": return <Printer size={size} />;
     case "Camera": return <Camera size={size} />;
     case "Speaker": return <Speaker size={size} />;
+    case "Enphase Solar System": return <Sun size={size} />;
+    case "Midea Smart Appliance": return <Snowflake size={size} />;
+    case "Petlibro Smart Pet Device": return <PawPrint size={size} />;
+    case "Eufy Security Device": return <Camera size={size} />;
+    case "Aqara Smart Home Device": return <Lightbulb size={size} />;
+    case "Tuya Smart Home Device": return <Lightbulb size={size} />;
+    case "MyQ Garage Door Controller": return <DoorOpen size={size} />;
+    case "UniFi Network Device": return <Router size={size} />;
+    case "TP-Link Smart Home Device": return <Lightbulb size={size} />;
+    case "Meta Hardware": return <MonitorSmartphone size={size} />;
+    case "Neakasa Smart Pet Device": return <PawPrint size={size} />;
+    case "Amazon Alexa Device": return <Speaker size={size} />;
+    case "Philips Hue Bridge": return <Lightbulb size={size} />;
     default: return <MonitorSmartphone size={size} />;
   }
 }

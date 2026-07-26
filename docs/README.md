@@ -16,6 +16,7 @@ Faro reads optional deployment settings from a `.env` file beside `docker-compos
 | `FARO_QUERY_LOG_BACKUPS` | `2` | Number of rotated raw query-log files retained |
 | `FARO_DOCKER_LOG_MAX_SIZE` | `10m` | Maximum size of each Docker stdout/stderr log file |
 | `FARO_DOCKER_LOG_BACKUPS` | `3` | Number of rotated Docker log files retained per container |
+| `FARO_DEVICE_CATALOG_PATH` | `/config/device-catalog.json` | Optional custom device-recognition catalog; the bundled catalog is used when this file does not exist |
 | `FARO_IMAGE_NAMESPACE` | `tabierto` | Docker Hub image namespace |
 | `FARO_VERSION` | `latest` | Faro image tag |
 
@@ -30,6 +31,7 @@ FARO_QUERY_LOG_MAX_BYTES=10485760
 FARO_QUERY_LOG_BACKUPS=2
 FARO_DOCKER_LOG_MAX_SIZE=10m
 FARO_DOCKER_LOG_BACKUPS=3
+FARO_DEVICE_CATALOG_PATH=/config/device-catalog.json
 FARO_VERSION=latest
 ```
 
@@ -60,6 +62,43 @@ An installation created from Faro's older three-service preview uses a different
 **Home** is Faro's network default. Existing blocklist and exception choices are migrated into Home automatically. Use the separate **Blocklists** page to install, update, pause, or remove shared filtering sources. Under **Protection**, you can create additional named setups, choose an icon, select from those installed blocklists, add allow or block exceptions, and assign observed devices. Devices that are not assigned elsewhere always fall back to Home.
 
 Device assignment uses the DNS client's source IP address. Give important devices stable DHCP leases so their protection remains predictable. If a router proxies every DNS request through its own address, Faro sees the router as one client and cannot apply different protection to the devices behind it.
+
+## Device recognition catalog
+
+Faro identifies devices from conservative combinations of device names, distinctive DNS domain families, and reserved local addresses. Recognition rules live in the versioned JSON catalog at `internal/devicecatalog/catalog.json`; they are not compiled into handler logic. Each automatic result stores the catalog version, score, and human-readable evidence that produced it. A manual device type always takes precedence.
+
+Classification runs in bounded background batches rather than while the Devices page is loading. New devices and catalog revisions are handled first; active devices are reconsidered at most once every ten minutes when their DNS evidence changes. This keeps inventory reads fast even on busy networks.
+
+To maintain the bundled catalog:
+
+1. Add or adjust one narrowly scoped definition in `internal/devicecatalog/catalog.json` and increment `catalog_version`.
+2. Prefer a distinctive vendor service domain over broad domains shared by browsers or apps.
+3. Add a regression test for both the intended device and a plausible false positive.
+4. Validate the file with:
+
+   ```sh
+   go run ./cmd/faro-device-catalog validate ./internal/devicecatalog/catalog.json
+   ```
+
+5. Run `go test ./internal/devicecatalog ./internal/api/handlers` before submitting the change.
+
+Administrators can test their own catalog without rebuilding Faro by placing it at `/config/device-catalog.json`. Faro checks that file while running, accepts it only when its complete schema is valid, and keeps the last known-good catalog if a later edit is invalid. Delete the file to return to the bundled catalog. `GET /api/device-catalog` reports the active version, source, definition count, and any validation error.
+
+## Device inventory performance
+
+The Devices inventory is paginated in groups of 50 and supports database-backed search and sorting. Its list endpoint batches addresses, protection assignments, cached classifications, identity sources, and daily activity into a fixed number of database operations per page. Top-domain and replay data are loaded only after opening one device.
+
+While the page is visible, Faro checks for changes every 15 seconds. Conditional requests return immediately when the inventory revision has not changed, superseded requests are cancelled, and a slow refresh cannot overlap the next one. The broader application refresh no longer reloads the complete device inventory every five seconds.
+
+## UniFi Network integration
+
+Faro can use the official local UniFi Network API to keep device identity stable when DHCP addresses change. Open **Settings → Integrations → UniFi Network**, enter the private HTTPS address of the UniFi console and a local Network API key created under **Control Plane → Integrations**, then choose the site to synchronize.
+
+The integration is deliberately read-only. Faro imports the connected client's MAC address, current IP address, UniFi name, connection type, and uplink identifier. DNS activity remains Faro's source for traffic and filtering decisions; Faro does not change UniFi DHCP, DNS, firewall, network, or Wi-Fi configuration. Manually confirmed Faro names, icons, and protection assignments always take precedence over imported data.
+
+Faro accepts only consoles that resolve to a private, loopback, link-local, or carrier-grade NAT address. A normally trusted HTTPS certificate is verified automatically. If the console uses a self-signed certificate, Faro displays its subject, expiration, and SHA-256 fingerprint for explicit review and pins that exact certificate after approval. A changed certificate stops synchronization until it is reviewed again.
+
+The API key is encrypted with a random per-installation key stored beside Faro's database and is never returned to the browser or written to logs. Portable Faro backups deliberately exclude integration credentials and derived UniFi observations; reconnect UniFi after restoring onto a different installation. The synchronization runs once per minute and can also be started manually from the integration page.
 
 ## Verify the installation
 
@@ -115,7 +154,7 @@ Faro stores its database, generated resolver configuration, cached icons, and bo
 
 For routine Faro backups, open **Settings → Health & data → Encrypted backup & restore**. Faro downloads a portable `.faro-backup` file containing the SQLite database, including DNS settings, local records, rules, blocklists, account data, and retained history. The file is protected with a passphrase-derived key using Argon2id and AES-256-GCM.
 
-Keep the backup passphrase separately: Faro cannot recover it. Restoring replaces the live database atomically, reloads CoreDNS, and signs out every browser session. Active login sessions, cached favicon files, and the bounded raw query-log buffer are deliberately excluded; Faro recreates those operational files as needed.
+Keep the backup passphrase separately: Faro cannot recover it. Restoring replaces the live database atomically, reloads CoreDNS, and signs out every browser session. Active login sessions, integration credentials and derived router observations, cached favicon files, and the bounded raw query-log buffer are deliberately excluded; Faro recreates or re-synchronizes those operational files as needed.
 
 Volume-level backups are still useful for full host disaster recovery, especially if you also want cached favicons and generated runtime files. Back up `faro-config` as part of the Docker host's normal backup process.
 

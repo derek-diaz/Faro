@@ -1,6 +1,7 @@
-import { AlertTriangle, Check, CheckCircle2, Clock3, Cpu, Database, Download, Eye, EyeOff, FileArchive, Gauge, Globe2, HardDrive, Image, KeyRound, LockKeyhole, Network, RefreshCw, RotateCw, Save, Server, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react";
+import { AlertTriangle, Cable, Check, CheckCircle2, Clock3, Cpu, Database, Download, Eye, EyeOff, FileArchive, Gauge, Globe2, HardDrive, Image, KeyRound, LockKeyhole, Network, RefreshCw, RotateCw, Save, Server, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { api, type MaintenanceStatus, type PruneResult, type Setting } from "../api/client";
+import { UnifiIntegration } from "../components/UnifiIntegration";
 
 type SettingsProps = {
   settings: Setting[];
@@ -8,7 +9,7 @@ type SettingsProps = {
   onManageUpstreams: () => void;
 };
 
-type SettingsTab = "general" | "data" | "account";
+type SettingsTab = "general" | "integrations" | "data" | "account";
 type ActionState = "idle" | "working" | "done" | "error";
 
 export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps) {
@@ -147,6 +148,9 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
         <button type="button" role="tab" aria-selected={tab === "data"} className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}>
           <Database size={16} /> Health & data
         </button>
+        <button type="button" role="tab" aria-selected={tab === "integrations"} className={tab === "integrations" ? "active" : ""} onClick={() => setTab("integrations")}>
+          <Cable size={16} /> Integrations
+        </button>
         <button type="button" role="tab" aria-selected={tab === "account"} className={tab === "account" ? "active" : ""} onClick={() => setTab("account")}>
           <UserRound size={16} /> Account
         </button>
@@ -243,6 +247,8 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
           busy={actionState === "working"}
           result={pruneResult}
         />
+      ) : tab === "integrations" ? (
+        <UnifiIntegration onChanged={refresh} />
       ) : (
         <section className="panel account-password-panel">
           <div className="panel-title"><div><h2>Change password</h2><p>Enter your current password, then choose a new one.</p></div></div>

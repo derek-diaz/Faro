@@ -2,9 +2,7 @@ package handlers
 
 import (
 	"context"
-	"database/sql"
 	"net"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -40,21 +38,55 @@ func newDeviceNameResolver() *deviceNameResolver {
 // cannot make a large inventory take one timeout per device to load.
 func (s *Handler) discoverDeviceNames(ctx context.Context, clientIPs []string) map[string]deviceIdentity {
 	identities := make(map[string]deviceIdentity, len(clientIPs))
-	rows, err := s.store.DB.QueryContext(ctx, `
-		SELECT value, hostname FROM dns_records
-		WHERE type IN ('A', 'AAAA')
-		ORDER BY updated_at DESC, id DESC
-	`)
-	if err == nil {
-		for rows.Next() {
-			var clientIP, hostname string
-			if rows.Scan(&clientIP, &hostname) == nil {
-				if _, exists := identities[clientIP]; !exists {
-					identities[clientIP] = deviceIdentity{DisplayName: friendlyHostname(hostname), NameSource: "local_dns"}
+	requested := uniqueDeviceAddresses(clientIPs)
+	for start := 0; start < len(requested); start += 400 {
+		end := start + 400
+		if end > len(requested) {
+			end = len(requested)
+		}
+		arguments, placeholders := stringQueryArguments(requested[start:end])
+		rows, err := s.store.DB.QueryContext(ctx, `
+			SELECT value, hostname FROM dns_records
+			WHERE type IN ('A', 'AAAA') AND value IN (`+placeholders+`)
+			ORDER BY updated_at DESC, id DESC
+		`, arguments...)
+		if err == nil {
+			for rows.Next() {
+				var clientIP, hostname string
+				if rows.Scan(&clientIP, &hostname) == nil {
+					if _, exists := identities[clientIP]; !exists {
+						identities[clientIP] = deviceIdentity{DisplayName: friendlyHostname(hostname), NameSource: "local_dns"}
+					}
 				}
 			}
+			_ = rows.Close()
 		}
-		_ = rows.Close()
+	}
+
+	for start := 0; start < len(requested); start += 400 {
+		end := start + 400
+		if end > len(requested) {
+			end = len(requested)
+		}
+		arguments, placeholders := stringQueryArguments(requested[start:end])
+		rows, err := s.store.DB.QueryContext(ctx, `
+			SELECT a.address, n.name
+			FROM device_names n
+			JOIN device_addresses a ON a.device_id = n.device_id
+			WHERE n.source = 'unifi' AND TRIM(n.name) <> '' AND a.address IN (`+placeholders+`)
+			ORDER BY n.last_seen_at DESC
+		`, arguments...)
+		if err == nil {
+			for rows.Next() {
+				var clientIP, name string
+				if rows.Scan(&clientIP, &name) == nil {
+					if _, exists := identities[clientIP]; !exists && usefulHostname(name, clientIP) {
+						identities[clientIP] = deviceIdentity{DisplayName: name, NameSource: "unifi"}
+					}
+				}
+			}
+			_ = rows.Close()
+		}
 	}
 
 	resolver := s.deviceNames
@@ -103,6 +135,30 @@ func (s *Handler) discoverDeviceNames(ctx context.Context, clientIPs []string) m
 	return identities
 }
 
+func uniqueDeviceAddresses(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func stringQueryArguments(values []string) ([]any, string) {
+	arguments := make([]any, len(values))
+	placeholders := make([]string, len(values))
+	for index, value := range values {
+		arguments[index] = value
+		placeholders[index] = "?"
+	}
+	return arguments, strings.Join(placeholders, ",")
+}
+
 func (r *deviceNameResolver) cached(clientIP string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -145,123 +201,7 @@ func usefulHostname(hostname, clientIP string) bool {
 	return compactName != compactIP && compactName != "ip"+compactIP
 }
 
-type deviceTypeRule struct {
-	name                string
-	nameTokens          []string
-	domains             map[string]int
-	minDomainSignatures int
-}
-
-var deviceTypeRules = []deviceTypeRule{
-	{name: "Tesla", nameTokens: []string{"tesla"}, domains: weightedDomains(4, "tesla.com", "teslamotors.com")},
-	{name: "NAS", nameTokens: []string{"synology", "diskstation", "nas", "plex"}, domains: weightedDomains(4, "synology.com", "quickconnect.to")},
-	{name: "Roku", nameTokens: []string{"roku"}, domains: weightedDomains(4, "roku.com", "rokutime.com")},
-	{name: "Smart TV", nameTokens: []string{"tv", "smarttv", "webos", "tizen"}, domains: mergeWeightedDomains(weightedDomains(4, "samsungacr.com", "samsungcloudsolution.com", "lgtvsdp.com"), weightedDomains(2, "samsung.com", "lg.com"))},
-	{name: "PlayStation", nameTokens: []string{"playstation", "ps4", "ps5"}, domains: weightedDomains(4, "playstation.net", "playstation.com")},
-	// Windows and several Microsoft apps contact xboxlive.com even when the
-	// client is not an Xbox. Require two independent Xbox domain families when
-	// there is no explicit Xbox hostname instead of counting every subdomain as
-	// a separate clue.
-	{name: "Xbox", nameTokens: []string{"xbox"}, domains: weightedDomains(4, "xboxlive.com", "xbox.com"), minDomainSignatures: 2},
-	{name: "Nintendo", nameTokens: []string{"nintendo", "switch"}, domains: weightedDomains(4, "nintendo.net", "nintendo.com")},
-	{name: "Sonos", nameTokens: []string{"sonos"}, domains: weightedDomains(4, "sonos.com")},
-	{name: "Android Device", nameTokens: []string{"android", "pixel"}, domains: weightedDomains(3, "android.clients.google.com", "connectivitycheck.gstatic.com", "connectivitycheck.android.com", "mtalk.google.com")},
-	{name: "Apple Device", nameTokens: []string{"iphone", "ipad", "mac", "macbook", "imac", "apple"}, domains: mergeWeightedDomains(weightedDomains(4, "mesu.apple.com", "gdmf.apple.com"), weightedDomains(3, "xp.apple.com", "captive.apple.com"))},
-	{name: "Windows PC", nameTokens: []string{"windows", "winpc"}, domains: weightedDomains(3, "windowsupdate.com", "microsoftconnecttest.com", "msftconnecttest.com", "settings-win.data.microsoft.com")},
-	{name: "Linux Server", nameTokens: []string{"ubuntu", "debian", "fedora", "linux"}, domains: weightedDomains(3, "archive.ubuntu.com", "security.ubuntu.com", "connectivity-check.ubuntu.com", "deb.debian.org", "mirrors.fedoraproject.org")},
-}
-
-func inferDeviceType(ctx context.Context, database *sql.DB, clientIP, name string) (string, string) {
-	domains := topLabels(ctx, database, `SELECT domain, COUNT(*) FROM dns_queries WHERE client_ip = ? GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 80`, clientIP)
-	return inferDeviceTypeFromSignals(name, clientIP, domains)
-}
-
-func inferDeviceTypeForDevice(ctx context.Context, database *sql.DB, deviceID int64, primaryAddress, name string) (string, string) {
-	domains := topLabels(ctx, database, `SELECT domain, COUNT(*) FROM dns_queries WHERE device_id = ? GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 80`, deviceID)
-	return inferDeviceTypeFromSignals(name, primaryAddress, domains)
-}
-
 func inferDeviceTypeFromSignals(name, clientIP string, domains []string) (string, string) {
-	tokens := signalTokens(name)
-	if tokens["appletv"] || (tokens["apple"] && tokens["tv"]) {
-		return "Apple TV", "high"
-	}
-	type score struct {
-		name  string
-		value int
-	}
-	scores := make([]score, 0, len(deviceTypeRules))
-	for _, rule := range deviceTypeRules {
-		value := 0
-		nameMatched := false
-		for _, token := range rule.nameTokens {
-			if tokens[token] {
-				value += 7
-				nameMatched = true
-			}
-		}
-		matchedSignatures := map[string]bool{}
-		for _, domain := range domains {
-			for signature, weight := range rule.domains {
-				if !matchedSignatures[signature] && domainMatches(domain, signature) {
-					value += weight
-					matchedSignatures[signature] = true
-					break
-				}
-			}
-		}
-		if !nameMatched && rule.minDomainSignatures > 0 && len(matchedSignatures) < rule.minDomainSignatures {
-			continue
-		}
-		if value > 0 {
-			scores = append(scores, score{name: rule.name, value: value})
-		}
-	}
-	if clientIP == "127.0.0.1" {
-		return "Linux Server", "high"
-	}
-	if len(scores) == 0 {
-		return "Unknown", "unknown"
-	}
-	sort.SliceStable(scores, func(i, j int) bool { return scores[i].value > scores[j].value })
-	if scores[0].value < 3 || (len(scores) > 1 && scores[0].value == scores[1].value) {
-		return "Unknown", "unknown"
-	}
-	if scores[0].value >= 7 {
-		return scores[0].name, "high"
-	}
-	return scores[0].name, "medium"
-}
-
-func signalTokens(value string) map[string]bool {
-	tokens := map[string]bool{}
-	for _, token := range strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
-	}) {
-		tokens[token] = true
-	}
-	return tokens
-}
-
-func domainMatches(domain, signature string) bool {
-	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
-	return domain == signature || strings.HasSuffix(domain, "."+signature)
-}
-
-func weightedDomains(weight int, domains ...string) map[string]int {
-	result := make(map[string]int, len(domains))
-	for _, domain := range domains {
-		result[domain] = weight
-	}
-	return result
-}
-
-func mergeWeightedDomains(groups ...map[string]int) map[string]int {
-	result := map[string]int{}
-	for _, group := range groups {
-		for domain, weight := range group {
-			result[domain] = weight
-		}
-	}
-	return result
+	prediction := bundledDeviceCatalog.Predict(name, clientIP, domains)
+	return prediction.DeviceType, prediction.Confidence
 }

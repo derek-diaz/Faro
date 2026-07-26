@@ -7,6 +7,7 @@ services:
     environment:
       FARO_QUERY_LOG_MAX_BYTES: ${FARO_QUERY_LOG_MAX_BYTES:-10485760}
       FARO_QUERY_LOG_BACKUPS: ${FARO_QUERY_LOG_BACKUPS:-2}
+      FARO_DEVICE_CATALOG_PATH: ${FARO_DEVICE_CATALOG_PATH:-/config/device-catalog.json}
     volumes:
       - faro-config:/config
     ports:

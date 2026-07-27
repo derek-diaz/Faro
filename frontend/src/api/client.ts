@@ -530,7 +530,8 @@ export const api = {
   markNotificationRead: (id: string) => request<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}/read`, { method: "PUT" }),
   dismissNotification: (id: string) => request<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}`, { method: "DELETE" }),
   markAllNotificationsRead: () => request<{ ok: boolean }>("/api/notifications/read-all", { method: "POST" }),
-  probeUpstreams: (addresses: string[]) => request<UpstreamProbeResponse>("/api/upstreams/probe", { method: "POST", body: JSON.stringify({ addresses }) }),
+  probeUpstreams: (addresses: string[], transport: "encrypted" | "standard" = "standard") =>
+    request<UpstreamProbeResponse>("/api/upstreams/probe", { method: "POST", body: JSON.stringify({ addresses, transport }) }),
   devices: () => request<DeviceSummary[]>("/api/devices"),
   deviceInventory: deviceInventoryRequest,
   device: (clientIP: string) => request<DeviceSummary>(`/api/devices/${encodeURIComponent(clientIP)}`),

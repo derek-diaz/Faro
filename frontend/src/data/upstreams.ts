@@ -5,6 +5,7 @@ export type ResolverProfile = {
   name: string;
   description: string;
   addresses: string[];
+  doh: string;
   mode: FilteringMode;
   badges: string[];
   recommended?: boolean;
@@ -25,9 +26,9 @@ export const upstreamProviders: ResolverProvider[] = [
     domain: "cloudflare.com",
     description: "Fast, privacy-focused public DNS with optional malware and family filtering.",
     profiles: [
-      { id: "cloudflare-standard", name: "Standard", description: "Fast DNS without content filtering.", addresses: ["1.1.1.1", "1.0.0.1"], mode: "none", badges: ["Private", "Unfiltered"], recommended: true },
-      { id: "cloudflare-malware", name: "Malware blocking", description: "Blocks known malware and phishing domains.", addresses: ["1.1.1.2", "1.0.0.2"], mode: "security", badges: ["Security"] },
-      { id: "cloudflare-family", name: "Family", description: "Blocks malware and adult content.", addresses: ["1.1.1.3", "1.0.0.3"], mode: "family", badges: ["Security", "Family"] }
+      { id: "cloudflare-standard", name: "Standard", description: "Fast DNS without content filtering.", addresses: ["1.1.1.1", "1.0.0.1"], doh: "https://cloudflare-dns.com/dns-query", mode: "none", badges: ["Private", "Unfiltered"], recommended: true },
+      { id: "cloudflare-malware", name: "Malware blocking", description: "Blocks known malware and phishing domains.", addresses: ["1.1.1.2", "1.0.0.2"], doh: "https://security.cloudflare-dns.com/dns-query", mode: "security", badges: ["Security"] },
+      { id: "cloudflare-family", name: "Family", description: "Blocks malware and adult content.", addresses: ["1.1.1.3", "1.0.0.3"], doh: "https://family.cloudflare-dns.com/dns-query", mode: "family", badges: ["Security", "Family"] }
     ]
   },
   {
@@ -36,7 +37,7 @@ export const upstreamProviders: ResolverProvider[] = [
     domain: "google.com",
     description: "Global public resolver focused on speed, security, and accurate DNS answers.",
     profiles: [
-      { id: "google-standard", name: "Standard", description: "Reliable DNS without general content filtering.", addresses: ["8.8.8.8", "8.8.4.4"], mode: "none", badges: ["Global", "Unfiltered"], recommended: true }
+      { id: "google-standard", name: "Standard", description: "Reliable DNS without general content filtering.", addresses: ["8.8.8.8", "8.8.4.4"], doh: "https://dns.google/dns-query", mode: "none", badges: ["Global", "Unfiltered"], recommended: true }
     ]
   },
   {
@@ -45,9 +46,9 @@ export const upstreamProviders: ResolverProvider[] = [
     domain: "quad9.net",
     description: "Privacy-first DNS with DNSSEC and optional threat blocking.",
     profiles: [
-      { id: "quad9-secure", name: "Secure", description: "Blocks known malicious domains and validates DNSSEC.", addresses: ["9.9.9.9", "149.112.112.112"], mode: "security", badges: ["Malware blocking", "DNSSEC"], recommended: true },
-      { id: "quad9-unfiltered", name: "No threat blocking", description: "Privacy-focused resolution without threat blocking.", addresses: ["9.9.9.10", "149.112.112.10"], mode: "none", badges: ["Private", "Unfiltered"] },
-      { id: "quad9-ecs", name: "Secure + ECS", description: "Threat blocking with ECS for improved CDN location responses.", addresses: ["9.9.9.11", "149.112.112.11"], mode: "security", badges: ["Malware blocking", "ECS"] }
+      { id: "quad9-secure", name: "Secure", description: "Blocks known malicious domains and validates DNSSEC.", addresses: ["9.9.9.9", "149.112.112.112"], doh: "https://dns.quad9.net/dns-query", mode: "security", badges: ["Malware blocking", "DNSSEC"], recommended: true },
+      { id: "quad9-unfiltered", name: "No threat blocking", description: "Privacy-focused resolution without threat blocking.", addresses: ["9.9.9.10", "149.112.112.10"], doh: "https://dns10.quad9.net/dns-query", mode: "none", badges: ["Private", "Unfiltered"] },
+      { id: "quad9-ecs", name: "Secure + ECS", description: "Threat blocking with ECS for improved CDN location responses.", addresses: ["9.9.9.11", "149.112.112.11"], doh: "https://dns11.quad9.net/dns-query", mode: "security", badges: ["Malware blocking", "ECS"] }
     ]
   },
   {
@@ -56,9 +57,9 @@ export const upstreamProviders: ResolverProvider[] = [
     domain: "adguard-dns.io",
     description: "Public DNS with built-in ad, tracker, and family filtering options.",
     profiles: [
-      { id: "adguard-default", name: "Default", description: "Blocks ads and trackers at the DNS layer.", addresses: ["94.140.14.14", "94.140.15.15"], mode: "ads", badges: ["Ads", "Trackers"], recommended: true },
-      { id: "adguard-unfiltered", name: "Non-filtering", description: "AdGuard infrastructure without content filtering.", addresses: ["94.140.14.140", "94.140.14.141"], mode: "none", badges: ["Unfiltered"] },
-      { id: "adguard-family", name: "Family protection", description: "Blocks ads, trackers, adult content, and enables Safe Search where possible.", addresses: ["94.140.14.15", "94.140.15.16"], mode: "family", badges: ["Ads", "Family", "Safe Search"] }
+      { id: "adguard-default", name: "Default", description: "Blocks ads and trackers at the DNS layer.", addresses: ["94.140.14.14", "94.140.15.15"], doh: "https://dns.adguard-dns.com/dns-query", mode: "ads", badges: ["Ads", "Trackers"], recommended: true },
+      { id: "adguard-unfiltered", name: "Non-filtering", description: "AdGuard infrastructure without content filtering.", addresses: ["94.140.14.140", "94.140.14.141"], doh: "https://unfiltered.adguard-dns.com/dns-query", mode: "none", badges: ["Unfiltered"] },
+      { id: "adguard-family", name: "Family protection", description: "Blocks ads, trackers, adult content, and enables Safe Search where possible.", addresses: ["94.140.14.15", "94.140.15.16"], doh: "https://family.adguard-dns.com/dns-query", mode: "family", badges: ["Ads", "Family", "Safe Search"] }
     ]
   },
   {
@@ -67,8 +68,8 @@ export const upstreamProviders: ResolverProvider[] = [
     domain: "opendns.com",
     description: "Cisco-backed public DNS with security features and a preconfigured family-filtering option.",
     profiles: [
-      { id: "opendns-standard", name: "Standard", description: "Public DNS with basic security and optional account-based filtering.", addresses: ["208.67.222.222", "208.67.220.220"], mode: "security", badges: ["Security", "Customizable"], recommended: true },
-      { id: "opendns-familyshield", name: "FamilyShield", description: "Preconfigured to block adult content without requiring an OpenDNS account.", addresses: ["208.67.222.123", "208.67.220.123"], mode: "family", badges: ["Security", "Family"] }
+      { id: "opendns-standard", name: "Standard", description: "Public DNS with basic security and optional account-based filtering.", addresses: ["208.67.222.222", "208.67.220.220"], doh: "https://doh.opendns.com/dns-query", mode: "security", badges: ["Security", "Customizable"], recommended: true },
+      { id: "opendns-familyshield", name: "FamilyShield", description: "Preconfigured to block adult content without requiring an OpenDNS account.", addresses: ["208.67.222.123", "208.67.220.123"], doh: "https://doh.familyshield.opendns.com/dns-query", mode: "family", badges: ["Security", "Family"] }
     ]
   }
 ];

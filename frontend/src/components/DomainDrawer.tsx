@@ -200,7 +200,7 @@ function resolutionDetail(query: DNSQuery) {
   if (query.source === "blocklist") return "Answered locally by Faro filtering; no upstream was contacted.";
   if (query.source === "local") return "Answered by Faro Local DNS; no upstream was contacted.";
   if (query.source === "cache") return "Answered from Faro's DNS cache; no upstream was contacted.";
-  if (query.source === "upstream") return query.upstream ? `Forwarded to upstream resolver ${query.upstream}.` : "Forwarded to a configured upstream resolver.";
+  if (query.source === "upstream") return query.upstream === "doh" ? "Forwarded through Faro's encrypted DNS-over-HTTPS connection." : query.upstream ? `Forwarded to upstream resolver ${query.upstream}.` : "Forwarded to a configured upstream resolver.";
   return `Handled by ${query.source || "Faro"}.`;
 }
 
@@ -208,7 +208,7 @@ function fallbackReason(query: DNSQuery) {
   if (query.action === "blocked") return "Faro filtering blocked this request.";
   if (query.source === "cache") return "Faro answered this request from its local cache.";
   if (query.source === "local") return "Faro answered this request using Local DNS.";
-  return query.upstream ? `Faro forwarded this request to ${query.upstream}.` : "Faro allowed this request.";
+  return query.upstream === "doh" ? "Faro forwarded this request through encrypted DNS." : query.upstream ? `Faro forwarded this request to ${query.upstream}.` : "Faro allowed this request.";
 }
 
 function formatLatency(value: number) {

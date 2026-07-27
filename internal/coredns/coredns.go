@@ -35,6 +35,7 @@ type Manager struct {
 	ConfigDir         string
 	CoreDNSBinary     string
 	MetricsURL        string
+	BeforeApply       func(context.Context) error
 	ValidationTimeout time.Duration
 	ReloadTimeout     time.Duration
 	HTTPClient        *http.Client
@@ -111,6 +112,12 @@ func (m *Manager) Apply(ctx context.Context) error {
 	m.applyMu.Lock()
 	defer m.applyMu.Unlock()
 	reloadTotal.Add(1)
+	if m.BeforeApply != nil {
+		if err := m.BeforeApply(ctx); err != nil {
+			reloadFailedTotal.Add(1)
+			return fmt.Errorf("prepare DNS transport: %w", err)
+		}
+	}
 	state, err := m.render(ctx)
 	if err != nil {
 		reloadFailedTotal.Add(1)
@@ -207,6 +214,17 @@ func (m *Manager) render(ctx context.Context) (renderedFiles, error) {
 		if net.ParseIP(upstream) == nil {
 			return renderedFiles{}, fmt.Errorf("invalid upstream resolver %q", upstream)
 		}
+	}
+	upstreamTransport := strings.TrimSpace(settings["upstream_transport"])
+	if upstreamTransport == "" {
+		upstreamTransport = "standard"
+	}
+	switch upstreamTransport {
+	case "standard":
+	case "encrypted":
+		upstreams = []string{"127.0.0.1:5053"}
+	default:
+		return renderedFiles{}, fmt.Errorf("invalid upstream transport %q", upstreamTransport)
 	}
 	cacheEnabled := settings["dns_cache_enabled"] != "false"
 	cacheTTL := 300

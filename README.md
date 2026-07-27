@@ -26,7 +26,8 @@ Faro pairs CoreDNS with an approachable web app so you can understand and contro
 - Local, read-only UniFi integration for stable device identity across IP changes
 - Home protection plus custom per-device protection setups
 - Local DNS records, per-protection exceptions, and curated blocklists
-- Upstream DNS selection with live latency comparisons
+- Encrypted DNS-over-HTTPS upstreams with privacy-aware health and failover
+- Upstream DNS provider selection with live latency comparisons
 - DNS cache and upstream-resolution visibility
 - Clear explanations for why requests were allowed or blocked
 - Configurable retention, database pruning, and health metrics

@@ -17,6 +17,7 @@ func (s *Handler) upstreamProbes(w http.ResponseWriter, r *http.Request) {
 	}
 	var input struct {
 		Addresses []string `json:"addresses"`
+		Transport string   `json:"transport"`
 	}
 	if !decode(w, r, &input) {
 		return
@@ -44,6 +45,13 @@ func (s *Handler) upstreamProbes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results := upstreamhealth.ProbeAddresses(r.Context(), addresses, nil)
+	probe := upstreamhealth.ProbeAddress
+	if input.Transport == "encrypted" {
+		probe = upstreamhealth.ProbeEncryptedAddress
+	} else if input.Transport != "" && input.Transport != "standard" {
+		writeBadRequest(w, errors.New("transport must be encrypted or standard"))
+		return
+	}
+	results := upstreamhealth.ProbeAddresses(r.Context(), addresses, probe)
 	writeJSON(w, http.StatusOK, map[string]any{"items": results})
 }

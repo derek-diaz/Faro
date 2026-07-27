@@ -22,13 +22,20 @@ export function DomainFavicon({ domain }: DomainFaviconProps) {
     let objectUrl: string | null = null;
 
     fetch(`/api/favicons/${encodeURIComponent(domain)}`, { signal: controller.signal })
-      .then((response) => {
+      .then(async (response) => {
         if (!response.ok) {
           throw new Error(`Favicon unavailable for ${domain}`);
+        }
+        if (response.headers.get("X-Faro-Favicon") === "placeholder") {
+          return null;
         }
         return response.blob();
       })
       .then((blob) => {
+        if (!blob) {
+          setFailed(true);
+          return;
+        }
         objectUrl = URL.createObjectURL(blob);
         setImageSrc(objectUrl);
       })

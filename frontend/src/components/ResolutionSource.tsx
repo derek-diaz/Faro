@@ -1,4 +1,4 @@
-import { Database, Home, Server, ShieldX } from "lucide-react";
+import { Database, Home, LockKeyhole, Server, ShieldX } from "lucide-react";
 import { findUpstreamAddress } from "../data/upstreams";
 
 type ResolutionSourceProps = {
@@ -13,6 +13,7 @@ export function ResolutionSource({ source, upstream }: ResolutionSourceProps) {
   if (normalized === "blocklist") return <span className="resolution-source blocked" title="Answered locally by a blocklist rule"><ShieldX size={13} />Blocklist</span>;
   if (normalized === "manual") return <span className="resolution-source blocked" title="Answered locally by a manual domain block"><ShieldX size={13} />Manual rule</span>;
   if (normalized === "upstream") {
+    if (upstream === "doh") return <span className="resolution-source upstream" title="Resolved through an encrypted DNS-over-HTTPS connection"><LockKeyhole size={13} />Encrypted DNS</span>;
     const match = upstream ? findUpstreamAddress(upstream) : null;
     const label = match?.provider.name ?? "Upstream";
     return <span className="resolution-source upstream" title={upstream ? `Resolved through ${label} (${upstream})` : "Resolved through an upstream DNS provider"}><Server size={13} />{label}</span>;

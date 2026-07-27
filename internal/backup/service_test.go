@@ -146,6 +146,87 @@ func TestWrongPassphraseDoesNotMutateDatabase(t *testing.T) {
 	}
 }
 
+func TestRestoreTransactionRollbackRecoversPreviousDatabase(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB.Exec(`INSERT INTO users(username, password_hash) VALUES('current-admin', 'current-hash')`); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store)
+	path, _, cleanup, err := service.Create(context.Background(), testPassphrase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if _, err := store.DB.Exec(`UPDATE settings SET value = '8.8.4.4' WHERE key = 'upstream_dns'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`INSERT INTO auth_sessions(user_id, token_hash, expires_at) VALUES(1, 'current-session', datetime('now', '+1 day'))`); err != nil {
+		t.Fatal(err)
+	}
+	deviceResult, err := store.DB.Exec(`INSERT INTO devices(name, device_type) VALUES('Current device', 'Camera')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deviceID, _ := deviceResult.LastInsertId()
+	if _, err := store.DB.Exec(`
+		INSERT INTO device_names(device_id, source, name) VALUES(?, 'unifi', 'Current camera');
+		INSERT INTO unifi_client_snapshots(client_id, site_id, device_id, name) VALUES('client-1', 'default', ?, 'Current camera');
+		INSERT INTO device_classifications(
+			device_id, catalog_version, definition_id, predicted_type, category, icon,
+			confidence, score, signal_hash, evidence_json, evaluated_at
+		) VALUES(?, 'test', 'camera', 'Camera', 'iot', 'camera', 'high', 100, 'signal', '[]', CURRENT_TIMESTAMP);
+	`, deviceID, deviceID, deviceID); err != nil {
+		t.Fatal(err)
+	}
+
+	input, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, transaction, err := service.BeginRestore(context.Background(), input, testPassphrase)
+	_ = input.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restoredUpstream string
+	if err := store.DB.QueryRow(`SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&restoredUpstream); err != nil {
+		t.Fatal(err)
+	}
+	if restoredUpstream != "1.1.1.1,9.9.9.9" {
+		t.Fatalf("staged upstream = %q", restoredUpstream)
+	}
+
+	if err := transaction.Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var currentUpstream string
+	if err := store.DB.QueryRow(`SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&currentUpstream); err != nil {
+		t.Fatal(err)
+	}
+	if currentUpstream != "8.8.4.4" {
+		t.Fatalf("rolled back upstream = %q, want current value", currentUpstream)
+	}
+	for table, want := range map[string]int{
+		"auth_sessions":          1,
+		"device_names":           1,
+		"unifi_client_snapshots": 1,
+		"device_classifications": 1,
+	} {
+		var count int
+		if err := store.DB.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != want {
+			t.Fatalf("%s rows after rollback = %d, want %d", table, count, want)
+		}
+	}
+}
+
 func TestTruncatedEncryptedStreamIsRejected(t *testing.T) {
 	var encrypted bytes.Buffer
 	if err := encrypt(&encrypted, bytes.NewBufferString("complete payload"), testPassphrase); err != nil {

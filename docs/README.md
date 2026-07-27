@@ -39,9 +39,25 @@ The API remains internal to the Faro container and is accessed through its web s
 
 Faro automatically accepts DNS clients from standard home and private networks while preventing an accidentally internet-exposed host from becoming an open resolver. Most installations need no configuration. Advanced networks using another routed IPv4 or IPv6 prefix can add it under **Settings → DNS & interface → Network access → Advanced**.
 
+## Encrypted upstream DNS
+
+Faro separates the connection your devices make to Faro from the connection Faro makes to a public DNS provider. Routers and devices continue using Faro normally on TCP or UDP port `53`. When **Encrypted** is selected on the **Upstreams** page, Faro sends public lookups from its local CoreDNS engine through an internal loopback gateway and then to the chosen providers with RFC 8484 DNS over HTTPS on port `443`.
+
+New installations select **Encrypted — Recommended** during guided setup. Existing installations remain on **Standard DNS** after upgrading so a custom resolver is never replaced or bypassed unexpectedly. The Upstreams page always shows which mode is active.
+
+Encrypted mode has these safety properties:
+
+- TLS certificates are validated normally and TLS 1.2 or newer is required.
+- Provider hostnames are bootstrapped with the public IPs selected in Faro, avoiding a circular dependency on Faro's own resolver.
+- Health and latency checks use the actual HTTPS route rather than probing plaintext port `53`.
+- If one encrypted provider is unavailable, Faro tries another selected encrypted provider.
+- Faro never silently falls back from encrypted DNS to plaintext.
+
+The built-in Cloudflare, Google Public DNS, Quad9, AdGuard DNS, and OpenDNS profiles have encrypted endpoints. Custom IP resolvers remain available in **Standard DNS** mode. Faro rejects an attempt to enable encryption while an unsupported custom resolver is selected and leaves the working DNS configuration in place.
+
 ## Deployment model
 
-Faro always runs as one application container. The web interface, API, CoreDNS resolver, and bounded query logger remain separate supervised processes inside it, but they install, restart, and upgrade atomically. Standard Docker Compose and Unraid run the same `tabierto/faro` image; Unraid's XML file is only an installation template for that image. Development follows the same topology with Air and Vite added for hot reload.
+Faro always runs as one application container. The web interface, API, CoreDNS resolver, encrypted upstream gateway, and bounded query logger remain separate internal responsibilities, but they install, restart, and upgrade atomically. Standard Docker Compose and Unraid run the same `tabierto/faro` image; Unraid's XML file is only an installation template for that image. Development follows the same topology with Air and Vite added for hot reload.
 
 Run the published image:
 
@@ -148,13 +164,17 @@ docker compose down
 
 Do not run `docker compose down -v` unless you intend to permanently delete Faro's local data.
 
+### Domain favicons
+
+Favicon fetching is disabled by default because it makes outbound requests based on domains observed on the network. Enable **Settings → DNS behavior → Domain favicons** when you want icons. Faro first checks the queried hostname, then safely falls back to its registrable site domain and icons declared in the site's HTML. Downloaded files are validated, cached locally, and restricted to public HTTPS destinations. Failed lookups are retried after 15 minutes.
+
 ## Persistent data
 
 Faro stores its database, generated resolver configuration, cached icons, and bounded raw query logs in the `faro-config` volume mounted at `/config`.
 
 For routine Faro backups, open **Settings → Health & data → Encrypted backup & restore**. Faro downloads a portable `.faro-backup` file containing the SQLite database, including DNS settings, local records, rules, blocklists, account data, and retained history. The file is protected with a passphrase-derived key using Argon2id and AES-256-GCM.
 
-Keep the backup passphrase separately: Faro cannot recover it. Restoring replaces the live database atomically, reloads CoreDNS, and signs out every browser session. Active login sessions, integration credentials and derived router observations, cached favicon files, and the bounded raw query-log buffer are deliberately excluded; Faro recreates or re-synchronizes those operational files as needed.
+Keep the backup passphrase separately: Faro cannot recover it. During restore, Faro retains a private snapshot of the current database until the generated configuration has been validated and the running CoreDNS instance accepts it. If DNS rejects the restored configuration, Faro restores the previous database and DNS configuration and reports that the restore failed; the UI cannot continue showing settings that DNS did not accept. A successful restore signs out every browser session. Active login sessions, integration credentials and derived router observations, cached favicon files, and the bounded raw query-log buffer are deliberately excluded; Faro recreates or re-synchronizes those operational files as needed.
 
 Volume-level backups are still useful for full host disaster recovery, especially if you also want cached favicons and generated runtime files. Back up `faro-config` as part of the Docker host's normal backup process.
 
@@ -290,13 +310,14 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 ## Architecture
 
-Faro uses a Go API, React and TypeScript frontend, SQLite database, and CoreDNS. Before replacing active files, the API starts the same CoreDNS binary against a private staged copy of the complete generated configuration. After replacement, it verifies CoreDNS's SHA-512 reload hash through the resolver's metrics endpoint. If the live resolver does not accept the new Corefile, Faro restores and verifies the previous configuration. CoreDNS handles local records, blocked domains, caching, upstream forwarding, query logs, metrics, and configuration reloads.
+Faro uses a Go API, React and TypeScript frontend, SQLite database, and CoreDNS. Before replacing active files, the API starts the same CoreDNS binary against a private staged copy of the complete generated configuration. After replacement, it verifies CoreDNS's SHA-512 reload hash through the resolver's metrics endpoint. If the live resolver does not accept the new Corefile, Faro restores and verifies the previous configuration. CoreDNS handles local records, blocked domains, caching, forwarding into Faro's selected upstream transport, query logs, metrics, and configuration reloads. The Go process owns the loopback-only DNS-over-HTTPS gateway used by encrypted mode.
 
-The application keeps three internal responsibilities:
+The application keeps four internal responsibilities:
 
 - `api`: Faro's control plane, persistence, and configuration generation
 - `ui`: the web application and reverse proxy for the API
 - `dns`: CoreDNS resolution and filtering engine
+- `encrypted upstream`: the loopback-only DNS-over-HTTPS gateway owned by the API process
 
 The production and development images supervise those responsibilities together and expose only the web and DNS ports. If any required infrastructure process exits, the container stops so Docker can restart the complete application. In development, Air and Vite retain backend and frontend hot reload inside that same topology.
 

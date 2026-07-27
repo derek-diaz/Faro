@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -39,7 +42,7 @@ func TestCachedFaviconHonorsRecentFailure(t *testing.T) {
 
 	if _, err := store.DB.Exec(`
 		UPDATE domain_favicons
-		SET last_checked_at = datetime('now', '-7 hours')
+		SET last_checked_at = datetime('now', '-16 minutes')
 		WHERE domain = 'missing.example'
 	`); err != nil {
 		t.Fatal(err)
@@ -126,6 +129,83 @@ func TestSafeFaviconDomainRejectsRecursiveLabels(t *testing.T) {
 		if got := isSafeFaviconDomain(domain); got != expected {
 			t.Errorf("isSafeFaviconDomain(%q) = %v, want %v", domain, got, expected)
 		}
+	}
+}
+
+func TestFaviconCandidatesFallBackToRegistrableDomain(t *testing.T) {
+	direct, pages := faviconCandidates("settings-win.data.microsoft.com")
+	wantDirect := []string{
+		"https://settings-win.data.microsoft.com/favicon.ico",
+		"https://microsoft.com/favicon.ico",
+		"https://www.microsoft.com/favicon.ico",
+	}
+	if !reflect.DeepEqual(direct, wantDirect) {
+		t.Fatalf("direct candidates = %#v, want %#v", direct, wantDirect)
+	}
+	if len(pages) == 0 || pages[0] != "https://microsoft.com/" {
+		t.Fatalf("page candidates = %#v", pages)
+	}
+}
+
+func TestFaviconLinksResolveDeclaredIconsSafely(t *testing.T) {
+	base, err := url.Parse("https://www.example.com/products/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	links := faviconLinks(base, []byte(`
+		<html><head>
+			<link rel="icon" href="/assets/icon.svg">
+			<link rel="apple-touch-icon" href="https://cdn.example.com/touch.png">
+			<link rel="icon" href="http://insecure.example.com/icon.png">
+			<link rel="icon" href="https://example.com:8443/private.png">
+		</head></html>
+	`))
+	want := []string{
+		"https://www.example.com/assets/icon.svg",
+		"https://cdn.example.com/touch.png",
+	}
+	if !reflect.DeepEqual(links, want) {
+		t.Fatalf("discovered links = %#v, want %#v", links, want)
+	}
+}
+
+func TestFaviconDiscoveryUsesHeadOfLargePage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(`<html><head><link rel="icon" href="https://cdn.example.com/icon.png"></head><body>`))
+		_, _ = w.Write([]byte(strings.Repeat("x", maxFaviconPageBytes*2)))
+	}))
+	defer server.Close()
+	candidates := discoverFaviconCandidates(context.Background(), server.Client(), server.URL)
+	want := []string{"https://cdn.example.com/icon.png"}
+	if !reflect.DeepEqual(candidates, want) {
+		t.Fatalf("large-page candidates = %#v, want %#v", candidates, want)
+	}
+}
+
+func TestDownloadFaviconAcceptsDetectedImageWithGenericContentType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = w.Write([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"))
+	}))
+	defer server.Close()
+	body, _, err := downloadFavicon(context.Background(), server.Client(), server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) == 0 {
+		t.Fatal("downloaded favicon was empty")
+	}
+}
+
+func TestDownloadFaviconRejectsHTMLMislabeledAsImage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("<html><body>not an icon</body></html>"))
+	}))
+	defer server.Close()
+	if _, _, err := downloadFavicon(context.Background(), server.Client(), server.URL); err == nil {
+		t.Fatal("HTML response was accepted as a favicon")
 	}
 }
 

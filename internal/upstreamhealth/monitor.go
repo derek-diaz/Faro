@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/derek/faro/internal/db"
+	"github.com/derek/faro/internal/dohproxy"
 )
 
 const DefaultInterval = 30 * time.Second
@@ -45,9 +46,6 @@ type Monitor struct {
 func NewMonitor(store *db.Store, interval time.Duration, probe ProbeFunc) *Monitor {
 	if interval <= 0 {
 		interval = DefaultInterval
-	}
-	if probe == nil {
-		probe = ProbeAddress
 	}
 	return &Monitor{
 		store:    store,
@@ -86,8 +84,16 @@ func (m *Monitor) CheckNow(ctx context.Context) Snapshot {
 	defer m.checkMu.Unlock()
 
 	addresses := configuredAddresses(ctx, m.store)
+	probe := m.probe
+	if probe == nil {
+		if configuredTransport(ctx, m.store) == "encrypted" {
+			probe = ProbeEncryptedAddress
+		} else {
+			probe = ProbeAddress
+		}
+	}
 	checkedAt := time.Now().UTC().Format(time.RFC3339)
-	items := ProbeAddresses(ctx, addresses, m.probe)
+	items := ProbeAddresses(ctx, addresses, probe)
 	next := summarize(items, checkedAt)
 	m.mu.Lock()
 	m.snapshot = next
@@ -164,6 +170,21 @@ func ProbeAddress(ctx context.Context, address string) Probe {
 	return result
 }
 
+func ProbeEncryptedAddress(ctx context.Context, address string) Probe {
+	checkedAt := time.Now().UTC().Format(time.RFC3339)
+	result := Probe{Address: address, Status: "unavailable", CheckedAt: checkedAt}
+	latency, err := dohproxy.ProbeAddress(ctx, address)
+	if err != nil {
+		result.Error = compactProbeError(err)
+		return result
+	}
+	latencyMS := float64(latency.Microseconds()) / 1000
+	rounded := float64(int(latencyMS*10+0.5)) / 10
+	result.Status = "online"
+	result.LatencyMS = &rounded
+	return result
+}
+
 func configuredAddresses(ctx context.Context, store *db.Store) []string {
 	var raw string
 	if err := store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&raw); err != nil {
@@ -180,6 +201,17 @@ func configuredAddresses(ctx context.Context, store *db.Store) []string {
 		addresses = append(addresses, address)
 	}
 	return addresses
+}
+
+func configuredTransport(ctx context.Context, store *db.Store) string {
+	var transport string
+	if err := store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'upstream_transport'`).Scan(&transport); err != nil {
+		return "standard"
+	}
+	if strings.TrimSpace(transport) == "encrypted" {
+		return "encrypted"
+	}
+	return "standard"
 }
 
 func summarize(items []Probe, checkedAt string) Snapshot {

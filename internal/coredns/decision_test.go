@@ -78,6 +78,27 @@ func TestRenderIncludesClientACLAndDualStackRecords(t *testing.T) {
 	}
 }
 
+func TestRenderRoutesEncryptedUpstreamsOnlyThroughLoopbackGateway(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB.Exec(`UPDATE settings SET value = 'encrypted' WHERE key = 'upstream_transport'`); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := NewManager(store, t.TempDir()).render(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered.Corefile, "forward . 127.0.0.1:5053") {
+		t.Fatalf("encrypted Corefile does not use Faro's loopback gateway:\n%s", rendered.Corefile)
+	}
+	if strings.Contains(rendered.Corefile, "forward . 1.1.1.1") || strings.Contains(rendered.Corefile, "forward . 9.9.9.9") {
+		t.Fatalf("encrypted Corefile contains a plaintext public resolver:\n%s", rendered.Corefile)
+	}
+}
+
 func TestRenderRoutesAssignedClientsBeforeHome(t *testing.T) {
 	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
 	if err != nil {

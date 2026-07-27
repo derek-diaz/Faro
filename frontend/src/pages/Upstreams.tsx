@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, Gauge, Plus, RefreshCw, RotateCcw, Save, Server, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Check, Gauge, LockKeyhole, Network, Plus, RefreshCw, RotateCcw, Save, Server, ShieldCheck, X } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { api, type Setting, type UpstreamProbe } from "../api/client";
 import { allCatalogAddresses, findUpstreamAddress, parseUpstreamServers, upstreamProviders, type ResolverProfile } from "../data/upstreams";
@@ -11,7 +11,9 @@ type UpstreamsProps = {
 
 export function Upstreams({ settings, refresh }: UpstreamsProps) {
   const configured = useMemo(() => parseUpstreamServers(settings.find((setting) => setting.key === "upstream_dns")?.value ?? ""), [settings]);
+  const configuredTransport = settings.find((setting) => setting.key === "upstream_transport")?.value === "encrypted" ? "encrypted" : "standard";
   const [selected, setSelected] = useState<string[]>(configured);
+  const [transport, setTransport] = useState<"encrypted" | "standard">(configuredTransport);
   const [customInput, setCustomInput] = useState("");
   const [customError, setCustomError] = useState("");
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -23,12 +25,14 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
 
   useEffect(() => {
     setSelected(configured);
-  }, [configured.join(",")]);
+    setTransport(configuredTransport);
+  }, [configured.join(","), configuredTransport]);
 
   const selectedSet = useMemo(() => new Set(selected), [selected]);
   const probeAddresses = useMemo(() => unique([...allCatalogAddresses(), ...selected]), [selected.join(",")]);
   const probeKey = probeAddresses.join(",");
-  const dirty = selected.join(",") !== configured.join(",");
+  const dirty = selected.join(",") !== configured.join(",") || transport !== configuredTransport;
+  const hasCustomResolvers = selected.some((address) => !findUpstreamAddress(address));
   const selectedProfiles = upstreamProviders.flatMap((provider) => provider.profiles.filter((profile) => profile.addresses.some((address) => selectedSet.has(address))));
   const mixesFiltering = selectedProfiles.some((profile) => profile.mode === "none") && selectedProfiles.some((profile) => profile.mode !== "none");
   const fastestProfileID = fastestProfile(probes);
@@ -39,7 +43,7 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
       setProbing(true);
       setProbeError("");
       try {
-        const response = await api.probeUpstreams(probeAddresses);
+        const response = await api.probeUpstreams(probeAddresses, transport);
         if (!cancelled) {
           setProbes(Object.fromEntries(response.items.map((probe) => [probe.address, probe])));
           setLastChecked(response.items[0]?.checked_at ?? new Date().toISOString());
@@ -56,13 +60,13 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [probeKey]);
+  }, [probeKey, transport]);
 
   async function refreshLatency() {
     setProbing(true);
     setProbeError("");
     try {
-      const response = await api.probeUpstreams(probeAddresses);
+      const response = await api.probeUpstreams(probeAddresses, transport);
       setProbes(Object.fromEntries(response.items.map((probe) => [probe.address, probe])));
       setLastChecked(response.items[0]?.checked_at ?? new Date().toISOString());
     } catch (caught) {
@@ -94,6 +98,17 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
     setSaveState("idle");
   }
 
+  function chooseTransport(next: "encrypted" | "standard") {
+    if (next === "encrypted" && hasCustomResolvers) {
+      setSaveState("error");
+      setMessage("Encrypted DNS is available for Faro's listed providers. Remove custom IP resolvers or keep Standard DNS.");
+      return;
+    }
+    setTransport(next);
+    setSaveState("idle");
+    setMessage("");
+  }
+
   async function save() {
     if (selected.length === 0) {
       setSaveState("error");
@@ -103,7 +118,7 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
     setSaveState("saving");
     setMessage("");
     try {
-      await api.updateSettings({ upstream_dns: selected.join(",") });
+      await api.updateSettings({ upstream_dns: selected.join(","), upstream_transport: transport });
       await refresh();
       setSaveState("saved");
       setMessage("Upstreams saved and DNS reloaded.");
@@ -116,6 +131,30 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
   return (
     <div className="upstreams-layout">
       <div className="upstream-catalog">
+        <section className="upstream-privacy-panel panel" aria-labelledby="upstream-privacy-title">
+          <div className="upstream-privacy-copy">
+            <span className="upstream-privacy-icon">{transport === "encrypted" ? <LockKeyhole size={20} /> : <Network size={20} />}</span>
+            <div>
+              <h2 id="upstream-privacy-title">Connection to DNS providers</h2>
+              <p>{transport === "encrypted"
+                ? "Faro keeps requests private between your home and the selected providers."
+                : "Faro uses regular DNS for compatibility with custom or restricted networks."}</p>
+            </div>
+          </div>
+          <div className="upstream-transport-choices" role="radiogroup" aria-label="Connection privacy">
+            <button type="button" role="radio" aria-checked={transport === "encrypted"} className={transport === "encrypted" ? "selected" : ""} onClick={() => chooseTransport("encrypted")}>
+              <LockKeyhole size={17} />
+              <span><strong>Encrypted</strong><small>Recommended · HTTPS</small></span>
+              {transport === "encrypted" && <Check size={15} />}
+            </button>
+            <button type="button" role="radio" aria-checked={transport === "standard"} className={transport === "standard" ? "selected" : ""} onClick={() => chooseTransport("standard")}>
+              <Network size={17} />
+              <span><strong>Standard DNS</strong><small>Maximum compatibility</small></span>
+              {transport === "standard" && <Check size={15} />}
+            </button>
+          </div>
+        </section>
+
         <section className="upstream-toolbar" aria-label="Resolver comparison controls">
           <div className="upstream-live-state">
             <span><Gauge size={15} /> Live latency</span>
@@ -164,6 +203,7 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
                           <span className="profile-title-badges">
                             {profile.id === fastestProfileID && <em className="fastest">Fastest</em>}
                             {profile.recommended && <em>Recommended</em>}
+                            {transport === "encrypted" && <em className="encrypted"><LockKeyhole size={11} /> Encrypted</em>}
                           </span>
                         </span>
                         <span>{profile.description}</span>
@@ -183,12 +223,14 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
           <div className="panel-title dashboard-panel-title">
             <div>
               <h2>Custom resolvers</h2>
-              <p>Add plain DNS servers that are not in the provider catalog.</p>
+              <p>{transport === "encrypted"
+                ? "Custom IP resolvers require Standard DNS. Faro will never send to them unencrypted without your choice."
+                : "Add plain DNS servers that are not in the provider catalog."}</p>
             </div>
           </div>
           <form className="custom-upstream-form" onSubmit={addCustomServers}>
-            <input value={customInput} onChange={(event) => setCustomInput(event.target.value)} placeholder="192.0.2.53 or 2001:db8::53" aria-label="Custom DNS server addresses" />
-            <button type="submit"><Plus size={16} /><span>Add servers</span></button>
+            <input disabled={transport === "encrypted"} value={customInput} onChange={(event) => setCustomInput(event.target.value)} placeholder="192.0.2.53 or 2001:db8::53" aria-label="Custom DNS server addresses" />
+            <button type="submit" disabled={transport === "encrypted"}><Plus size={16} /><span>Add servers</span></button>
           </form>
           {customError && <span className="custom-upstream-error">{customError}</span>}
         </section>
@@ -201,6 +243,11 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
             <strong>{selected.length} upstream server{selected.length === 1 ? "" : "s"}</strong>
           </div>
           <span className={`selection-status ${dirty ? "pending" : ""}`}>{dirty ? <AlertTriangle size={15} /> : <ShieldCheck size={15} />} {dirty ? "Unsaved" : "Active"}</span>
+        </div>
+
+        <div className={`selection-privacy-state ${transport}`}>
+          {transport === "encrypted" ? <LockKeyhole size={17} /> : <Network size={17} />}
+          <div><strong>{transport === "encrypted" ? "Encrypted connection" : "Standard connection"}</strong><span>{transport === "encrypted" ? "DNS over HTTPS · no plaintext fallback" : "Traditional DNS on port 53"}</span></div>
         </div>
 
         {mixesFiltering && (
@@ -220,7 +267,7 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
                 <span className="selected-provider-logo">{match ? <ProviderLogo providerID={match.provider.id} providerName={match.provider.name} /> : <Server size={15} />}</span>
                 <div>
                   <strong>{server}</strong>
-                  <span>{match ? `${match.provider.name} · ${match.profile.name}` : "Custom resolver"}</span>
+                  <span>{match ? `${match.provider.name} · ${match.profile.name}${transport === "encrypted" ? " · Encrypted" : ""}` : "Custom resolver"}</span>
                 </div>
                 <ProbeBadge probe={probes[server]} loading={probing && !probes[server]} compact />
                 <button className="icon-button" type="button" onClick={() => setSelected((current) => current.filter((address) => address !== server))} aria-label={`Remove ${server}`}><X size={15} /></button>
@@ -230,12 +277,14 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
         </div>
 
         <div className="selection-note">
-          <strong>How latency is measured</strong>
-          <span>Response time is measured from the Faro host. Your devices may see slightly different results.</span>
+          <strong>{transport === "encrypted" ? "Private by design" : "How latency is measured"}</strong>
+          <span>{transport === "encrypted"
+            ? "If one encrypted provider is unavailable, Faro tries another selected encrypted provider. It never silently falls back to plaintext."
+            : "Response time is measured from the Faro host. Your devices may see slightly different results."}</span>
         </div>
 
         <div className="selection-actions">
-          <button type="button" className="secondary" disabled={!dirty} onClick={() => setSelected(configured)}><RotateCcw size={16} /><span>Reset</span></button>
+          <button type="button" className="secondary" disabled={!dirty} onClick={() => { setSelected(configured); setTransport(configuredTransport); setMessage(""); setSaveState("idle"); }}><RotateCcw size={16} /><span>Reset</span></button>
           <button type="button" disabled={!dirty || saveState === "saving" || selected.length === 0} onClick={() => void save()}><Save size={16} /><span>{saveState === "saving" ? "Saving" : "Save upstreams"}</span></button>
         </div>
         {message && <span className={`selection-message ${saveState === "error" ? "error" : ""}`}>{message}</span>}

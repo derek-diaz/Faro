@@ -310,6 +310,8 @@ func decisionReason(decision coredns.DomainDecision, source, upstream string) st
 	resolution := "Forwarded to a configured upstream resolver."
 	if source == "cache" {
 		resolution = "Answered from Faro's DNS cache without contacting an upstream."
+	} else if upstream == "doh" {
+		resolution = "Forwarded through Faro's encrypted DNS-over-HTTPS connection."
 	} else if upstream != "" {
 		resolution = "Forwarded to upstream resolver " + upstream + "."
 	}
@@ -362,8 +364,12 @@ func normalizeUpstream(value string) string {
 	for _, prefix := range []string{"udp://", "tcp://", "tls://"} {
 		value = strings.TrimPrefix(value, prefix)
 	}
-	if host, _, err := net.SplitHostPort(value); err == nil {
-		return strings.Trim(host, "[]")
+	if host, port, err := net.SplitHostPort(value); err == nil {
+		host = strings.Trim(host, "[]")
+		if port == "5053" && net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback() {
+			return "doh"
+		}
+		return host
 	}
 	return strings.Trim(value, "[]")
 }

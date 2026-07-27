@@ -1,4 +1,4 @@
-import { ArrowLeft, ArrowRight, Check, CheckCircle2, Database, Gauge, Network, Router, ShieldCheck } from "lucide-react";
+import { ArrowLeft, ArrowRight, Check, CheckCircle2, Database, Gauge, LockKeyhole, Network, Router, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, type Blocklist, type Setting } from "../api/client";
 import { blocklistCatalog } from "../data/blocklists";
@@ -25,6 +25,7 @@ export function Onboarding({ username, onComplete }: OnboardingProps) {
   const [lanAddress, setLanAddress] = useState(() => detectedLANAddress(window.location.hostname));
   const [cacheEnabled, setCacheEnabled] = useState(true);
   const [selectedProfiles, setSelectedProfiles] = useState<string[]>(["cloudflare-standard", "quad9-secure"]);
+  const [upstreamTransport, setUpstreamTransport] = useState<"encrypted" | "standard">("encrypted");
   const [protection, setProtection] = useState("oisd-small");
   const [installed, setInstalled] = useState<Blocklist[]>([]);
   const [busy, setBusy] = useState(false);
@@ -32,7 +33,7 @@ export function Onboarding({ username, onComplete }: OnboardingProps) {
 
   useEffect(() => {
     Promise.all([api.settings(), api.blocklists()]).then(([settings, blocklists]) => {
-      hydrateSettings(settings, setLocalSuffix, setLanAddress, setCacheEnabled, setSelectedProfiles);
+      hydrateSettings(settings, setLocalSuffix, setLanAddress, setCacheEnabled, setSelectedProfiles, setUpstreamTransport);
       setInstalled(blocklists);
       const installedChoice = protectionChoices.find((choice) => choice.url && blocklists.some((list) => normalizeURL(list.url) === normalizeURL(choice.url!)));
       if (installedChoice) setProtection(installedChoice.id);
@@ -69,7 +70,8 @@ export function Onboarding({ username, onComplete }: OnboardingProps) {
         faro_lan_ip: lanAddress.trim(),
         dns_cache_enabled: String(cacheEnabled),
         dns_cache_ttl: "300",
-        upstream_dns: upstreamAddresses.join(",")
+        upstream_dns: upstreamAddresses.join(","),
+        upstream_transport: upstreamTransport
       });
 
       if (selectedProtection.url) {
@@ -106,9 +108,9 @@ export function Onboarding({ username, onComplete }: OnboardingProps) {
           <header><span>Step {step + 2} of {setupStages.length}</span><h1>{stepHeading(step)}</h1><p>{stepIntro(step)}</p></header>
 
           {step === 0 && <LocalStep suffix={localSuffix} setSuffix={setLocalSuffix} lanAddress={lanAddress} setLanAddress={setLanAddress} cache={cacheEnabled} setCache={setCacheEnabled} />}
-          {step === 1 && <UpstreamStep selected={selectedProfiles} setSelected={setSelectedProfiles} />}
+          {step === 1 && <UpstreamStep selected={selectedProfiles} setSelected={setSelectedProfiles} transport={upstreamTransport} setTransport={setUpstreamTransport} />}
           {step === 2 && <ProtectionStep selected={protection} setSelected={setProtection} />}
-          {step === 3 && <ConnectStep dnsAddress={lanAddress} suffix={localSuffix} providers={onboardingProfiles.filter(({ profile }) => selectedProfiles.includes(profile.id)).map(({ provider, profile }) => `${provider.name} ${profile.name}`)} protection={selectedProtection.name} />}
+          {step === 3 && <ConnectStep dnsAddress={lanAddress} suffix={localSuffix} providers={onboardingProfiles.filter(({ profile }) => selectedProfiles.includes(profile.id)).map(({ provider, profile }) => `${provider.name} ${profile.name}`)} transport={upstreamTransport} protection={selectedProtection.name} />}
 
           {error && <div className="onboarding-error" role="alert">{error}</div>}
           <footer className="onboarding-actions">
@@ -127,27 +129,37 @@ function LocalStep({ suffix, setSuffix, lanAddress, setLanAddress, cache, setCac
   return <div className="onboarding-form-section"><label><span>Faro LAN address</span><input value={lanAddress} onChange={(event) => setLanAddress(event.target.value)} placeholder="192.168.1.20" inputMode="decimal" autoFocus /><small>The fixed IP assigned to the computer running Faro. Your router will use this as its DNS server.</small></label><label><span>Local domain suffix</span><div className="onboarding-suffix-input"><input value={suffix} onChange={(event) => setSuffix(event.target.value)} placeholder="home" /><strong>.{suffix || "home"}</strong></div><small>Examples: plex.{suffix || "home"}, router.{suffix || "home"}</small></label><div className="onboarding-toggle-row"><span className="onboarding-option-icon"><Gauge size={19} /></span><div><strong>DNS response cache</strong><p>Serve repeated lookups locally for lower latency.</p></div><label className="compact-toggle"><input type="checkbox" checked={cache} onChange={(event) => setCache(event.target.checked)} /><span>{cache ? "Enabled" : "Disabled"}</span></label></div></div>;
 }
 
-function UpstreamStep({ selected, setSelected }: { selected: string[]; setSelected: (value: string[]) => void }) {
-  return <div className="onboarding-choice-grid upstream-choices">{onboardingProfiles.map(({ provider, profile }) => { const active = selected.includes(profile.id); return <button type="button" className={active ? "selected" : ""} aria-pressed={active} key={profile.id} onClick={() => setSelected(active ? selected.filter((id) => id !== profile.id) : [...selected, profile.id])}><span className="onboarding-provider-logo"><ProviderLogo providerID={provider.id} providerName={provider.name} /></span><span className="onboarding-choice-copy"><strong>{provider.name}</strong><small>{profile.name}</small><p>{profile.description}</p><code>{profile.addresses.join(" · ")}</code></span><span className="onboarding-check">{active && <Check size={15} />}</span></button>; })}</div>;
+function UpstreamStep({ selected, setSelected, transport, setTransport }: { selected: string[]; setSelected: (value: string[]) => void; transport: "encrypted" | "standard"; setTransport: (value: "encrypted" | "standard") => void }) {
+  return <div className="onboarding-upstream-step">
+    <section className="onboarding-privacy-choice">
+      <div><span className="onboarding-option-icon">{transport === "encrypted" ? <LockKeyhole size={19} /> : <Network size={19} />}</span><span><strong>Connection to DNS providers</strong><p>Choose how Faro contacts providers. Devices still connect to Faro normally.</p></span></div>
+      <div className="onboarding-privacy-options" role="radiogroup" aria-label="DNS provider connection">
+        <button type="button" role="radio" aria-checked={transport === "encrypted"} className={transport === "encrypted" ? "selected" : ""} onClick={() => setTransport("encrypted")}><LockKeyhole size={16} /><span><strong>Encrypted</strong><small>Recommended · HTTPS</small></span>{transport === "encrypted" && <Check size={14} />}</button>
+        <button type="button" role="radio" aria-checked={transport === "standard"} className={transport === "standard" ? "selected" : ""} onClick={() => setTransport("standard")}><Network size={16} /><span><strong>Standard DNS</strong><small>Maximum compatibility</small></span>{transport === "standard" && <Check size={14} />}</button>
+      </div>
+    </section>
+    <div className="onboarding-choice-grid upstream-choices">{onboardingProfiles.map(({ provider, profile }) => { const active = selected.includes(profile.id); return <button type="button" className={active ? "selected" : ""} aria-pressed={active} key={profile.id} onClick={() => setSelected(active ? selected.filter((id) => id !== profile.id) : [...selected, profile.id])}><span className="onboarding-provider-logo"><ProviderLogo providerID={provider.id} providerName={provider.name} /></span><span className="onboarding-choice-copy"><strong>{provider.name}</strong><small>{profile.name}</small><p>{profile.description}</p><code>{transport === "encrypted" ? "Encrypted connection" : profile.addresses.join(" · ")}</code></span><span className="onboarding-check">{active && <Check size={15} />}</span></button>; })}</div>
+  </div>;
 }
 
 function ProtectionStep({ selected, setSelected }: { selected: string; setSelected: (value: string) => void }) {
   return <div className="onboarding-choice-list">{protectionChoices.map((choice) => <button type="button" className={selected === choice.id ? "selected" : ""} aria-pressed={selected === choice.id} key={choice.id} onClick={() => setSelected(choice.id)}><span className="onboarding-option-icon">{choice.id === "none" ? <Database size={19} /> : <ShieldCheck size={19} />}</span><span className="onboarding-choice-copy"><strong>{choice.name}</strong>{choice.category && <small>{choice.category} · {choice.intensity}</small>}<p>{choice.description}</p></span><span className="onboarding-radio"><span /></span></button>)}</div>;
 }
 
-function ConnectStep({ dnsAddress, suffix, providers, protection }: { dnsAddress: string; suffix: string; providers: string[]; protection: string }) {
-  return <div className="onboarding-review"><section><div className="onboarding-connect-heading"><Router size={20} /><div><strong>Point your router or device at Faro</strong><p>Use Faro as the DNS server distributed by DHCP.</p></div></div><div className="dns-address-display"><span>DNS server</span><strong>{dnsAddress}</strong><code>Port 53 · UDP and TCP</code></div><div className="onboarding-command"><span>Test after setup</span><code>nslookup example.com {dnsAddress}</code></div></section><aside><h2>Configuration review</h2><ReviewRow label="LAN address" value={dnsAddress} /><ReviewRow label="Local suffix" value={`.${suffix}`} /><ReviewRow label="Upstreams" value={providers.join(", ")} /><ReviewRow label="Starter protection" value={protection} /><ReviewRow label="DNS cache" value="300 seconds" /></aside></div>;
+function ConnectStep({ dnsAddress, suffix, providers, transport, protection }: { dnsAddress: string; suffix: string; providers: string[]; transport: "encrypted" | "standard"; protection: string }) {
+  return <div className="onboarding-review"><section><div className="onboarding-connect-heading"><Router size={20} /><div><strong>Point your router or device at Faro</strong><p>Use Faro as the DNS server distributed by DHCP.</p></div></div><div className="dns-address-display"><span>DNS server</span><strong>{dnsAddress}</strong><code>Port 53 · UDP and TCP</code></div><div className="onboarding-command"><span>Test after setup</span><code>nslookup example.com {dnsAddress}</code></div></section><aside><h2>Configuration review</h2><ReviewRow label="LAN address" value={dnsAddress} /><ReviewRow label="Local suffix" value={`.${suffix}`} /><ReviewRow label="Upstreams" value={providers.join(", ")} /><ReviewRow label="DNS privacy" value={transport === "encrypted" ? "Encrypted with HTTPS" : "Standard DNS"} /><ReviewRow label="Starter protection" value={protection} /><ReviewRow label="DNS cache" value="300 seconds" /></aside></div>;
 }
 
 function ReviewRow({ label, value }: { label: string; value: string }) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 
-function hydrateSettings(settings: Setting[], setSuffix: (value: string) => void, setLanAddress: (value: string) => void, setCache: (value: boolean) => void, setProfiles: (value: string[]) => void) {
+function hydrateSettings(settings: Setting[], setSuffix: (value: string) => void, setLanAddress: (value: string) => void, setCache: (value: boolean) => void, setProfiles: (value: string[]) => void, setTransport: (value: "encrypted" | "standard") => void) {
   const values = Object.fromEntries(settings.map((setting) => [setting.key, setting.value]));
   if (values.local_domain_suffix) setSuffix(values.local_domain_suffix);
   if (values.faro_lan_ip) setLanAddress(values.faro_lan_ip);
   setCache(values.dns_cache_enabled !== "false");
+  if (values.upstream_transport === "encrypted") setTransport("encrypted");
   const configured = new Set((values.upstream_dns || "").split(",").map((value) => value.trim()));
   const matching = onboardingProfiles.filter(({ profile }) => profile.addresses.some((address) => configured.has(address))).map(({ profile }) => profile.id);
   if (matching.length) setProfiles(matching);

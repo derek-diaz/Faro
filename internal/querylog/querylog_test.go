@@ -44,6 +44,16 @@ func TestParseCacheHitLogLine(t *testing.T) {
 	}
 }
 
+func TestParseEncryptedGatewayLogLine(t *testing.T) {
+	entry, ok := parseLine(`[INFO] FARO|192.168.7.10|A|example.com.|NOERROR|0.018s|udp://127.0.0.1:5053`)
+	if !ok {
+		t.Fatal("expected encrypted gateway log line to parse")
+	}
+	if entry.upstream != "doh" {
+		t.Fatalf("encrypted gateway normalized as %q", entry.upstream)
+	}
+}
+
 func TestParseLegacyLogLine(t *testing.T) {
 	entry, ok := parseLine(`[INFO] 127.0.0.1:42130 - 1234 "A IN example.com. udp 40 false 1232" NOERROR qr,rd,ra 56 0.005s`)
 	if !ok || entry.observed {

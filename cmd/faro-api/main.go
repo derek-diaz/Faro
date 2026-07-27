@@ -15,6 +15,7 @@ import (
 	"github.com/derek/faro/internal/coredns"
 	"github.com/derek/faro/internal/db"
 	"github.com/derek/faro/internal/devicecatalog"
+	"github.com/derek/faro/internal/dohproxy"
 	"github.com/derek/faro/internal/integrations/unifi"
 	"github.com/derek/faro/internal/querylog"
 	"github.com/derek/faro/internal/retention"
@@ -37,13 +38,19 @@ func main() {
 	}
 	defer store.Close()
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	encryptedDNS := dohproxy.New(store, dohproxy.DefaultAddress)
+	if err := encryptedDNS.Start(ctx); err != nil {
+		log.Fatalf("start encrypted DNS gateway: %v", err)
+	}
+
 	reloader := coredns.NewManager(store, configDir)
+	reloader.BeforeApply = encryptedDNS.Reload
 	if err := reloader.Apply(context.Background()); err != nil {
 		log.Printf("initial coredns render failed: %v", err)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	tailer := querylog.NewTailer(store, logPath)
 	go tailer.Run(ctx)

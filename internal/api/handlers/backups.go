@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,7 +84,7 @@ func (s *Handler) backupRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	manifest, err := s.backups.Restore(r.Context(), file, passphrase)
+	manifest, restore, err := s.backups.BeginRestore(r.Context(), file, passphrase)
 	if err != nil {
 		if errors.Is(err, farobackup.ErrInvalidBackup) {
 			writeBadRequest(w, farobackup.ErrInvalidBackup)
@@ -92,29 +93,57 @@ func (s *Handler) backupRestore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	restoreFinished := false
+	defer func() {
+		if restoreFinished {
+			return
+		}
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
+		defer cancel()
+		_ = restore.Rollback(rollbackCtx)
+	}()
 
-	dnsReloaded := true
-	warning := ""
 	if err := s.reloader.Apply(r.Context()); err != nil {
-		dnsReloaded = false
-		warning = "The database was restored, but DNS configuration could not be reloaded: " + err.Error()
-		s.recordEvent(r.Context(), eventInput{
-			Type:        "dns.reload_failed",
-			Severity:    "critical",
-			Title:       "DNS reload failed after restore",
-			Description: err.Error(),
+		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
+		rollbackErr := restore.Rollback(rollbackCtx)
+		restoreFinished = true
+		var reapplyErr error
+		if rollbackErr == nil {
+			reapplyErr = s.reloader.Apply(rollbackCtx)
+		}
+		cancel()
+		restoreFailure := fmt.Errorf("backup restore was rolled back because DNS rejected the restored configuration: %w", err)
+		title := "Backup restore rolled back"
+		severity := "warning"
+		if rollbackErr != nil {
+			title = "Backup restore rollback failed"
+			severity = "critical"
+			restoreFailure = fmt.Errorf("DNS rejected the restored configuration (%v) and the previous database could not be recovered: %w", err, rollbackErr)
+		} else if reapplyErr != nil {
+			title = "DNS recovery after backup restore failed"
+			severity = "critical"
+			restoreFailure = fmt.Errorf("backup restore was rolled back after DNS rejected it (%v), but the previous DNS configuration could not be verified: %w", err, reapplyErr)
+		}
+		s.recordEvent(context.WithoutCancel(r.Context()), eventInput{
+			Type:        "backup.restore_rolled_back",
+			Severity:    severity,
+			Title:       title,
+			Description: restoreFailure.Error(),
 			Source:      "backup",
 		})
-	} else {
-		s.recordEvent(r.Context(), eventInput{
-			Type:        "backup.restored",
-			Severity:    "success",
-			Title:       "Backup restored",
-			Description: "Faro restored its configuration and database from an encrypted backup.",
-			Metadata:    map[string]any{"backup_created_at": manifest.CreatedAt},
-			Source:      "backup",
-		})
+		writeError(w, restoreFailure)
+		return
 	}
+	restore.Commit()
+	restoreFinished = true
+	s.recordEvent(r.Context(), eventInput{
+		Type:        "backup.restored",
+		Severity:    "success",
+		Title:       "Backup restored",
+		Description: "Faro restored its configuration and database from an encrypted backup.",
+		Metadata:    map[string]any{"backup_created_at": manifest.CreatedAt},
+		Source:      "backup",
+	})
 	if s.upstreams != nil {
 		s.upstreams.Trigger()
 	}
@@ -122,8 +151,8 @@ func (s *Handler) backupRestore(w http.ResponseWriter, r *http.Request) {
 		"ok":             true,
 		"restored_at":    time.Now().UTC().Format(time.RFC3339),
 		"backup_created": manifest.CreatedAt,
-		"dns_reloaded":   dnsReloaded,
-		"warning":        warning,
+		"dns_reloaded":   true,
+		"warning":        "",
 		"requires_login": true,
 	})
 }

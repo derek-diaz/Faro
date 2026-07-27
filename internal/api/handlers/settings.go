@@ -31,6 +31,7 @@ func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		oldUpstream := settingValue(r.Context(), s.store.DB, "upstream_dns")
+		oldTransport := settingValue(r.Context(), s.store.DB, "upstream_transport")
 		previous := map[string]*string{}
 		requiresReload := false
 		tx, err := s.store.DB.BeginTx(r.Context(), nil)
@@ -41,7 +42,7 @@ func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
 		defer tx.Rollback()
 		for key, value := range input {
 			switch key {
-			case "upstream_dns", "local_domain_suffix", "faro_lan_ip", "retention_days", "favicon_fetching_enabled", "dns_cache_enabled", "dns_cache_ttl", "allowed_client_cidrs", "onboarding_completed":
+			case "upstream_dns", "upstream_transport", "local_domain_suffix", "faro_lan_ip", "retention_days", "favicon_fetching_enabled", "dns_cache_enabled", "dns_cache_ttl", "allowed_client_cidrs", "onboarding_completed":
 				var oldValue string
 				if scanErr := tx.QueryRowContext(r.Context(), `SELECT value FROM settings WHERE key = ?`, key).Scan(&oldValue); scanErr == nil {
 					copyValue := oldValue
@@ -89,6 +90,10 @@ func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
 					}
 					value = normalized
 				}
+				if key == "upstream_transport" && value != "encrypted" && value != "standard" {
+					writeBadRequest(w, errors.New("upstream_transport must be encrypted or standard"))
+					return
+				}
 				if key == "local_domain_suffix" {
 					suffix := strings.Trim(strings.TrimSpace(value), ".")
 					if suffix == "" || strings.Contains(suffix, ".") {
@@ -109,7 +114,7 @@ func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
 					}
 					value = normalized
 				}
-				if key == "upstream_dns" || key == "local_domain_suffix" || key == "dns_cache_enabled" || key == "dns_cache_ttl" || key == "allowed_client_cidrs" {
+				if key == "upstream_dns" || key == "upstream_transport" || key == "local_domain_suffix" || key == "dns_cache_enabled" || key == "dns_cache_ttl" || key == "allowed_client_cidrs" {
 					requiresReload = true
 				}
 				if _, err := tx.ExecContext(r.Context(), `INSERT INTO settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, key, value); err != nil {
@@ -148,14 +153,29 @@ func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
 				Source:      "settings",
 			})
 		}
-		if nextUpstream, ok := input["upstream_dns"]; ok && strings.TrimSpace(nextUpstream) != strings.TrimSpace(oldUpstream) {
+		nextUpstream, upstreamChanged := input["upstream_dns"]
+		nextTransport, transportChanged := input["upstream_transport"]
+		upstreamChanged = upstreamChanged && strings.TrimSpace(nextUpstream) != strings.TrimSpace(oldUpstream)
+		transportChanged = transportChanged && strings.TrimSpace(nextTransport) != strings.TrimSpace(oldTransport)
+		if upstreamChanged || transportChanged {
+			if !upstreamChanged {
+				nextUpstream = oldUpstream
+			}
+			if !transportChanged {
+				nextTransport = oldTransport
+			}
 			s.recordEvent(r.Context(), eventInput{
 				Type:        "upstream.changed",
 				Severity:    "info",
 				Title:       "Upstreams changed",
-				Description: "DNS upstream servers were updated.",
-				Metadata:    map[string]any{"from": oldUpstream, "to": nextUpstream},
-				Source:      "settings",
+				Description: "DNS providers or connection privacy were updated.",
+				Metadata: map[string]any{
+					"from":           oldUpstream,
+					"to":             nextUpstream,
+					"transport_from": oldTransport,
+					"transport_to":   nextTransport,
+				},
+				Source: "settings",
 			})
 			if s.upstreams != nil {
 				s.upstreams.Trigger()

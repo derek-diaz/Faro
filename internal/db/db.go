@@ -506,7 +506,10 @@ func (s *Store) migrateProtection(ctx context.Context) error {
 
 func (s *Store) seed(ctx context.Context) error {
 	defaults := map[string]string{
-		"upstream_dns":             "1.1.1.1,9.9.9.9",
+		"upstream_dns": "1.1.1.1,9.9.9.9",
+		// Keep upgrades on their existing transport. New onboarding explicitly
+		// chooses encrypted DNS after the user selects supported providers.
+		"upstream_transport":       "standard",
 		"local_domain_suffix":      "home",
 		"faro_lan_ip":              "",
 		"retention_days":           "30",

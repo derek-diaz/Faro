@@ -108,6 +108,15 @@ func (m *Manager) Setup(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	var redundancyRole string
+	if err := m.store.DB.QueryRowContext(r.Context(), `SELECT role FROM redundancy_state WHERE id = 1`).Scan(&redundancyRole); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not verify this Faro server's role")
+		return
+	}
+	if redundancyRole == "replica" {
+		writeError(w, http.StatusConflict, "replica servers are managed by the primary Faro server")
+		return
+	}
 	configured, err := m.configured(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -270,7 +279,12 @@ func (m *Manager) ChangePassword(w http.ResponseWriter, r *http.Request) {
 
 func (m *Manager) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodOptions || r.URL.Path == "/healthz" || r.URL.Path == "/metrics" || strings.HasPrefix(r.URL.Path, "/api/auth/") {
+		publicRedundancy := r.URL.Path == "/api/redundancy/public" ||
+			r.URL.Path == "/api/redundancy/join" ||
+			r.URL.Path == "/api/redundancy/pair" ||
+			r.URL.Path == "/api/redundancy/replica/snapshot" ||
+			r.URL.Path == "/api/redundancy/replica/ack"
+		if r.Method == http.MethodOptions || r.URL.Path == "/healthz" || r.URL.Path == "/metrics" || strings.HasPrefix(r.URL.Path, "/api/auth/") || publicRedundancy {
 			next.ServeHTTP(w, r)
 			return
 		}

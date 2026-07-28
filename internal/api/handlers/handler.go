@@ -14,6 +14,7 @@ import (
 	"github.com/derek/faro/internal/db"
 	"github.com/derek/faro/internal/devicecatalog"
 	"github.com/derek/faro/internal/integrations/unifi"
+	"github.com/derek/faro/internal/redundancy"
 	"github.com/derek/faro/internal/upstreamhealth"
 )
 
@@ -34,6 +35,7 @@ type Handler struct {
 	backups       *farobackup.Service
 	unifi         *unifi.Manager
 	classifier    *devicecatalog.Classifier
+	redundancy    *redundancy.Manager
 	startedAt     time.Time
 	configMu      sync.Mutex
 }
@@ -42,12 +44,15 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 	authManager := auth.NewManager(store)
 	var unifiManager *unifi.Manager
 	var classifier *devicecatalog.Classifier
+	var redundancyManager *redundancy.Manager
 	for _, dependency := range dependencies {
 		switch value := dependency.(type) {
 		case *unifi.Manager:
 			unifiManager = value
 		case *devicecatalog.Classifier:
 			classifier = value
+		case *redundancy.Manager:
+			redundancyManager = value
 		}
 	}
 	catalog := devicecatalog.NewManager(env("FARO_DEVICE_CATALOG_PATH", ""))
@@ -66,6 +71,7 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 		backups:       farobackup.NewService(store),
 		unifi:         unifiManager,
 		classifier:    classifier,
+		redundancy:    redundancyManager,
 		startedAt:     time.Now(),
 	}
 	mux := http.NewServeMux()
@@ -90,6 +96,7 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 	mux.HandleFunc("/api/events", handler.events)
 	mux.HandleFunc("/api/notifications", handler.notifications)
 	mux.HandleFunc("/api/notifications/", handler.notificationState)
+	mux.HandleFunc("/api/upstreams/catalog", handler.upstreamCatalog)
 	mux.HandleFunc("/api/upstreams/probe", handler.upstreamProbes)
 	mux.HandleFunc("/api/devices", handler.devices)
 	mux.HandleFunc("/api/devices/", handler.device)
@@ -106,8 +113,35 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 	mux.HandleFunc("/api/backups", handler.backupExport)
 	mux.HandleFunc("/api/backups/restore", handler.backupRestore)
 	mux.HandleFunc("/api/reload", handler.reload)
+	mux.HandleFunc("/api/redundancy/public", handler.redundancyPublic)
+	mux.HandleFunc("/api/redundancy", handler.redundancyStatus)
+	mux.HandleFunc("/api/redundancy/pairing", handler.redundancyPairing)
+	mux.HandleFunc("/api/redundancy/join", handler.redundancyJoin)
+	mux.HandleFunc("/api/redundancy/pair", handler.redundancyPair)
+	mux.HandleFunc("/api/redundancy/replica/snapshot", handler.redundancySnapshot)
+	mux.HandleFunc("/api/redundancy/replica/ack", handler.redundancyAck)
+	mux.HandleFunc("/api/redundancy/nodes/", handler.redundancyNode)
 	trustProxy := strings.EqualFold(os.Getenv("FARO_TRUST_PROXY"), "true")
-	return cors(trustProxy, authManager.OnboardingComplete, authManager.Require(mux))
+	return cors(trustProxy, authManager.OnboardingComplete, replicaReadOnly(store, authManager.Require(mux)))
+}
+
+func replicaReadOnly(store *db.Store, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet || request.Method == http.MethodHead || request.Method == http.MethodOptions {
+			next.ServeHTTP(w, request)
+			return
+		}
+		var role string
+		if err := store.DB.QueryRowContext(request.Context(), `SELECT role FROM redundancy_state WHERE id = 1`).Scan(&role); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify this Faro server's role"})
+			return
+		}
+		if role == redundancy.RoleReplica {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "replica servers are read-only and managed by the primary Faro server"})
+			return
+		}
+		next.ServeHTTP(w, request)
+	})
 }
 
 func env(key, fallback string) string {

@@ -162,7 +162,7 @@ func (s *Service) Create(ctx context.Context, passphrase string) (string, Manife
 		FormatVersion: FormatVersion,
 		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
 		DatabaseBytes: info.Size(),
-		Excluded:      []string{"auth_sessions", "integration credentials and derived router observations", "favicon cache files", "raw query-log buffer"},
+		Excluded:      []string{"auth_sessions", "redundancy pairing secrets and node membership", "integration credentials and derived router observations", "favicon cache files", "raw query-log buffer"},
 	}
 	archivePath := filepath.Join(tempDir, "payload.zip")
 	if err := writeArchive(archivePath, databasePath, manifest); err != nil {
@@ -345,6 +345,24 @@ func scrubSnapshot(path string) error {
 	}
 	defer database.Close()
 	if _, err := database.Exec(`DELETE FROM auth_sessions`); err != nil {
+		return err
+	}
+	if _, err := database.Exec(`
+		DELETE FROM redundancy_nodes;
+		DELETE FROM redundancy_snapshots;
+		UPDATE redundancy_state
+		SET role = 'standalone',
+		    home_id = '',
+		    node_id = lower(hex(randomblob(16))),
+		    node_name = 'Primary Faro',
+		    controller_url = '',
+		    secret_ciphertext = '',
+		    config_revision = 0,
+		    last_sync_at = NULL,
+		    last_error = '',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = 1;
+	`); err != nil {
 		return err
 	}
 	return integrityCheck(database)

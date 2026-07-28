@@ -222,6 +222,53 @@ func TestApplyAllowsUnchangedCorefileBeforeReloadHashIsInitialized(t *testing.T)
 	}
 }
 
+func TestApplyReplicaRestoresRuntimeSettingsAndFilesAfterValidationFailure(t *testing.T) {
+	store := openValidationStore(t)
+	defer store.Close()
+	configDir := t.TempDir()
+	corefilePath := filepath.Join(configDir, "Corefile")
+	if err := writeTestFile(corefilePath, "last known good"); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(store, configDir)
+	manager.validateGenerated = func(context.Context, map[string][]byte) error {
+		return errors.New("replicated configuration is invalid")
+	}
+	manager.readLiveHash = func(context.Context) (string, error) {
+		t.Fatal("live CoreDNS should not be contacted after staged validation fails")
+		return "", nil
+	}
+	files := map[string][]byte{
+		"Corefile":   []byte(".:53 {\n  hosts /etc/coredns/faro.hosts\n  forward . 127.0.0.1:5053\n}\n"),
+		"faro.hosts": []byte(""),
+	}
+	err := manager.ApplyReplica(context.Background(), files, map[string]string{
+		"upstream_dns":       "8.8.8.8",
+		"upstream_transport": "standard",
+	})
+	if err == nil || !strings.Contains(err.Error(), "replicated configuration is invalid") {
+		t.Fatalf("ApplyReplica error = %v", err)
+	}
+	content, readErr := readTestFile(corefilePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if content != "last known good" {
+		t.Fatalf("replica replaced last-known-good Corefile: %q", content)
+	}
+	var upstream, transport string
+	if err := store.DB.QueryRow(`SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&upstream); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.QueryRow(`SELECT value FROM settings WHERE key = 'upstream_transport'`).Scan(&transport); err != nil {
+		t.Fatal(err)
+	}
+	if upstream != "1.1.1.1,9.9.9.9" || transport != "standard" {
+		t.Fatalf("runtime settings were not restored: upstream=%q transport=%q", upstream, transport)
+	}
+}
+
 func openValidationStore(t *testing.T) *db.Store {
 	t.Helper()
 	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))

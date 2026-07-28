@@ -1,6 +1,6 @@
 import { AlertTriangle, Check, Gauge, LockKeyhole, Network, Plus, RefreshCw, RotateCcw, Save, Server, ShieldCheck, X } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { api, type Setting, type UpstreamProbe } from "../api/client";
+import { useEffect, useLayoutEffect, useMemo, useState, type FormEvent } from "react";
+import { api, type EncryptedUpstreamEndpoint, type Setting, type UpstreamProbe } from "../api/client";
 import { allCatalogAddresses, findUpstreamAddress, parseUpstreamServers, upstreamProviders, type ResolverProfile } from "../data/upstreams";
 import { ProviderLogo } from "../components/ProviderLogo";
 
@@ -22,20 +22,58 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
   const [probing, setProbing] = useState(false);
   const [probeError, setProbeError] = useState("");
   const [lastChecked, setLastChecked] = useState<string | null>(null);
+  const [encryptedEndpoints, setEncryptedEndpoints] = useState<EncryptedUpstreamEndpoint[]>([]);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setSelected(configured);
     setTransport(configuredTransport);
   }, [configured.join(","), configuredTransport]);
 
+  useEffect(() => {
+    let cancelled = false;
+    api.upstreamCatalog()
+      .then((response) => {
+        if (cancelled) return;
+        setEncryptedEndpoints(response.encrypted_endpoints);
+        setCatalogError("");
+      })
+      .catch((caught) => {
+        if (cancelled) return;
+        setCatalogError(caught instanceof Error ? caught.message : "Encrypted DNS support could not be loaded.");
+      })
+      .finally(() => {
+        if (!cancelled) setCatalogLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const selectedSet = useMemo(() => new Set(selected), [selected]);
-  const probeAddresses = useMemo(() => unique([...allCatalogAddresses(), ...selected]), [selected.join(",")]);
+  const encryptedByAddress = useMemo(() => encryptedEndpointIndex(encryptedEndpoints), [encryptedEndpoints]);
+  const selectedEncryptedEndpoints = useMemo(
+    () => encryptedEndpoints.filter((endpoint) => endpoint.bootstrap_ips.some((address) => selectedSet.has(address))),
+    [encryptedEndpoints, selectedSet]
+  );
+  const unsupportedEncrypted = useMemo(
+    () => selected.filter((address) => catalogLoaded && !encryptedByAddress.has(address)),
+    [catalogLoaded, encryptedByAddress, selected]
+  );
+  const probeAddresses = useMemo(
+    () => transport === "encrypted" && catalogLoaded
+      ? unique([...encryptedEndpoints.map((endpoint) => endpoint.bootstrap_ips[0]).filter(Boolean), ...unsupportedEncrypted])
+      : unique([...allCatalogAddresses(), ...selected]),
+    [catalogLoaded, encryptedEndpoints, selected, transport, unsupportedEncrypted]
+  );
   const probeKey = probeAddresses.join(",");
   const dirty = selected.join(",") !== configured.join(",") || transport !== configuredTransport;
-  const hasCustomResolvers = selected.some((address) => !findUpstreamAddress(address));
   const selectedProfiles = upstreamProviders.flatMap((provider) => provider.profiles.filter((profile) => profile.addresses.some((address) => selectedSet.has(address))));
   const mixesFiltering = selectedProfiles.some((profile) => profile.mode === "none") && selectedProfiles.some((profile) => profile.mode !== "none");
   const fastestProfileID = fastestProfile(probes);
+  const selectionCount = transport === "encrypted" && catalogLoaded ? selectedEncryptedEndpoints.length + unsupportedEncrypted.length : selected.length;
+  const selectionLabel = transport === "encrypted" ? `encrypted provider${selectionCount === 1 ? "" : "s"}` : `DNS server${selectionCount === 1 ? "" : "s"}`;
 
   useEffect(() => {
     let cancelled = false;
@@ -99,9 +137,19 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
   }
 
   function chooseTransport(next: "encrypted" | "standard") {
-    if (next === "encrypted" && hasCustomResolvers) {
+    if (next === "encrypted" && !catalogLoaded) {
       setSaveState("error");
-      setMessage("Encrypted DNS is available for Faro's listed providers. Remove custom IP resolvers or keep Standard DNS.");
+      setMessage("Faro is still checking which providers support encrypted DNS.");
+      return;
+    }
+    if (next === "encrypted" && catalogError) {
+      setSaveState("error");
+      setMessage("Encrypted DNS support is unavailable right now. Standard DNS settings are still available.");
+      return;
+    }
+    if (next === "encrypted" && unsupportedEncrypted.length > 0) {
+      setSaveState("error");
+      setMessage("One or more selected resolvers do not offer a supported HTTPS endpoint. Remove them or keep Standard DNS.");
       return;
     }
     setTransport(next);
@@ -113,6 +161,16 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
     if (selected.length === 0) {
       setSaveState("error");
       setMessage("Select at least one upstream DNS server.");
+      return;
+    }
+    if (transport === "encrypted" && (!catalogLoaded || catalogError)) {
+      setSaveState("error");
+      setMessage("Faro could not verify encrypted DNS support. Try again or use Standard DNS.");
+      return;
+    }
+    if (transport === "encrypted" && unsupportedEncrypted.length > 0) {
+      setSaveState("error");
+      setMessage("Remove resolvers without a supported HTTPS endpoint before saving encrypted DNS.");
       return;
     }
     setSaveState("saving");
@@ -165,7 +223,7 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
           </div>
         </section>
 
-        {probeError && <div className="upstream-probe-error"><AlertTriangle size={16} /><span>{probeError}</span></div>}
+        {(probeError || catalogError) && <div className="upstream-probe-error"><AlertTriangle size={16} /><span>{catalogError || probeError}</span></div>}
 
         <div className="provider-list">
           {upstreamProviders.map((provider) => {
@@ -188,13 +246,16 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
                   const fullySelected = selectedCount === profile.addresses.length;
                   const partiallySelected = selectedCount > 0 && !fullySelected;
                   const profileProbe = bestProbe(profile.addresses, probes);
+                  const encryptedEndpoint = encryptedEndpointForProfile(profile, encryptedByAddress);
+                  const encryptedUnavailable = transport === "encrypted" && catalogLoaded && !encryptedEndpoint;
                   return (
                     <button
-                      className={`resolver-profile ${fullySelected ? "selected" : ""} ${partiallySelected ? "partial" : ""}`}
+                      className={`resolver-profile ${fullySelected ? "selected" : ""} ${partiallySelected ? "partial" : ""} ${encryptedUnavailable ? "unavailable" : ""}`}
                       key={profile.id}
                       type="button"
                       onClick={() => toggleProfile(profile)}
                       aria-pressed={fullySelected}
+                      disabled={encryptedUnavailable}
                     >
                       <span className="profile-check">{fullySelected ? <Check size={16} /> : partiallySelected ? selectedCount : null}</span>
                       <span className="profile-copy">
@@ -203,12 +264,21 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
                           <span className="profile-title-badges">
                             {profile.id === fastestProfileID && <em className="fastest">Fastest</em>}
                             {profile.recommended && <em>Recommended</em>}
-                            {transport === "encrypted" && <em className="encrypted"><LockKeyhole size={11} /> Encrypted</em>}
+                            {transport === "encrypted" && encryptedEndpoint && <em className="encrypted"><LockKeyhole size={11} /> HTTPS available</em>}
+                            {transport === "encrypted" && !catalogLoaded && <em>Checking HTTPS</em>}
+                            {encryptedUnavailable && <em className="standard-only">Standard only</em>}
                           </span>
                         </span>
                         <span>{profile.description}</span>
                         <span className="profile-latency"><Gauge size={14} /><ProbeText probe={profileProbe} loading={probing && !profileProbe} /></span>
-                        <span className="profile-addresses">{profile.addresses.map((address) => <span key={address}><code>{address}</code><ProbeText probe={probes[address]} compact loading={probing && !probes[address]} /></span>)}</span>
+                        {transport === "encrypted" ? (
+                          <span className="profile-doh-endpoint">
+                            <small>HTTPS endpoint</small>
+                            <code title={encryptedEndpoint?.url}>{encryptedEndpoint?.url ?? (catalogLoaded ? "Not offered by Faro" : "Checking support…")}</code>
+                          </span>
+                        ) : (
+                          <span className="profile-addresses">{profile.addresses.map((address) => <span key={address}><code>{address}</code><ProbeText probe={probes[address]} compact loading={probing && !probes[address]} /></span>)}</span>
+                        )}
                       </span>
                       <span className="profile-badges">{profile.badges.map((badge) => <span key={badge}>{badge}</span>)}</span>
                     </button>
@@ -240,7 +310,7 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
         <div className="selection-heading">
           <div>
             <span>Current selection</span>
-            <strong>{selected.length} upstream server{selected.length === 1 ? "" : "s"}</strong>
+            <strong>{selectionCount} {selectionLabel}</strong>
           </div>
           <span className={`selection-status ${dirty ? "pending" : ""}`}>{dirty ? <AlertTriangle size={15} /> : <ShieldCheck size={15} />} {dirty ? "Unsaved" : "Active"}</span>
         </div>
@@ -260,20 +330,52 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
         <div className="selected-server-list">
           {selected.length === 0 ? (
             <div className="selection-empty">Choose a provider profile or add a custom resolver.</div>
+          ) : transport === "encrypted" ? (
+            <>
+              {!catalogLoaded && <div className="selection-empty">Checking encrypted provider support…</div>}
+              {selectedEncryptedEndpoints.map((endpoint) => {
+                const selectedAddresses = endpoint.bootstrap_ips.filter((address) => selectedSet.has(address));
+                const match = selectedAddresses.map(findUpstreamAddress).find(Boolean);
+                const probe = bestProbe(endpoint.bootstrap_ips, probes);
+                return (
+                  <div className="selected-server encrypted-endpoint" key={endpoint.url}>
+                    <span className="selected-provider-logo">{match ? <ProviderLogo providerID={match.provider.id} providerName={match.provider.name} /> : <LockKeyhole size={15} />}</span>
+                    <div>
+                      <strong>{match ? `${match.provider.name} · ${match.profile.name}` : endpoint.name}</strong>
+                      <code title={endpoint.url}>{endpoint.url}</code>
+                      <span>{selectedAddresses.length} provider address{selectedAddresses.length === 1 ? "" : "es"} available</span>
+                    </div>
+                    <ProbeBadge probe={probe} loading={probing && !probe} compact />
+                    <button className="icon-button" type="button" onClick={() => setSelected((current) => current.filter((address) => !endpoint.bootstrap_ips.includes(address)))} aria-label={`Remove ${endpoint.name}`}><X size={15} /></button>
+                  </div>
+                );
+              })}
+              {unsupportedEncrypted.map((server) => {
+                const match = findUpstreamAddress(server);
+                return (
+                  <div className="selected-server unsupported-endpoint" key={server}>
+                    <span className="selected-provider-logo">{match ? <ProviderLogo providerID={match.provider.id} providerName={match.provider.name} /> : <Server size={15} />}</span>
+                    <div><strong>{server}</strong><span>No supported HTTPS endpoint</span></div>
+                    <ProbeBadge probe={probes[server]} loading={probing && !probes[server]} compact />
+                    <button className="icon-button" type="button" onClick={() => setSelected((current) => current.filter((address) => address !== server))} aria-label={`Remove ${server}`}><X size={15} /></button>
+                  </div>
+                );
+              })}
+            </>
           ) : selected.map((server) => {
-            const match = findUpstreamAddress(server);
-            return (
-              <div className="selected-server" key={server}>
-                <span className="selected-provider-logo">{match ? <ProviderLogo providerID={match.provider.id} providerName={match.provider.name} /> : <Server size={15} />}</span>
-                <div>
-                  <strong>{server}</strong>
-                  <span>{match ? `${match.provider.name} · ${match.profile.name}${transport === "encrypted" ? " · Encrypted" : ""}` : "Custom resolver"}</span>
+              const match = findUpstreamAddress(server);
+              return (
+                <div className="selected-server" key={server}>
+                  <span className="selected-provider-logo">{match ? <ProviderLogo providerID={match.provider.id} providerName={match.provider.name} /> : <Server size={15} />}</span>
+                  <div>
+                    <strong>{server}</strong>
+                    <span>{match ? `${match.provider.name} · ${match.profile.name}` : "Custom resolver"}</span>
+                  </div>
+                  <ProbeBadge probe={probes[server]} loading={probing && !probes[server]} compact />
+                  <button className="icon-button" type="button" onClick={() => setSelected((current) => current.filter((address) => address !== server))} aria-label={`Remove ${server}`}><X size={15} /></button>
                 </div>
-                <ProbeBadge probe={probes[server]} loading={probing && !probes[server]} compact />
-                <button className="icon-button" type="button" onClick={() => setSelected((current) => current.filter((address) => address !== server))} aria-label={`Remove ${server}`}><X size={15} /></button>
-              </div>
-            );
-          })}
+              );
+            })}
         </div>
 
         <div className="selection-note">
@@ -285,7 +387,7 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
 
         <div className="selection-actions">
           <button type="button" className="secondary" disabled={!dirty} onClick={() => { setSelected(configured); setTransport(configuredTransport); setMessage(""); setSaveState("idle"); }}><RotateCcw size={16} /><span>Reset</span></button>
-          <button type="button" disabled={!dirty || saveState === "saving" || selected.length === 0} onClick={() => void save()}><Save size={16} /><span>{saveState === "saving" ? "Saving" : "Save upstreams"}</span></button>
+          <button type="button" disabled={!dirty || saveState === "saving" || selected.length === 0 || (transport === "encrypted" && (!catalogLoaded || Boolean(catalogError) || unsupportedEncrypted.length > 0))} onClick={() => void save()}><Save size={16} /><span>{saveState === "saving" ? "Saving" : "Save upstreams"}</span></button>
         </div>
         {message && <span className={`selection-message ${saveState === "error" ? "error" : ""}`}>{message}</span>}
       </aside>
@@ -295,6 +397,19 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
 
 function unique(values: string[]) {
   return Array.from(new Set(values));
+}
+
+function encryptedEndpointIndex(endpoints: EncryptedUpstreamEndpoint[]) {
+  const index = new Map<string, EncryptedUpstreamEndpoint>();
+  endpoints.forEach((endpoint) => endpoint.bootstrap_ips.forEach((address) => index.set(address, endpoint)));
+  return index;
+}
+
+function encryptedEndpointForProfile(profile: ResolverProfile, index: Map<string, EncryptedUpstreamEndpoint>) {
+  const endpoints = profile.addresses.map((address) => index.get(address));
+  const first = endpoints[0];
+  if (!first || endpoints.some((endpoint) => endpoint?.url !== first.url)) return null;
+  return first;
 }
 
 function isIPAddress(value: string) {

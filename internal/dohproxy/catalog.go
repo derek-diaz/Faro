@@ -11,9 +11,9 @@ import (
 // addresses Faro may use to bootstrap its TLS connection without consulting
 // the DNS service it is in the process of configuring.
 type Endpoint struct {
-	Name         string
-	URL          string
-	BootstrapIPs []string
+	Name         string   `json:"name"`
+	URL          string   `json:"url"`
+	BootstrapIPs []string `json:"bootstrap_ips"`
 }
 
 var catalog = []Endpoint{
@@ -32,6 +32,16 @@ var catalog = []Endpoint{
 }
 
 var endpointByAddress = buildAddressIndex(catalog)
+
+// Catalog returns the encrypted resolvers supported by this Faro build.
+// A copy is returned so API consumers cannot mutate the runtime lookup table.
+func Catalog() []Endpoint {
+	endpoints := make([]Endpoint, 0, len(catalog))
+	for _, endpoint := range catalog {
+		endpoints = append(endpoints, cloneEndpoint(endpoint))
+	}
+	return endpoints
+}
 
 func buildAddressIndex(endpoints []Endpoint) map[string]Endpoint {
 	index := make(map[string]Endpoint)

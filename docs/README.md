@@ -73,6 +73,31 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 An installation created from Faro's older three-service preview uses a different volume layout. Create an encrypted Faro backup before replacing that Compose file, then restore the backup into the current container.
 
+## Multi-server DNS redundancy
+
+Faro can synchronize one primary server with any number of read-only DNS replicas. Every server runs the same single `tabierto/faro` container; there is no separate replica image or extra service. The primary remains the only place where settings are changed, while replicas answer DNS using the same accepted CoreDNS configuration.
+
+To add a server:
+
+1. Install Faro normally on another machine with a fixed LAN IP, but do not create its administrator account.
+2. On the primary, open **Settings → Redundancy**, choose **Set up redundancy** or **Add DNS server**, and copy the temporary pairing code.
+3. Open the fresh Faro server, choose **Join an existing Faro home**, and enter the primary's private Faro URL, pairing code, server name, and the new server's LAN IP.
+4. Wait for both servers to show the same configuration revision, then advertise both LAN IPs as DNS servers through the router's DHCP settings.
+
+The replica initiates every connection to the primary, so no inbound management port needs to be opened on the replica. Pairing codes expire after ten minutes and are single-use. Pairing uses an ephemeral X25519 key exchange; subsequent requests are timestamped, nonce-protected, and HMAC authenticated. Configuration snapshots are encrypted separately for each replica, and the long-lived node secrets are encrypted at rest.
+
+Before accepting a revision, a replica stages the complete generated CoreDNS configuration, validates it with CoreDNS, replaces the live files atomically, and verifies that the running resolver accepted the reload. If validation or reload fails, it restores the previous runtime settings and DNS files. If the primary is unreachable, the replica keeps serving its last-known-good configuration and reports the synchronization problem on both status screens.
+
+This first redundancy model intentionally keeps a single control plane:
+
+- Configuration changes, blocklist downloads, protection edits, and administration happen only on the primary.
+- Replicas are server-enforced read-only, not merely hidden by the interface.
+- Query history and device observations remain local to the primary; they are not merged from replicas.
+- A replica is not promoted automatically if the primary fails. It continues resolving DNS, but configuration changes wait until the primary returns.
+- Portable database backups do not copy pairing secrets or cluster membership. Pair replicas again after restoring a primary onto a new installation.
+
+This avoids split-brain configuration and makes DNS failover independent of database consensus. For predictable client failover, verify that the router distributes both DNS addresses; some consumer routers use only the first address until it stops responding, while others balance between them.
+
 ## Protection setups
 
 **Home** is Faro's network default. Existing blocklist and exception choices are migrated into Home automatically. Use the separate **Blocklists** page to install, update, pause, or remove shared filtering sources. Under **Protection**, you can create additional named setups, choose an icon, select from those installed blocklists, add allow or block exceptions, and assign observed devices. Devices that are not assigned elsewhere always fall back to Home.

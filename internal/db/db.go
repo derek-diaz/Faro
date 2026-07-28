@@ -254,6 +254,40 @@ func (s *Store) migrate(ctx context.Context) error {
 			value TEXT NOT NULL,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS redundancy_state (
+			id INTEGER PRIMARY KEY CHECK(id = 1),
+			role TEXT NOT NULL DEFAULT 'standalone' CHECK(role IN ('standalone', 'controller', 'replica')),
+			home_id TEXT NOT NULL DEFAULT '',
+			node_id TEXT NOT NULL DEFAULT '',
+			node_name TEXT NOT NULL DEFAULT '',
+			controller_url TEXT NOT NULL DEFAULT '',
+			secret_ciphertext TEXT NOT NULL DEFAULT '',
+			config_revision INTEGER NOT NULL DEFAULT 0,
+			last_sync_at TEXT,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`INSERT OR IGNORE INTO redundancy_state(id, role, node_id, node_name)
+		 VALUES(1, 'standalone', lower(hex(randomblob(16))), 'Primary Faro');`,
+		`CREATE TABLE IF NOT EXISTS redundancy_nodes (
+			node_id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			lan_address TEXT NOT NULL DEFAULT '',
+			secret_ciphertext TEXT NOT NULL,
+			config_revision INTEGER NOT NULL DEFAULT 0,
+			last_seen_at TEXT,
+			last_sync_at TEXT,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_redundancy_nodes_seen ON redundancy_nodes(last_seen_at);`,
+		`CREATE TABLE IF NOT EXISTS redundancy_snapshots (
+			revision INTEGER PRIMARY KEY,
+			payload BLOB NOT NULL,
+			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
 		`CREATE TABLE IF NOT EXISTS device_aliases (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			client_ip TEXT NOT NULL UNIQUE,

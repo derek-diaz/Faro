@@ -146,6 +146,53 @@ func TestWrongPassphraseDoesNotMutateDatabase(t *testing.T) {
 	}
 }
 
+func TestPortableSnapshotRemovesRedundancyMembership(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB.Exec(`
+		UPDATE redundancy_state
+		SET role = 'controller', home_id = 'home-secret', secret_ciphertext = 'node-secret', config_revision = 7
+		WHERE id = 1;
+		INSERT INTO redundancy_nodes(node_id, name, secret_ciphertext)
+		VALUES('0123456789abcdef0123456789abcdef', 'Replica', 'replica-secret');
+		INSERT INTO redundancy_snapshots(revision, payload) VALUES(7, 'snapshot-secret');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	snapshotPath := filepath.Join(t.TempDir(), "portable.db")
+	if err := snapshotDatabase(context.Background(), store.DB, snapshotPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := scrubSnapshot(snapshotPath); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := db.Open(snapshotPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snapshot.Close()
+	var role, homeID, secret string
+	var revision, nodes, snapshots int
+	if err := snapshot.DB.QueryRow(`
+		SELECT role, home_id, secret_ciphertext, config_revision
+		FROM redundancy_state WHERE id = 1`).Scan(&role, &homeID, &secret, &revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.DB.QueryRow(`SELECT COUNT(*) FROM redundancy_nodes`).Scan(&nodes); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.DB.QueryRow(`SELECT COUNT(*) FROM redundancy_snapshots`).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if role != "standalone" || homeID != "" || secret != "" || revision != 0 || nodes != 0 || snapshots != 0 {
+		t.Fatalf("portable snapshot retained redundancy state: role=%q home=%q secret=%q revision=%d nodes=%d snapshots=%d",
+			role, homeID, secret, revision, nodes, snapshots)
+	}
+}
+
 func TestRestoreTransactionRollbackRecoversPreviousDatabase(t *testing.T) {
 	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
 	if err != nil {

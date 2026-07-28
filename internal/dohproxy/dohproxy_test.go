@@ -33,6 +33,19 @@ func TestEndpointsForAddressesRejectsUnsupportedResolver(t *testing.T) {
 	}
 }
 
+func TestCatalogReturnsIndependentCopy(t *testing.T) {
+	first := Catalog()
+	if len(first) == 0 || len(first[0].BootstrapIPs) == 0 {
+		t.Fatal("expected encrypted DNS catalog entries")
+	}
+	original := first[0].BootstrapIPs[0]
+	first[0].BootstrapIPs[0] = "192.0.2.1"
+	second := Catalog()
+	if second[0].BootstrapIPs[0] != original {
+		t.Fatal("catalog result mutated shared endpoint data")
+	}
+}
+
 func TestExchangeUsesRFC8484WireFormat(t *testing.T) {
 	query := probeQuery(0x1234)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -7,8 +7,19 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/derek/faro/internal/dohproxy"
 	"github.com/derek/faro/internal/upstreamhealth"
 )
+
+func (s *Handler) upstreamCatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"encrypted_endpoints": dohproxy.Catalog(),
+	})
+}
 
 func (s *Handler) upstreamProbes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

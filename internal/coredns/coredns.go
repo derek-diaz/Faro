@@ -36,6 +36,7 @@ type Manager struct {
 	CoreDNSBinary     string
 	MetricsURL        string
 	BeforeApply       func(context.Context) error
+	AfterApply        func(context.Context)
 	ValidationTimeout time.Duration
 	ReloadTimeout     time.Duration
 	HTTPClient        *http.Client
@@ -136,6 +137,64 @@ func (m *Manager) Apply(ctx context.Context) error {
 	}
 	for name, content := range state.ProtectionHosts {
 		files[name] = []byte(content)
+	}
+	if err := m.applyFilesLocked(ctx, files); err != nil {
+		return err
+	}
+	if m.AfterApply != nil {
+		m.AfterApply(context.WithoutCancel(ctx))
+	}
+	return nil
+}
+
+// ApplyReplica installs a controller-produced, already rendered configuration.
+// Only the upstream transport settings are written locally because the DNS
+// gateway needs them at runtime; the remaining replicated state is represented
+// by the exact generated CoreDNS files.
+func (m *Manager) ApplyReplica(ctx context.Context, files map[string][]byte, runtimeSettings map[string]string) error {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+	reloadTotal.Add(1)
+	if err := validateReplicaFiles(files); err != nil {
+		reloadFailedTotal.Add(1)
+		return err
+	}
+	previous, err := readRuntimeSettings(ctx, m.Store)
+	if err != nil {
+		reloadFailedTotal.Add(1)
+		return err
+	}
+	if err := writeRuntimeSettings(ctx, m.Store, runtimeSettings); err != nil {
+		reloadFailedTotal.Add(1)
+		return err
+	}
+	restoreRuntime := func() {
+		_ = writeRuntimeSettings(context.WithoutCancel(ctx), m.Store, previous)
+		if m.BeforeApply != nil {
+			_ = m.BeforeApply(context.WithoutCancel(ctx))
+		}
+	}
+	if m.BeforeApply != nil {
+		if err := m.BeforeApply(ctx); err != nil {
+			restoreRuntime()
+			reloadFailedTotal.Add(1)
+			return fmt.Errorf("prepare replicated DNS transport: %w", err)
+		}
+	}
+	if err := m.applyFilesLocked(ctx, cloneFiles(files)); err != nil {
+		restoreRuntime()
+		return err
+	}
+	if m.AfterApply != nil {
+		m.AfterApply(context.WithoutCancel(ctx))
+	}
+	return nil
+}
+
+func (m *Manager) applyFilesLocked(ctx context.Context, files map[string][]byte) error {
+	if err := os.MkdirAll(m.ConfigDir, 0o755); err != nil {
+		reloadFailedTotal.Add(1)
+		return err
 	}
 	if err := validateGeneratedFiles(files); err != nil {
 		reloadFailedTotal.Add(1)
@@ -490,6 +549,76 @@ func validateGeneratedFiles(files map[string][]byte) error {
 		return errors.New("generated Corefile has no Faro hosts files")
 	}
 	return nil
+}
+
+func validateReplicaFiles(files map[string][]byte) error {
+	if len(files) < 2 || len(files) > 64 {
+		return errors.New("replicated DNS configuration has an invalid file count")
+	}
+	var total int64
+	for name, content := range files {
+		if name != "Corefile" && name != "faro.hosts" && name != "local.hosts" && name != "blocklist.hosts" &&
+			!(strings.HasPrefix(name, "protection-") && strings.HasSuffix(name, ".hosts")) {
+			return fmt.Errorf("replicated DNS configuration contains unexpected file %q", name)
+		}
+		if filepath.Base(name) != name {
+			return fmt.Errorf("replicated DNS configuration contains unsafe file name %q", name)
+		}
+		total += int64(len(content))
+		if total > 128<<20 {
+			return errors.New("replicated DNS configuration is too large")
+		}
+	}
+	return validateGeneratedFiles(files)
+}
+
+func readRuntimeSettings(ctx context.Context, store *db.Store) (map[string]string, error) {
+	result := map[string]string{}
+	for _, key := range []string{"upstream_dns", "upstream_transport"} {
+		var value string
+		if err := store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value); err != nil {
+			return nil, err
+		}
+		result[key] = value
+	}
+	return result, nil
+}
+
+func writeRuntimeSettings(ctx context.Context, store *db.Store, values map[string]string) error {
+	upstreams := splitCSV(values["upstream_dns"])
+	if len(upstreams) == 0 || len(upstreams) > 15 {
+		return errors.New("replicated upstream configuration is invalid")
+	}
+	for _, upstream := range upstreams {
+		if net.ParseIP(upstream) == nil {
+			return fmt.Errorf("replicated upstream resolver %q is invalid", upstream)
+		}
+	}
+	transport := strings.TrimSpace(values["upstream_transport"])
+	if transport != "standard" && transport != "encrypted" {
+		return errors.New("replicated upstream transport is invalid")
+	}
+	tx, err := store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, key := range []string{"upstream_dns", "upstream_transport"} {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`, key, values[key]); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func cloneFiles(files map[string][]byte) map[string][]byte {
+	result := make(map[string][]byte, len(files))
+	for name, content := range files {
+		result[name] = append([]byte(nil), content...)
+	}
+	return result
 }
 
 // validateWithCoreDNS starts the same CoreDNS binary used by the DNS service

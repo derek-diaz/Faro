@@ -88,6 +88,33 @@ func TestFirstRunSetupDoesNotRequireSameOrigin(t *testing.T) {
 	}
 }
 
+func TestReplicaRejectsConfigurationWritesAtServerBoundary(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB.Exec(`UPDATE redundancy_state SET role = 'replica' WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	handler := replicaReadOnly(store, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	writeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(writeResponse, httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewBufferString(`{}`)))
+	if writeResponse.Code != http.StatusConflict || called {
+		t.Fatalf("replica write status = %d, downstream called = %v", writeResponse.Code, called)
+	}
+	readResponse := httptest.NewRecorder()
+	handler.ServeHTTP(readResponse, httptest.NewRequest(http.MethodGet, "/api/settings", nil))
+	if readResponse.Code != http.StatusNoContent || !called {
+		t.Fatalf("replica read status = %d, downstream called = %v", readResponse.Code, called)
+	}
+}
+
 func TestFailedDNSReloadRestoresPreviousSettings(t *testing.T) {
 	handler, reloader := newTestServer(t)
 	reloader.err = errors.New("invalid generated configuration")
@@ -151,6 +178,19 @@ func TestHealth(t *testing.T) {
 	}
 	if payload["service"] != "faro-api" || payload["ok"] != true {
 		t.Fatalf("unexpected health payload: %#v", payload)
+	}
+}
+
+func TestUpstreamCatalogPublishesEncryptedEndpoints(t *testing.T) {
+	handler, _ := newTestServer(t)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/upstreams/catalog", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("catalog endpoint = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !bytes.Contains(response.Body.Bytes(), []byte(`"url":"https://cloudflare-dns.com/dns-query"`)) ||
+		!bytes.Contains(response.Body.Bytes(), []byte(`"bootstrap_ips":["1.1.1.1","1.0.0.1"]`)) {
+		t.Fatalf("catalog response missing encrypted endpoint details: %s", response.Body.String())
 	}
 }
 

@@ -358,6 +358,16 @@ export type UpstreamProbeResponse = {
   items: UpstreamProbe[];
 };
 
+export type EncryptedUpstreamEndpoint = {
+  name: string;
+  url: string;
+  bootstrap_ips: string[];
+};
+
+export type UpstreamCatalogResponse = {
+  encrypted_endpoints: EncryptedUpstreamEndpoint[];
+};
+
 export type MaintenanceStorage = {
   database_bytes: number;
   database_used_bytes: number;
@@ -448,6 +458,43 @@ export type AuthStatus = {
   username?: string;
 };
 
+export type RedundancyRole = "standalone" | "controller" | "replica";
+
+export type RedundancyPublicStatus = {
+  role: RedundancyRole;
+  home_id?: string;
+  node_id: string;
+  node_name: string;
+  controller_url?: string;
+  config_revision: number;
+  last_sync_at?: string;
+  last_error?: string;
+};
+
+export type RedundancyNode = {
+  node_id: string;
+  name: string;
+  lan_address?: string;
+  role: "controller" | "replica";
+  online: boolean;
+  config_revision: number;
+  last_seen_at?: string;
+  last_sync_at?: string;
+  last_error?: string;
+};
+
+export type RedundancyStatus = RedundancyPublicStatus & {
+  healthy: boolean;
+  controller_name?: string;
+  lan_address?: string;
+  nodes: RedundancyNode[];
+};
+
+export type PairingCode = {
+  code: string;
+  expires_at: string;
+};
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const BROWSER_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
@@ -522,6 +569,14 @@ export const api = {
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   changePassword: (currentPassword: string, newPassword: string) =>
     request<{ ok: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) }),
+  redundancyPublic: () => request<RedundancyPublicStatus>("/api/redundancy/public"),
+  redundancyStatus: () => request<RedundancyStatus>("/api/redundancy"),
+  startRedundancyPairing: (nodeName: string) =>
+    request<PairingCode>("/api/redundancy/pairing", { method: "POST", body: JSON.stringify({ node_name: nodeName }) }),
+  joinRedundancy: (input: { controller_url: string; pairing_code: string; node_name: string; lan_address: string }) =>
+    request<{ status: RedundancyPublicStatus }>("/api/redundancy/join", { method: "POST", body: JSON.stringify(input) }),
+  removeRedundancyNode: (nodeID: string) =>
+    request<{ ok: boolean }>(`/api/redundancy/nodes/${encodeURIComponent(nodeID)}`, { method: "DELETE" }),
   dashboard: () => request<DashboardSummary>("/api/dashboard"),
   queries: (search = "") => request<DNSQuery[]>(`/api/queries?search=${encodeURIComponent(search)}`),
   events: (search = "", scope = "all", page = 1, pageSize = 50) =>
@@ -530,6 +585,7 @@ export const api = {
   markNotificationRead: (id: string) => request<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}/read`, { method: "PUT" }),
   dismissNotification: (id: string) => request<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}`, { method: "DELETE" }),
   markAllNotificationsRead: () => request<{ ok: boolean }>("/api/notifications/read-all", { method: "POST" }),
+  upstreamCatalog: () => request<UpstreamCatalogResponse>("/api/upstreams/catalog"),
   probeUpstreams: (addresses: string[], transport: "encrypted" | "standard" = "standard") =>
     request<UpstreamProbeResponse>("/api/upstreams/probe", { method: "POST", body: JSON.stringify({ addresses, transport }) }),
   devices: () => request<DeviceSummary[]>("/api/devices"),

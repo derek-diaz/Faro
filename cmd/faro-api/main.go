@@ -18,6 +18,7 @@ import (
 	"github.com/derek/faro/internal/dohproxy"
 	"github.com/derek/faro/internal/integrations/unifi"
 	"github.com/derek/faro/internal/querylog"
+	"github.com/derek/faro/internal/redundancy"
 	"github.com/derek/faro/internal/retention"
 	"github.com/derek/faro/internal/upstreamhealth"
 )
@@ -48,9 +49,13 @@ func main() {
 
 	reloader := coredns.NewManager(store, configDir)
 	reloader.BeforeApply = encryptedDNS.Reload
+	secretKeyPath := env("FARO_SECRET_KEY_PATH", filepath.Join(filepath.Dir(dbPath), "faro-secrets.key"))
+	redundancyManager := redundancy.NewManager(store, reloader, configDir, secretKeyPath)
+	reloader.AfterApply = redundancyManager.ConfigurationApplied
 	if err := reloader.Apply(context.Background()); err != nil {
 		log.Printf("initial coredns render failed: %v", err)
 	}
+	go redundancyManager.Run(ctx)
 
 	tailer := querylog.NewTailer(store, logPath)
 	go tailer.Run(ctx)
@@ -60,7 +65,7 @@ func main() {
 	go blocklistManager.Run(ctx)
 	upstreamMonitor := upstreamhealth.NewMonitor(store, upstreamhealth.DefaultInterval, nil)
 	go upstreamMonitor.Run(ctx)
-	unifiManager := unifi.NewManager(store, env("FARO_SECRET_KEY_PATH", filepath.Join(filepath.Dir(dbPath), "faro-secrets.key")))
+	unifiManager := unifi.NewManager(store, secretKeyPath)
 	go unifiManager.Run(ctx)
 	deviceCatalog := devicecatalog.NewManager(env("FARO_DEVICE_CATALOG_PATH", ""))
 	deviceClassifier := devicecatalog.NewClassifier(store, deviceCatalog)
@@ -68,7 +73,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           api.NewServer(store, reloader, upstreamMonitor, unifiManager, deviceClassifier),
+		Handler:           api.NewServer(store, reloader, upstreamMonitor, unifiManager, deviceClassifier, redundancyManager),
 		ReadHeaderTimeout: 5 * time.Second,
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,

@@ -1,4 +1,4 @@
-import { Check, Eye, EyeOff, LockKeyhole, LogIn, ShieldCheck, UserRound } from "lucide-react";
+import { Check, Eye, EyeOff, LockKeyhole, LogIn, Network, ShieldCheck, UserRound } from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { SetupRail } from "./SetupRail";
 import { BrandLogo } from "./BrandLogo";
@@ -7,9 +7,10 @@ type AuthScreenProps = {
   mode: "setup" | "login";
   onSubmit: (username: string, password: string) => Promise<void>;
   error: string;
+  onJoinExisting?: () => void;
 };
 
-export function AuthScreen({ mode, onSubmit, error }: AuthScreenProps) {
+export function AuthScreen({ mode, onSubmit, error, onJoinExisting }: AuthScreenProps) {
   const [username, setUsername] = useState(mode === "setup" ? "admin" : "");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -77,6 +78,13 @@ export function AuthScreen({ mode, onSubmit, error }: AuthScreenProps) {
               <span>{busy ? "Please wait" : mode === "setup" ? "Continue to DNS setup" : "Sign in"}</span>
             </button>
           </form>
+
+          {mode === "setup" && onJoinExisting && (
+            <div className="auth-join-existing">
+              <span>Already have Faro running elsewhere?</span>
+              <button type="button" className="secondary" onClick={onJoinExisting}><Network size={16} />Join an existing Faro home</button>
+            </div>
+          )}
 
           <div className="auth-privacy-note"><LockKeyhole size={14} /><span>Credentials are hashed and sessions remain in Faro's local database.</span></div>
         </div>

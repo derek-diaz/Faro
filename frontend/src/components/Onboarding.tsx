@@ -1,6 +1,6 @@
 import { ArrowLeft, ArrowRight, Check, CheckCircle2, Database, Gauge, LockKeyhole, Network, Router, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { api, type Blocklist, type Setting } from "../api/client";
+import { api, type Blocklist, type EncryptedUpstreamEndpoint, type Setting } from "../api/client";
 import { blocklistCatalog } from "../data/blocklists";
 import { upstreamProviders } from "../data/upstreams";
 import { ProviderLogo } from "./ProviderLogo";
@@ -30,6 +30,8 @@ export function Onboarding({ username, onComplete }: OnboardingProps) {
   const [installed, setInstalled] = useState<Blocklist[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [encryptedEndpoints, setEncryptedEndpoints] = useState<EncryptedUpstreamEndpoint[]>([]);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
 
   useEffect(() => {
     Promise.all([api.settings(), api.blocklists()]).then(([settings, blocklists]) => {
@@ -40,9 +42,30 @@ export function Onboarding({ username, onComplete }: OnboardingProps) {
     }).catch((caught) => setError(errorMessage(caught)));
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    api.upstreamCatalog()
+      .then((response) => {
+        if (!cancelled) setEncryptedEndpoints(response.encrypted_endpoints);
+      })
+      .catch((caught) => {
+        if (!cancelled) setError(errorMessage(caught));
+      })
+      .finally(() => {
+        if (!cancelled) setCatalogLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const upstreamAddresses = useMemo(() => Array.from(new Set(onboardingProfiles
     .filter(({ profile }) => selectedProfiles.includes(profile.id))
     .flatMap(({ profile }) => profile.addresses))), [selectedProfiles]);
+  const encryptedByAddress = useMemo(() => encryptedEndpointIndex(encryptedEndpoints), [encryptedEndpoints]);
+  const unsupportedSelectedProfiles = onboardingProfiles.filter(({ profile }) =>
+    selectedProfiles.includes(profile.id) && !encryptedEndpointForAddresses(profile.addresses, encryptedByAddress)
+  );
   const selectedProtection = protectionChoices.find((choice) => choice.id === protection) ?? protectionChoices[0];
   function next() {
     setError("");
@@ -56,6 +79,14 @@ export function Onboarding({ username, onComplete }: OnboardingProps) {
     }
     if (step === 1 && selectedProfiles.length === 0) {
       setError("Select at least one upstream resolver profile.");
+      return;
+    }
+    if (step === 1 && upstreamTransport === "encrypted" && !catalogLoaded) {
+      setError("Faro is still checking which providers support encrypted DNS.");
+      return;
+    }
+    if (step === 1 && upstreamTransport === "encrypted" && unsupportedSelectedProfiles.length > 0) {
+      setError("Remove providers without an HTTPS endpoint or choose Standard DNS.");
       return;
     }
     setStep((current) => Math.min(steps.length - 1, current + 1));
@@ -108,7 +139,7 @@ export function Onboarding({ username, onComplete }: OnboardingProps) {
           <header><span>Step {step + 2} of {setupStages.length}</span><h1>{stepHeading(step)}</h1><p>{stepIntro(step)}</p></header>
 
           {step === 0 && <LocalStep suffix={localSuffix} setSuffix={setLocalSuffix} lanAddress={lanAddress} setLanAddress={setLanAddress} cache={cacheEnabled} setCache={setCacheEnabled} />}
-          {step === 1 && <UpstreamStep selected={selectedProfiles} setSelected={setSelectedProfiles} transport={upstreamTransport} setTransport={setUpstreamTransport} />}
+          {step === 1 && <UpstreamStep selected={selectedProfiles} setSelected={setSelectedProfiles} transport={upstreamTransport} setTransport={setUpstreamTransport} encryptedByAddress={encryptedByAddress} catalogLoaded={catalogLoaded} />}
           {step === 2 && <ProtectionStep selected={protection} setSelected={setProtection} />}
           {step === 3 && <ConnectStep dnsAddress={lanAddress} suffix={localSuffix} providers={onboardingProfiles.filter(({ profile }) => selectedProfiles.includes(profile.id)).map(({ provider, profile }) => `${provider.name} ${profile.name}`)} transport={upstreamTransport} protection={selectedProtection.name} />}
 
@@ -129,16 +160,22 @@ function LocalStep({ suffix, setSuffix, lanAddress, setLanAddress, cache, setCac
   return <div className="onboarding-form-section"><label><span>Faro LAN address</span><input value={lanAddress} onChange={(event) => setLanAddress(event.target.value)} placeholder="192.168.1.20" inputMode="decimal" autoFocus /><small>The fixed IP assigned to the computer running Faro. Your router will use this as its DNS server.</small></label><label><span>Local domain suffix</span><div className="onboarding-suffix-input"><input value={suffix} onChange={(event) => setSuffix(event.target.value)} placeholder="home" /><strong>.{suffix || "home"}</strong></div><small>Examples: plex.{suffix || "home"}, router.{suffix || "home"}</small></label><div className="onboarding-toggle-row"><span className="onboarding-option-icon"><Gauge size={19} /></span><div><strong>DNS response cache</strong><p>Serve repeated lookups locally for lower latency.</p></div><label className="compact-toggle"><input type="checkbox" checked={cache} onChange={(event) => setCache(event.target.checked)} /><span>{cache ? "Enabled" : "Disabled"}</span></label></div></div>;
 }
 
-function UpstreamStep({ selected, setSelected, transport, setTransport }: { selected: string[]; setSelected: (value: string[]) => void; transport: "encrypted" | "standard"; setTransport: (value: "encrypted" | "standard") => void }) {
+function UpstreamStep({ selected, setSelected, transport, setTransport, encryptedByAddress, catalogLoaded }: { selected: string[]; setSelected: (value: string[]) => void; transport: "encrypted" | "standard"; setTransport: (value: "encrypted" | "standard") => void; encryptedByAddress: Map<string, EncryptedUpstreamEndpoint>; catalogLoaded: boolean }) {
   return <div className="onboarding-upstream-step">
     <section className="onboarding-privacy-choice">
       <div><span className="onboarding-option-icon">{transport === "encrypted" ? <LockKeyhole size={19} /> : <Network size={19} />}</span><span><strong>Connection to DNS providers</strong><p>Choose how Faro contacts providers. Devices still connect to Faro normally.</p></span></div>
       <div className="onboarding-privacy-options" role="radiogroup" aria-label="DNS provider connection">
-        <button type="button" role="radio" aria-checked={transport === "encrypted"} className={transport === "encrypted" ? "selected" : ""} onClick={() => setTransport("encrypted")}><LockKeyhole size={16} /><span><strong>Encrypted</strong><small>Recommended · HTTPS</small></span>{transport === "encrypted" && <Check size={14} />}</button>
+        <button type="button" role="radio" aria-checked={transport === "encrypted"} className={transport === "encrypted" ? "selected" : ""} onClick={() => setTransport("encrypted")} disabled={!catalogLoaded}><LockKeyhole size={16} /><span><strong>Encrypted</strong><small>{catalogLoaded ? "Recommended · HTTPS" : "Checking support…"}</small></span>{transport === "encrypted" && <Check size={14} />}</button>
         <button type="button" role="radio" aria-checked={transport === "standard"} className={transport === "standard" ? "selected" : ""} onClick={() => setTransport("standard")}><Network size={16} /><span><strong>Standard DNS</strong><small>Maximum compatibility</small></span>{transport === "standard" && <Check size={14} />}</button>
       </div>
     </section>
-    <div className="onboarding-choice-grid upstream-choices">{onboardingProfiles.map(({ provider, profile }) => { const active = selected.includes(profile.id); return <button type="button" className={active ? "selected" : ""} aria-pressed={active} key={profile.id} onClick={() => setSelected(active ? selected.filter((id) => id !== profile.id) : [...selected, profile.id])}><span className="onboarding-provider-logo"><ProviderLogo providerID={provider.id} providerName={provider.name} /></span><span className="onboarding-choice-copy"><strong>{provider.name}</strong><small>{profile.name}</small><p>{profile.description}</p><code>{transport === "encrypted" ? "Encrypted connection" : profile.addresses.join(" · ")}</code></span><span className="onboarding-check">{active && <Check size={15} />}</span></button>; })}</div>
+    <div className="onboarding-choice-grid upstream-choices">{onboardingProfiles.map(({ provider, profile }) => {
+      const active = selected.includes(profile.id);
+      const endpoint = encryptedEndpointForAddresses(profile.addresses, encryptedByAddress);
+      const unavailable = transport === "encrypted" && catalogLoaded && !endpoint;
+      const connectionLabel = transport === "encrypted" ? endpoint?.url ?? (catalogLoaded ? "HTTPS not available" : "Checking HTTPS support…") : profile.addresses.join(" · ");
+      return <button type="button" className={`${active ? "selected" : ""} ${unavailable ? "unavailable" : ""}`} aria-pressed={active} disabled={unavailable} key={profile.id} onClick={() => setSelected(active ? selected.filter((id) => id !== profile.id) : [...selected, profile.id])}><span className="onboarding-provider-logo"><ProviderLogo providerID={provider.id} providerName={provider.name} /></span><span className="onboarding-choice-copy"><strong>{provider.name}</strong><small>{profile.name}</small><p>{profile.description}</p><code title={connectionLabel}>{connectionLabel}</code></span><span className="onboarding-check">{active && <Check size={15} />}</span></button>;
+    })}</div>
   </div>;
 }
 
@@ -183,6 +220,19 @@ function detectedLANAddress(hostname: string) {
 
 function normalizeURL(value: string) {
   return value.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function encryptedEndpointIndex(endpoints: EncryptedUpstreamEndpoint[]) {
+  const index = new Map<string, EncryptedUpstreamEndpoint>();
+  endpoints.forEach((endpoint) => endpoint.bootstrap_ips.forEach((address) => index.set(address, endpoint)));
+  return index;
+}
+
+function encryptedEndpointForAddresses(addresses: string[], index: Map<string, EncryptedUpstreamEndpoint>) {
+  const endpoints = addresses.map((address) => index.get(address));
+  const first = endpoints[0];
+  if (!first || endpoints.some((endpoint) => endpoint?.url !== first.url)) return null;
+  return first;
 }
 
 function errorMessage(caught: unknown) {

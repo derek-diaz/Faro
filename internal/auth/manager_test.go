@@ -49,6 +49,19 @@ func TestSetupCreatesAuthenticatedSession(t *testing.T) {
 	}
 }
 
+func TestSetupIsRejectedOnReplica(t *testing.T) {
+	manager := newTestManager(t)
+	if _, err := manager.store.DB.Exec(`UPDATE redundancy_state SET role = 'replica' WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	setup := httptest.NewRequest(http.MethodPost, "/api/auth/setup", bytes.NewBufferString(`{"username":"admin","password":"correct-horse-battery-staple"}`))
+	response := httptest.NewRecorder()
+	manager.Setup(response, setup)
+	if response.Code != http.StatusConflict || !bytes.Contains(response.Body.Bytes(), []byte("managed by the primary")) {
+		t.Fatalf("replica setup status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestHealthAndMetricsRemainPublic(t *testing.T) {
 	manager := newTestManager(t)
 	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))

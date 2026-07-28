@@ -8,6 +8,7 @@ import {
   type Protection,
   type NotificationsResponse,
   type AuthStatus,
+  type RedundancyPublicStatus,
   type Setting
 } from "./api/client";
 import { DomainDrawer } from "./components/DomainDrawer";
@@ -16,6 +17,7 @@ import { Onboarding } from "./components/Onboarding";
 import { GlobalSearch } from "./components/GlobalSearch";
 import { Layout } from "./components/Layout";
 import { NotificationDrawer } from "./components/NotificationDrawer";
+import { JoinExistingFaro, ReplicaNodeScreen } from "./components/RedundancySetup";
 import { Dashboard } from "./pages/Dashboard";
 import { Blocklists } from "./pages/Blocklists";
 import { Devices } from "./pages/Devices";
@@ -58,12 +60,17 @@ type AppRoute = {
 
 export function App() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [redundancy, setRedundancy] = useState<RedundancyPublicStatus | null>(null);
+  const [joiningExisting, setJoiningExisting] = useState(false);
   const [authError, setAuthError] = useState("");
 
   useEffect(() => {
     let active = true;
-    api.authStatus()
-      .then((status) => { if (active) setAuth(status); })
+    Promise.all([
+      api.authStatus(),
+      api.redundancyPublic().catch(() => ({ role: "standalone", node_id: "", node_name: "", config_revision: 0 } as RedundancyPublicStatus))
+    ])
+      .then(([status, redundancyStatus]) => { if (active) { setAuth(status); setRedundancy(redundancyStatus); } })
       .catch((caught) => { if (active) setAuthError(caught instanceof Error ? caught.message : "Faro API is unavailable."); });
     function unauthorized() {
       setAuth((current) => current ? { ...current, authenticated: false, username: undefined } : current);
@@ -85,8 +92,10 @@ export function App() {
     }
   }
 
-  if (!auth) return authError ? <AuthScreen mode="login" onSubmit={authenticate} error={authError} /> : <AuthLoading />;
-  if (!auth.configured) return <AuthScreen mode="setup" onSubmit={authenticate} error={authError} />;
+  if (!auth || !redundancy) return authError ? <AuthScreen mode="login" onSubmit={authenticate} error={authError} /> : <AuthLoading />;
+  if (redundancy.role === "replica") return <ReplicaNodeScreen initialStatus={redundancy} />;
+  if (!auth.configured && joiningExisting) return <JoinExistingFaro onBack={() => setJoiningExisting(false)} onJoined={setRedundancy} />;
+  if (!auth.configured) return <AuthScreen mode="setup" onSubmit={authenticate} error={authError} onJoinExisting={() => setJoiningExisting(true)} />;
   if (!auth.authenticated) return <AuthScreen mode="login" onSubmit={authenticate} error={authError} />;
   if (!auth.onboarding_complete) return <Onboarding username={auth.username || "admin"} onComplete={() => setAuth({ ...auth, onboarding_complete: true })} />;
 

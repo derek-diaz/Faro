@@ -2,6 +2,7 @@ import { AlertTriangle, Cable, Check, CheckCircle2, Clock3, Cpu, Database, Downl
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { api, type MaintenanceStatus, type PruneResult, type Setting } from "../api/client";
 import { UnifiIntegration } from "../components/UnifiIntegration";
+import { RedundancySettings } from "../components/RedundancySettings";
 
 type SettingsProps = {
   settings: Setting[];
@@ -9,7 +10,7 @@ type SettingsProps = {
   onManageUpstreams: () => void;
 };
 
-type SettingsTab = "general" | "integrations" | "data" | "account";
+type SettingsTab = "general" | "redundancy" | "integrations" | "data" | "account";
 type ActionState = "idle" | "working" | "done" | "error";
 
 export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps) {
@@ -148,6 +149,9 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
         <button type="button" role="tab" aria-selected={tab === "data"} className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}>
           <Database size={16} /> Health & data
         </button>
+        <button type="button" role="tab" aria-selected={tab === "redundancy"} className={tab === "redundancy" ? "active" : ""} onClick={() => setTab("redundancy")}>
+          <Network size={16} /> Redundancy
+        </button>
         <button type="button" role="tab" aria-selected={tab === "integrations"} className={tab === "integrations" ? "active" : ""} onClick={() => setTab("integrations")}>
           <Cable size={16} /> Integrations
         </button>
@@ -231,6 +235,8 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
             </section>
           </aside>
         </div>
+      ) : tab === "redundancy" ? (
+        <RedundancySettings />
       ) : tab === "data" ? (
         <DataAndHealth
           maintenance={maintenance}

@@ -1,6 +1,6 @@
 import { Activity, AlertTriangle, CheckCircle2, Database, Gauge, ListFilter, MonitorSmartphone, RadioTower, RefreshCw, Server, ShieldX } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { api, type DashboardSummary, type Setting, type UpstreamProbe } from "../api/client";
+import { api, type DashboardSummary, type EncryptedUpstreamEndpoint, type Setting, type UpstreamProbe } from "../api/client";
 import { DomainFavicon } from "../components/DomainFavicon";
 import { ProviderLogo } from "../components/ProviderLogo";
 import { ResolutionSource } from "../components/ResolutionSource";
@@ -21,7 +21,9 @@ type DashboardProps = {
 
 export function Dashboard({ summary, settings, loading, onDomainSelect, onViewActivity, onViewDevices, onManageUpstreams }: DashboardProps) {
   const upstreams = useMemo(() => parseUpstreamServers(settings.find((setting) => setting.key === "upstream_dns")?.value ?? "1.1.1.1,9.9.9.9"), [settings]);
+  const configuredTransport = settings.find((setting) => setting.key === "upstream_transport")?.value === "encrypted" ? "encrypted" : "standard";
   const [upstreamProbes, setUpstreamProbes] = useState<Record<string, UpstreamProbe>>({});
+  const [encryptedEndpoints, setEncryptedEndpoints] = useState<EncryptedUpstreamEndpoint[]>([]);
   const [probingUpstreams, setProbingUpstreams] = useState(false);
   const [probeCheckedAt, setProbeCheckedAt] = useState<string | null>(null);
   const [upstreamProbeError, setUpstreamProbeError] = useState("");
@@ -33,12 +35,30 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
     setProbeCheckedAt(summary?.upstream_checked_at ?? probes[0]?.checked_at ?? null);
   }, [serverProbeKey, summary?.upstream_checked_at]);
 
+  useEffect(() => {
+    if (configuredTransport !== "encrypted") {
+      setEncryptedEndpoints([]);
+      return;
+    }
+    let cancelled = false;
+    api.upstreamCatalog()
+      .then((response) => {
+        if (!cancelled) setEncryptedEndpoints(response.encrypted_endpoints);
+      })
+      .catch(() => {
+        if (!cancelled) setEncryptedEndpoints([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [configuredTransport]);
+
   async function refreshUpstreamLatency() {
     if (!upstreams.length) return;
     setProbingUpstreams(true);
     setUpstreamProbeError("");
     try {
-      const response = await api.probeUpstreams(upstreams);
+      const response = await api.probeUpstreams(upstreams, configuredTransport);
       setUpstreamProbes(Object.fromEntries(response.items.map((probe) => [probe.address, probe])));
       setProbeCheckedAt(response.items[0]?.checked_at ?? new Date().toISOString());
     } catch {
@@ -52,8 +72,14 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
     return <div className="loading-panel">Loading dashboard...</div>;
   }
 
+  const selectedEncryptedEndpoints = encryptedEndpoints.filter((endpoint) => endpoint.bootstrap_ips.some((address) => upstreams.includes(address)));
   const bestUpstream = bestDashboardProbe(upstreams, upstreamProbes);
-  const onlineUpstreams = upstreams.filter((address) => upstreamProbes[address]?.status === "online").length;
+  const groupedEncrypted = configuredTransport === "encrypted" && selectedEncryptedEndpoints.length > 0;
+  const upstreamCount = groupedEncrypted ? selectedEncryptedEndpoints.length : upstreams.length;
+  const onlineUpstreams = groupedEncrypted
+    ? selectedEncryptedEndpoints.filter((endpoint) => endpoint.bootstrap_ips.some((address) => upstreamProbes[address]?.status === "online")).length
+    : upstreams.filter((address) => upstreamProbes[address]?.status === "online").length;
+  const upstreamUnit = groupedEncrypted ? `encrypted provider${upstreamCount === 1 ? "" : "s"}` : `upstream${upstreamCount === 1 ? "" : "s"}`;
   const dnsHealth = summary.health_cards?.find((card) => card.label === "DNS");
   const networkHealthStatus = dnsHealth?.status === "critical" ? "critical" : summary.upstream_health_status;
   const networkStatusLabel = dnsHealth?.status === "critical"
@@ -82,7 +108,7 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
         </div>
         <div className="status-facts">
           <span>{summary.cache.metrics_available ? <RadioTower size={15} /> : <AlertTriangle size={15} />} {summary.cache.metrics_available ? "DNS online" : "DNS status unavailable"}</span>
-          <span>{summary.upstream_health_status === "healthy" ? <CheckCircle2 size={15} /> : summary.upstream_health_status === "unknown" ? <RefreshCw size={15} /> : <AlertTriangle size={15} />} {summary.upstream_health_status === "unknown" ? "Checking upstreams" : `${onlineUpstreams} of ${upstreams.length} upstreams online`}</span>
+          <span>{summary.upstream_health_status === "healthy" ? <CheckCircle2 size={15} /> : summary.upstream_health_status === "unknown" ? <RefreshCw size={15} /> : <AlertTriangle size={15} />} {summary.upstream_health_status === "unknown" ? "Checking upstreams" : `${onlineUpstreams} of ${upstreamCount} ${upstreamUnit} online`}</span>
           <span><Gauge size={15} /> {bestUpstream?.latency_ms !== null && bestUpstream?.latency_ms !== undefined ? `${formatLatency(bestUpstream.latency_ms)} ms fastest` : probingUpstreams ? "Testing latency" : "Latency unavailable"}</span>
           <span><ListFilter size={15} /> {summary.enabled_blocklists} active list{summary.enabled_blocklists === 1 ? "" : "s"}</span>
         </div>
@@ -122,7 +148,16 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onViewAc
             </div>
           </div>
           <div className="dashboard-upstream-list">
-            {upstreams.map((address) => {
+            {groupedEncrypted ? selectedEncryptedEndpoints.map((endpoint) => {
+              const selectedAddress = endpoint.bootstrap_ips.find((address) => upstreams.includes(address)) ?? endpoint.bootstrap_ips[0];
+              const match = findUpstreamAddress(selectedAddress);
+              const probe = bestDashboardProbe(endpoint.bootstrap_ips, upstreamProbes);
+              return <div className="dashboard-upstream-row" key={endpoint.url}>
+                <span className="dashboard-provider-logo">{match ? <ProviderLogo providerID={match.provider.id} providerName={match.provider.name} /> : <Server size={17} />}</span>
+                <div><strong>{match?.provider.name ?? endpoint.name}</strong><span>{match?.profile.name ?? "Encrypted DNS"}</span><code title={endpoint.url}>{endpoint.url}</code></div>
+                <DashboardProbeBadge probe={probe} loading={probingUpstreams && !probe} />
+              </div>;
+            }) : upstreams.map((address) => {
               const match = findUpstreamAddress(address);
               return <div className="dashboard-upstream-row" key={address}>
                 <span className="dashboard-provider-logo">{match ? <ProviderLogo providerID={match.provider.id} providerName={match.provider.name} /> : <Server size={17} />}</span>

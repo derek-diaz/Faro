@@ -156,23 +156,34 @@ func (m *Manager) StartPairing(ctx context.Context, nodeName string) (PairingCod
 		if err != nil {
 			return PairingCode{}, err
 		}
-		if _, err := m.store.DB.ExecContext(ctx, `
-			UPDATE redundancy_state
-			SET role = ?, home_id = ?, node_name = ?, updated_at = CURRENT_TIMESTAMP
-			WHERE id = 1`, RoleController, homeID, nodeName); err != nil {
+		if err := m.initializeController(ctx, state, homeID, nodeName); err != nil {
 			return PairingCode{}, err
 		}
 		state, err = m.readState(ctx)
 		if err != nil {
 			return PairingCode{}, err
 		}
-		if err := m.captureSnapshot(ctx, state); err != nil {
-			return PairingCode{}, err
+	} else {
+		// Faro versions before compressed snapshots could leave the role set to
+		// controller while revision 0 had never actually been captured. Repair
+		// that state before issuing another pairing code.
+		if state.ConfigRevision == 0 {
+			if err := m.captureSnapshot(ctx, state); err != nil {
+				return PairingCode{}, err
+			}
+			state, err = m.readState(ctx)
+			if err != nil {
+				return PairingCode{}, err
+			}
 		}
-	} else if state.NodeName != nodeName {
-		if _, err := m.store.DB.ExecContext(ctx, `UPDATE redundancy_state SET node_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, nodeName); err != nil {
-			return PairingCode{}, err
+		if state.NodeName != nodeName {
+			if _, err := m.store.DB.ExecContext(ctx, `UPDATE redundancy_state SET node_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, nodeName); err != nil {
+				return PairingCode{}, err
+			}
 		}
+	}
+	if state.ConfigRevision < 1 {
+		return PairingCode{}, errors.New("DNS configuration could not be prepared for synchronization")
 	}
 	id, err := randomID(8)
 	if err != nil {
@@ -193,6 +204,135 @@ func (m *Manager) StartPairing(ctx context.Context, nodeName string) (PairingCod
 	}
 	m.mu.Unlock()
 	return PairingCode{Code: encodePairingCode(id, token, private.PublicKey().Bytes()), ExpiresAt: expires.Format(time.RFC3339)}, nil
+}
+
+func (m *Manager) initializeController(ctx context.Context, state localState, homeID, nodeName string) error {
+	state.Role = RoleController
+	state.HomeID = homeID
+	state.NodeName = nodeName
+	state.ConfigRevision = 0
+	revision := int64(1)
+	payload, err := m.buildSnapshot(ctx, state, revision)
+	if err != nil {
+		return err
+	}
+
+	tx, err := m.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE redundancy_state
+		SET role = ?, home_id = ?, node_name = ?, config_revision = ?,
+		    last_error = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = 1 AND role = ?`,
+		RoleController, homeID, nodeName, revision, RoleStandalone)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return errors.New("redundancy mode changed while DNS configuration was being prepared")
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_snapshots`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO redundancy_snapshots(revision, payload) VALUES(?, ?)`, revision, payload); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (m *Manager) buildSnapshot(ctx context.Context, state localState, revision int64) ([]byte, error) {
+	files, err := readGeneratedFiles(m.configDir)
+	if err != nil {
+		return nil, err
+	}
+	runtime := map[string]string{}
+	for _, key := range []string{"upstream_dns", "upstream_transport"} {
+		var value string
+		if err := m.store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value); err != nil {
+			return nil, err
+		}
+		runtime[key] = value
+	}
+	snapshot := ConfigSnapshot{
+		SchemaVersion: snapshotSchemaVersion,
+		HomeID:        state.HomeID, Revision: revision, CreatedAt: m.now().UTC().Format(time.RFC3339),
+		RuntimeSettings: runtime, Files: files,
+	}
+	return encodeSnapshot(snapshot, maxSnapshotTransportBytes)
+}
+
+func (m *Manager) captureSnapshot(ctx context.Context, state localState) error {
+	revision := state.ConfigRevision + 1
+	payload, err := m.buildSnapshot(ctx, state, revision)
+	if err != nil {
+		return err
+	}
+	tx, err := m.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+		UPDATE redundancy_state
+		SET config_revision = ?, last_error = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = 1 AND role = ? AND config_revision = ?`, revision, RoleController, state.ConfigRevision)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return errors.New("redundancy configuration changed while the snapshot was being prepared")
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO redundancy_snapshots(revision, payload) VALUES(?, ?)`, revision, payload); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_snapshots WHERE revision <> ?`, revision); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func readGeneratedFiles(configDir string) (map[string]string, error) {
+	corefile, err := os.ReadFile(filepath.Join(configDir, "Corefile"))
+	if err != nil {
+		return nil, fmt.Errorf("read generated DNS file Corefile: %w", err)
+	}
+	files := map[string]string{"Corefile": string(corefile)}
+	names := map[string]struct{}{}
+	for _, line := range strings.Split(string(corefile), "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 2 || fields[0] != "hosts" || !strings.HasPrefix(fields[1], "/etc/coredns/") {
+			continue
+		}
+		name := strings.TrimPrefix(fields[1], "/etc/coredns/")
+		if filepath.Base(name) != name || !strings.HasSuffix(name, ".hosts") {
+			return nil, fmt.Errorf("generated Corefile contains unsafe hosts file %q", name)
+		}
+		names[name] = struct{}{}
+	}
+	if len(names) == 0 {
+		return nil, errors.New("generated Corefile has no Faro hosts files")
+	}
+	sortedNames := make([]string, 0, len(names))
+	for name := range names {
+		sortedNames = append(sortedNames, name)
+	}
+	sort.Strings(sortedNames)
+	total := int64(len(corefile))
+	for _, name := range sortedNames {
+		content, err := os.ReadFile(filepath.Join(configDir, name))
+		if err != nil {
+			return nil, fmt.Errorf("read generated DNS file %s: %w", name, err)
+		}
+		total += int64(len(content))
+		if total > maxSnapshotUncompressedBytes {
+			return nil, errors.New("generated DNS configuration is too large to synchronize")
+		}
+		files[name] = string(content)
+	}
+	return files, nil
 }
 
 func (m *Manager) Join(ctx context.Context, input JoinInput) (JoinResult, error) {
@@ -304,32 +444,48 @@ func (m *Manager) RemoveNode(ctx context.Context, nodeID string) error {
 	return nil
 }
 
-func (m *Manager) captureSnapshot(ctx context.Context, state localState) error {
-	files, err := readGeneratedFiles(m.configDir)
+// Leave returns this installation to standalone mode. A replica first renders
+// and validates its own database-backed DNS configuration so the UI and the
+// running DNS engine cannot be left describing different configurations.
+func (m *Manager) Leave(ctx context.Context) (PublicStatus, error) {
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+
+	previous, err := m.readState(ctx)
 	if err != nil {
-		return err
+		return PublicStatus{}, err
 	}
-	runtime := map[string]string{}
-	for _, key := range []string{"upstream_dns", "upstream_transport"} {
-		var value string
-		if err := m.store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value); err != nil {
-			return err
+	if previous.Role == RoleStandalone {
+		return PublicStatus{}, errors.New("this Faro server is not using redundancy")
+	}
+	if previous.Role == RoleReplica && m.applier == nil {
+		return PublicStatus{}, errors.New("DNS configuration manager is unavailable")
+	}
+
+	if err := m.setStandalone(ctx); err != nil {
+		return PublicStatus{}, err
+	}
+	if previous.Role == RoleReplica {
+		if err := m.applier.Apply(ctx); err != nil {
+			if restoreErr := m.restoreState(context.WithoutCancel(ctx), previous); restoreErr != nil {
+				return PublicStatus{}, fmt.Errorf("restore standalone DNS configuration: %v; restore redundancy state: %w", err, restoreErr)
+			}
+			return PublicStatus{}, fmt.Errorf("restore standalone DNS configuration: %w", err)
 		}
-		runtime[key] = value
 	}
-	revision := state.ConfigRevision + 1
-	snapshot := ConfigSnapshot{
-		SchemaVersion: snapshotSchemaVersion,
-		HomeID:        state.HomeID, Revision: revision, CreatedAt: m.now().UTC().Format(time.RFC3339),
-		RuntimeSettings: runtime, Files: files,
-	}
-	payload, err := json.Marshal(snapshot)
+
+	m.mu.Lock()
+	m.pairings = map[string]pairingSession{}
+	m.replays = map[string]map[string]time.Time{}
+	m.mu.Unlock()
+	state, err := m.readState(ctx)
 	if err != nil {
-		return err
+		return PublicStatus{}, err
 	}
-	if len(payload) > maxSnapshotBytes {
-		return errors.New("generated redundancy snapshot is too large")
-	}
+	return publicStatus(state), nil
+}
+
+func (m *Manager) setStandalone(ctx context.Context) error {
 	tx, err := m.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -337,43 +493,31 @@ func (m *Manager) captureSnapshot(ctx context.Context, state localState) error {
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE redundancy_state
-		SET config_revision = ?, last_error = '', updated_at = CURRENT_TIMESTAMP
-		WHERE id = 1 AND role = ?`, revision, RoleController); err != nil {
+		SET role = ?, home_id = '', controller_url = '', secret_ciphertext = '',
+		    config_revision = 0, last_sync_at = NULL, last_error = '',
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE id = 1`, RoleStandalone); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO redundancy_snapshots(revision, payload) VALUES(?, ?)`, revision, payload); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_nodes`); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_snapshots WHERE revision <> ?`, revision); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_snapshots`); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func readGeneratedFiles(configDir string) (map[string]string, error) {
-	names := []string{"Corefile"}
-	matches, err := filepath.Glob(filepath.Join(configDir, "*.hosts"))
-	if err != nil {
-		return nil, err
-	}
-	for _, match := range matches {
-		names = append(names, filepath.Base(match))
-	}
-	sort.Strings(names)
-	files := map[string]string{}
-	var total int64
-	for _, name := range names {
-		content, err := os.ReadFile(filepath.Join(configDir, name))
-		if err != nil {
-			return nil, fmt.Errorf("read generated DNS file %s: %w", name, err)
-		}
-		total += int64(len(content))
-		if total > maxSnapshotBytes {
-			return nil, errors.New("generated DNS configuration is too large to synchronize")
-		}
-		files[name] = string(content)
-	}
-	return files, nil
+func (m *Manager) restoreState(ctx context.Context, state localState) error {
+	_, err := m.store.DB.ExecContext(ctx, `
+		UPDATE redundancy_state
+		SET role = ?, home_id = ?, node_id = ?, node_name = ?, controller_url = ?,
+		    secret_ciphertext = ?, config_revision = ?,
+		    last_sync_at = NULLIF(?, ''), last_error = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = 1`,
+		state.Role, state.HomeID, state.NodeID, state.NodeName, state.ControllerURL,
+		state.SecretCiphertext, state.ConfigRevision, state.LastSyncAt, state.LastError)
+	return err
 }
 
 func (m *Manager) readState(ctx context.Context) (localState, error) {

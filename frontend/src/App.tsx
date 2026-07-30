@@ -93,7 +93,23 @@ export function App() {
   }
 
   if (!auth || !redundancy) return authError ? <AuthScreen mode="login" onSubmit={authenticate} error={authError} /> : <AuthLoading />;
-  if (redundancy.role === "replica") return <ReplicaNodeScreen initialStatus={redundancy} />;
+  if (redundancy.role === "replica") {
+    return (
+      <ReplicaNodeScreen
+        initialStatus={redundancy}
+        authenticated={auth.authenticated}
+        username={auth.username}
+        onLeft={(next) => {
+          void api.authStatus()
+            .then((nextAuth) => {
+              setAuth(nextAuth);
+              setRedundancy(next);
+            })
+            .catch(() => setRedundancy(next));
+        }}
+      />
+    );
+  }
   if (!auth.configured && joiningExisting) return <JoinExistingFaro onBack={() => setJoiningExisting(false)} onJoined={setRedundancy} />;
   if (!auth.configured) return <AuthScreen mode="setup" onSubmit={authenticate} error={authError} onJoinExisting={() => setJoiningExisting(true)} />;
   if (!auth.authenticated) return <AuthScreen mode="login" onSubmit={authenticate} error={authError} />;

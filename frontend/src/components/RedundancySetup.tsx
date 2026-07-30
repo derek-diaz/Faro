@@ -1,7 +1,9 @@
-import { AlertTriangle, ArrowLeft, CheckCircle2, Copy, Network, RefreshCw, Server, ShieldCheck } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Check, CheckCircle2, Copy, LogOut, Network, RefreshCw, Server, ShieldCheck } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { api, type RedundancyPublicStatus } from "../api/client";
+import { copyText } from "../utils/clipboard";
 import { BrandLogo } from "./BrandLogo";
+import { ConfirmDialog } from "./ConfirmDialog";
 
 export function JoinExistingFaro({ onBack, onJoined }: {
   onBack: () => void;
@@ -62,16 +64,58 @@ export function JoinExistingFaro({ onBack, onJoined }: {
   );
 }
 
-export function ReplicaNodeScreen({ initialStatus }: { initialStatus: RedundancyPublicStatus }) {
+export function ReplicaNodeScreen({ initialStatus, authenticated, username, onLeft }: {
+  initialStatus: RedundancyPublicStatus;
+  authenticated: boolean;
+  username?: string;
+  onLeft: (status: RedundancyPublicStatus) => void;
+}) {
   const [status, setStatus] = useState(initialStatus);
-  const [copied, setCopied] = useState(false);
+  const [copyState, setCopyState] = useState<CopyState>("idle");
+  const [leaveOpen, setLeaveOpen] = useState(false);
+  const [leaveBusy, setLeaveBusy] = useState(false);
+  const [leaveError, setLeaveError] = useState("");
+  const [adminName, setAdminName] = useState(username ?? "");
+  const [adminPassword, setAdminPassword] = useState("");
   useEffect(() => {
     let active = true;
-    const refresh = () => api.redundancyPublic().then((next) => { if (active) setStatus(next); }).catch(() => undefined);
+    const refresh = () => api.redundancyPublic().then((next) => {
+      if (!active) return;
+      if (next.role !== "replica") onLeft(next);
+      else setStatus(next);
+    }).catch(() => undefined);
     const timer = window.setInterval(refresh, 5000);
     return () => { active = false; window.clearInterval(timer); };
-  }, []);
-  const synchronized = Boolean(status.last_sync_at) && !status.last_error;
+  }, [onLeft]);
+  async function copyControllerAddress() {
+    if (!status.controller_url || copyState === "copying") return;
+    setCopyState("copying");
+    try {
+      await copyText(status.controller_url);
+      setCopyState("copied");
+    } catch {
+      setCopyState("error");
+    }
+    window.setTimeout(() => setCopyState("idle"), 2500);
+  }
+  async function leaveRedundancy() {
+    if (!authenticated && (!adminName.trim() || !adminPassword)) {
+      setLeaveError("Enter the Faro administrator username and password.");
+      return;
+    }
+    setLeaveBusy(true);
+    setLeaveError("");
+    try {
+      if (!authenticated) await api.login(adminName.trim(), adminPassword);
+      const result = await api.leaveRedundancy();
+      onLeft(result.status);
+    } catch (caught) {
+      setLeaveError(caught instanceof Error ? caught.message : "Could not return this server to standalone mode.");
+    } finally {
+      setLeaveBusy(false);
+    }
+  }
+  const synchronized = status.config_revision > 0 && Boolean(status.last_sync_at) && !status.last_error;
   const statusMessage = replicaStatusMessage(status);
   return (
     <main className="replica-status-shell">
@@ -84,16 +128,45 @@ export function ReplicaNodeScreen({ initialStatus }: { initialStatus: Redundancy
           <p>{synchronized ? "This server is synchronized and answering DNS with the controller's last accepted configuration." : statusMessage}</p>
         </div>
         <div className="replica-status-details">
-          <div><span>Controller</span><strong>{status.controller_url || "Not connected"}</strong>{status.controller_url && <button type="button" aria-label="Copy controller address" onClick={() => { void navigator.clipboard.writeText(status.controller_url!); setCopied(true); window.setTimeout(() => setCopied(false), 1500); }}><Copy size={14} />{copied ? "Copied" : "Copy"}</button>}</div>
-          <div><span>Configuration</span><strong>Revision {status.config_revision}</strong></div>
+          <div><span>Controller</span><strong>{status.controller_url || "Not connected"}</strong>{status.controller_url && <button type="button" className={`replica-copy-button ${copyState}`} aria-label="Copy controller address" disabled={copyState === "copying"} onClick={() => void copyControllerAddress()}>{copyState === "copied" ? <Check size={14} /> : copyState === "error" ? <AlertTriangle size={14} /> : copyState === "copying" ? <RefreshCw className="spinning" size={14} /> : <Copy size={14} />}{copyState === "copied" ? "Copied!" : copyState === "error" ? "Copy failed" : copyState === "copying" ? "Copying…" : "Copy"}</button>}</div>
+          <div><span>DNS settings</span><strong>{status.config_revision > 0 ? "Up to date" : "Waiting for first sync"}</strong></div>
           <div><span>Last synchronized</span><strong>{formatSyncTime(status.last_sync_at)}</strong></div>
         </div>
         {status.last_error && <div className="replica-error"><AlertTriangle size={17} /><span>{statusMessage}</span></div>}
-        <footer><Server size={16} /><span>Configuration changes are made on the controller. This replica keeps serving the last accepted revision during an outage.</span></footer>
+        <footer className="replica-status-footer">
+          <div><Server size={16} /><span>Changes are made on the primary Faro server. This backup keeps serving its last safe DNS settings during an outage.</span></div>
+          <button type="button" className="secondary replica-leave-button" onClick={() => { setLeaveError(""); setLeaveOpen(true); }}><LogOut size={15} />Leave Faro home</button>
+        </footer>
       </section>
+      {leaveOpen && (
+        <ConfirmDialog
+          title="Leave this Faro home?"
+          body="This server will stop receiving configuration from the primary Faro server and return to standalone mode."
+          confirmLabel="Leave Faro home"
+          busyLabel="Restoring standalone DNS…"
+          busy={leaveBusy}
+          onCancel={() => { setLeaveOpen(false); setLeaveError(""); setAdminPassword(""); }}
+          onConfirm={() => void leaveRedundancy()}
+          detail={(
+            <>
+              <div className="confirm-dialog-impact warning"><AlertTriangle size={18} /><span><strong>Update your router first</strong><small>Remove this server's DNS address from DHCP before leaving, or devices may continue sending requests to it while it is being reconfigured.</small></span></div>
+              {!authenticated && (
+                <div className="replica-leave-auth">
+                  <p>Administrator confirmation</p>
+                  <label><span>Username</span><input value={adminName} onChange={(event) => setAdminName(event.target.value)} autoComplete="username" /></label>
+                  <label><span>Password</span><input type="password" value={adminPassword} onChange={(event) => setAdminPassword(event.target.value)} autoComplete="current-password" /></label>
+                </div>
+              )}
+              {leaveError && <div className="replica-leave-error" role="alert">{leaveError}</div>}
+            </>
+          )}
+        />
+      )}
     </main>
   );
 }
+
+type CopyState = "idle" | "copying" | "copied" | "error";
 
 function isIPv4(value: string) {
   return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value);
@@ -110,15 +183,15 @@ function replicaStatusMessage(status: RedundancyPublicStatus) {
   const error = status.last_error.toLowerCase();
   if (error.includes("reach controller") || error.includes("connection refused") || error.includes("timeout")) {
     return status.config_revision > 0
-      ? `The primary Faro server cannot be reached. DNS is still running safely on revision ${status.config_revision} and will reconnect automatically.`
+      ? "The primary Faro server cannot be reached. DNS is still running safely with the last synchronized settings and will reconnect automatically."
       : "The primary Faro server cannot be reached yet. Faro will keep trying automatically.";
   }
   if (error.includes("apply controller configuration")) {
     return status.config_revision > 0
-      ? `The latest update was not safe to apply. DNS is still running on revision ${status.config_revision}; check the primary Faro server for details.`
+      ? "The latest update was not safe to apply. DNS is still running with the last safe settings; check the primary Faro server for details."
       : "The first DNS configuration could not be applied safely. Check the primary Faro server for details.";
   }
   return status.config_revision > 0
-    ? `DNS is still running safely on revision ${status.config_revision}. Faro will retry synchronization automatically.`
+    ? "DNS is still running safely with the last synchronized settings. Faro will retry automatically."
     : "Faro could not finish the first synchronization and will retry automatically.";
 }

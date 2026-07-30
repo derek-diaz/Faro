@@ -26,6 +26,15 @@ func (m *Manager) AcceptPair(ctx context.Context, input PairRequest) (PairRespon
 	if state.Role != RoleController {
 		return PairResponse{}, errors.New("this Faro server is not accepting replicas")
 	}
+	if state.ConfigRevision == 0 {
+		if err := m.captureSnapshot(ctx, state); err != nil {
+			return PairResponse{}, fmt.Errorf("prepare controller configuration: %w", err)
+		}
+		state, err = m.readState(ctx)
+		if err != nil {
+			return PairResponse{}, err
+		}
+	}
 	input.NodeID = strings.TrimSpace(input.NodeID)
 	input.NodeName = strings.TrimSpace(input.NodeName)
 	input.LANAddress = strings.TrimSpace(input.LANAddress)
@@ -179,6 +188,9 @@ func (m *Manager) RecordAcknowledgement(ctx context.Context, nodeID string, ack 
 }
 
 func (m *Manager) syncReplica(ctx context.Context) error {
+	m.operationMu.Lock()
+	defer m.operationMu.Unlock()
+
 	state, err := m.readState(ctx)
 	if err != nil {
 		return err
@@ -210,8 +222,9 @@ func (m *Manager) syncReplica(ctx context.Context) error {
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNoContent {
 		_, err := m.store.DB.ExecContext(ctx, `
-			UPDATE redundancy_state SET last_sync_at = ?, last_error = '', updated_at = CURRENT_TIMESTAMP WHERE id = 1`,
-			m.now().UTC().Format(time.RFC3339))
+			UPDATE redundancy_state SET last_sync_at = ?, last_error = '', updated_at = CURRENT_TIMESTAMP
+			WHERE id = 1 AND role = ?`,
+			m.now().UTC().Format(time.RFC3339), RoleReplica)
 		return err
 	}
 	if response.StatusCode != http.StatusOK {
@@ -219,19 +232,19 @@ func (m *Manager) syncReplica(ctx context.Context) error {
 		return fmt.Errorf("controller sync failed: %s", cleanHTTPError(message, response.Status))
 	}
 	var envelope encryptedEnvelope
-	if err := json.NewDecoder(io.LimitReader(response.Body, maxSnapshotBytes+1<<20)).Decode(&envelope); err != nil {
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxSnapshotEnvelopeBytes+1)).Decode(&envelope); err != nil {
 		return errors.New("controller returned an invalid encrypted snapshot")
 	}
 	plaintext, err := openEnvelope(nodeSecret, envelope, "faro-configuration-snapshot-v1")
 	if err != nil {
 		return err
 	}
-	if len(plaintext) > maxSnapshotBytes {
+	if len(plaintext) > maxSnapshotTransportBytes {
 		return errors.New("controller configuration snapshot is too large")
 	}
-	var snapshot ConfigSnapshot
-	if err := json.Unmarshal(plaintext, &snapshot); err != nil {
-		return errors.New("controller configuration snapshot is invalid")
+	snapshot, err := decodeSnapshot(plaintext)
+	if err != nil {
+		return err
 	}
 	if snapshot.SchemaVersion != snapshotSchemaVersion || snapshot.HomeID != state.HomeID || snapshot.Revision <= state.ConfigRevision {
 		return errors.New("controller configuration snapshot has invalid identity or revision")
@@ -240,7 +253,7 @@ func (m *Manager) syncReplica(ctx context.Context) error {
 	var total int
 	for name, content := range snapshot.Files {
 		total += len(content)
-		if total > maxSnapshotBytes {
+		if total > maxSnapshotUncompressedBytes {
 			return errors.New("controller configuration snapshot is too large")
 		}
 		files[name] = []byte(content)
@@ -253,7 +266,7 @@ func (m *Manager) syncReplica(ctx context.Context) error {
 	if _, err := m.store.DB.ExecContext(ctx, `
 		UPDATE redundancy_state
 		SET config_revision = ?, last_sync_at = ?, last_error = '', updated_at = CURRENT_TIMESTAMP
-		WHERE id = 1`, snapshot.Revision, now); err != nil {
+		WHERE id = 1 AND role = ?`, snapshot.Revision, now, RoleReplica); err != nil {
 		return err
 	}
 	_ = m.sendAcknowledgement(context.WithoutCancel(ctx), state, nodeSecret, SyncAck{Revision: snapshot.Revision})

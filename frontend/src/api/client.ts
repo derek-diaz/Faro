@@ -571,6 +571,8 @@ export const api = {
     request<{ ok: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }) }),
   redundancyPublic: () => request<RedundancyPublicStatus>("/api/redundancy/public"),
   redundancyStatus: () => request<RedundancyStatus>("/api/redundancy"),
+  leaveRedundancy: () =>
+    request<{ status: RedundancyPublicStatus }>("/api/redundancy", { method: "DELETE" }),
   startRedundancyPairing: (nodeName: string) =>
     request<PairingCode>("/api/redundancy/pairing", { method: "POST", body: JSON.stringify({ node_name: nodeName }) }),
   joinRedundancy: (input: { controller_url: string; pairing_code: string; node_name: string; lan_address: string }) =>

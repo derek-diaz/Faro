@@ -29,12 +29,21 @@ func (s *Handler) redundancyPublic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Handler) redundancyStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		methodNotAllowed(w)
 		return
 	}
 	if s.redundancy == nil {
 		writeError(w, errors.New("redundancy manager is unavailable"))
+		return
+	}
+	if r.Method == http.MethodDelete {
+		status, err := s.redundancy.Leave(r.Context())
+		if err != nil {
+			writeBadRequest(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": status})
 		return
 	}
 	status, err := s.redundancy.Status(r.Context())

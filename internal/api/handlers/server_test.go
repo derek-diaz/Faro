@@ -113,6 +113,20 @@ func TestReplicaRejectsConfigurationWritesAtServerBoundary(t *testing.T) {
 	if readResponse.Code != http.StatusNoContent || !called {
 		t.Fatalf("replica read status = %d, downstream called = %v", readResponse.Code, called)
 	}
+
+	called = false
+	leaveResponse := httptest.NewRecorder()
+	handler.ServeHTTP(leaveResponse, httptest.NewRequest(http.MethodDelete, "/api/redundancy", nil))
+	if leaveResponse.Code != http.StatusNoContent || !called {
+		t.Fatalf("replica leave status = %d, downstream called = %v", leaveResponse.Code, called)
+	}
+
+	called = false
+	lookalikeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(lookalikeResponse, httptest.NewRequest(http.MethodDelete, "/api/redundancy/nodes/example", nil))
+	if lookalikeResponse.Code != http.StatusConflict || called {
+		t.Fatalf("replica lookalike write status = %d, downstream called = %v", lookalikeResponse.Code, called)
+	}
 }
 
 func TestFailedDNSReloadRestoresPreviousSettings(t *testing.T) {

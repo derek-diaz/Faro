@@ -565,7 +565,7 @@ func validateReplicaFiles(files map[string][]byte) error {
 			return fmt.Errorf("replicated DNS configuration contains unsafe file name %q", name)
 		}
 		total += int64(len(content))
-		if total > 128<<20 {
+		if total > 512<<20 {
 			return errors.New("replicated DNS configuration is too large")
 		}
 	}

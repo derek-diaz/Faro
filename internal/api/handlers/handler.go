@@ -131,6 +131,12 @@ func replicaReadOnly(store *db.Store, next http.Handler) http.Handler {
 			next.ServeHTTP(w, request)
 			return
 		}
+		// Leaving redundancy is the one authenticated local mutation a replica
+		// must be able to perform for recovery or reuse as a standalone server.
+		if request.Method == http.MethodDelete && request.URL.Path == "/api/redundancy" {
+			next.ServeHTTP(w, request)
+			return
+		}
 		var role string
 		if err := store.DB.QueryRowContext(request.Context(), `SELECT role FROM redundancy_state WHERE id = 1`).Scan(&role); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify this Faro server's role"})

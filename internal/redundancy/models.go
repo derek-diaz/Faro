@@ -14,11 +14,14 @@ const (
 	RoleController = "controller"
 	RoleReplica    = "replica"
 
-	snapshotSchemaVersion = 1
-	maxSnapshotBytes      = 128 << 20
+	snapshotSchemaVersion        = 1
+	maxSnapshotTransportBytes    = 128 << 20
+	maxSnapshotUncompressedBytes = 512 << 20
+	maxSnapshotEnvelopeBytes     = maxSnapshotTransportBytes * 2
 )
 
 type ReplicaApplier interface {
+	Apply(context.Context) error
 	ApplyReplica(context.Context, map[string][]byte, map[string]string) error
 }
 
@@ -35,6 +38,8 @@ type Manager struct {
 	pairings map[string]pairingSession
 	replays  map[string]map[string]time.Time
 	syncNow  chan struct{}
+
+	operationMu sync.Mutex
 }
 
 type localState struct {

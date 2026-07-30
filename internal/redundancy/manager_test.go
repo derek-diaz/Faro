@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -21,6 +22,15 @@ type recordingApplier struct {
 	files    map[string][]byte
 	settings map[string]string
 	err      error
+	localErr error
+	local    int
+}
+
+func (a *recordingApplier) Apply(_ context.Context) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.local++
+	return a.localErr
 }
 
 func (a *recordingApplier) ApplyReplica(_ context.Context, files map[string][]byte, settings map[string]string) error {
@@ -34,12 +44,109 @@ func (a *recordingApplier) ApplyReplica(_ context.Context, files map[string][]by
 	return nil
 }
 
+func TestReplicaCanLeaveAndRestoreStandaloneDNS(t *testing.T) {
+	ctx := context.Background()
+	store := openRedundancyStore(t)
+	if _, err := store.DB.Exec(`
+		UPDATE redundancy_state
+		SET role = ?, home_id = ?, node_name = ?, controller_url = ?,
+		    secret_ciphertext = ?, config_revision = ?, last_sync_at = ?, last_error = ?
+		WHERE id = 1`,
+		RoleReplica, "home-1", "Backup Faro", "http://192.168.1.20:1787",
+		"encrypted-secret", 7, "2026-07-29T12:00:00Z", "temporary error"); err != nil {
+		t.Fatal(err)
+	}
+	applier := &recordingApplier{}
+	manager := NewManager(store, applier, t.TempDir(), filepath.Join(t.TempDir(), "key"))
+
+	status, err := manager.Leave(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Role != RoleStandalone || status.HomeID != "" || status.ControllerURL != "" || status.ConfigRevision != 0 {
+		t.Fatalf("unexpected standalone status: %#v", status)
+	}
+	if applier.local != 1 {
+		t.Fatalf("standalone DNS apply count = %d, want 1", applier.local)
+	}
+	var secret, lastSync, lastError string
+	if err := store.DB.QueryRow(`
+		SELECT secret_ciphertext, COALESCE(last_sync_at, ''), last_error
+		FROM redundancy_state WHERE id = 1`).Scan(&secret, &lastSync, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if secret != "" || lastSync != "" || lastError != "" {
+		t.Fatalf("replica credentials or status were retained: secret=%q last_sync=%q error=%q", secret, lastSync, lastError)
+	}
+}
+
+func TestReplicaLeaveRollsBackMembershipWhenStandaloneDNSFails(t *testing.T) {
+	ctx := context.Background()
+	store := openRedundancyStore(t)
+	if _, err := store.DB.Exec(`
+		UPDATE redundancy_state
+		SET role = ?, home_id = ?, node_name = ?, controller_url = ?,
+		    secret_ciphertext = ?, config_revision = ?, last_sync_at = ?
+		WHERE id = 1`,
+		RoleReplica, "home-2", "Backup Faro", "http://192.168.1.20:1787",
+		"encrypted-secret", 4, "2026-07-29T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	applier := &recordingApplier{localErr: errors.New("invalid local DNS configuration")}
+	manager := NewManager(store, applier, t.TempDir(), filepath.Join(t.TempDir(), "key"))
+
+	if _, err := manager.Leave(ctx); err == nil || !strings.Contains(err.Error(), "invalid local DNS configuration") {
+		t.Fatalf("leave error = %v", err)
+	}
+	state, err := manager.readState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Role != RoleReplica || state.HomeID != "home-2" || state.ConfigRevision != 4 || state.SecretCiphertext != "encrypted-secret" {
+		t.Fatalf("replica state was not restored: %#v", state)
+	}
+}
+
+func TestControllerCanTurnOffRedundancy(t *testing.T) {
+	ctx := context.Background()
+	store := openRedundancyStore(t)
+	if _, err := store.DB.Exec(`UPDATE redundancy_state SET role = ?, home_id = ?, config_revision = ? WHERE id = 1`, RoleController, "home-3", 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`
+		INSERT INTO redundancy_nodes(node_id, name, secret_ciphertext)
+		VALUES('0123456789abcdef0123456789abcdef', 'Backup Faro', 'secret')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`INSERT INTO redundancy_snapshots(revision, payload) VALUES(2, 'snapshot')`); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store, nil, t.TempDir(), filepath.Join(t.TempDir(), "key"))
+
+	status, err := manager.Leave(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Role != RoleStandalone {
+		t.Fatalf("role = %q, want standalone", status.Role)
+	}
+	for _, table := range []string{"redundancy_nodes", "redundancy_snapshots"} {
+		var count int
+		if err := store.DB.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 0 {
+			t.Fatalf("%s count = %d, want 0", table, count)
+		}
+	}
+}
+
 func TestControllerPairsAndSynchronizesReplica(t *testing.T) {
 	ctx := context.Background()
 	controllerStore := openRedundancyStore(t)
 	replicaStore := openRedundancyStore(t)
 	controllerDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(controllerDir, "Corefile"), []byte(".:53 {\n  forward . 1.1.1.1\n}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(controllerDir, "Corefile"), []byte(".:53 {\n  hosts /etc/coredns/local.hosts\n  forward . 1.1.1.1\n}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(controllerDir, "local.hosts"), []byte("192.168.1.1 router.home\n"), 0o600); err != nil {
@@ -111,6 +218,140 @@ func TestControllerPairsAndSynchronizesReplica(t *testing.T) {
 	}
 	if controllerStatus.Nodes[1].LastError == "" {
 		t.Fatal("controller did not surface the replica apply failure")
+	}
+}
+
+func TestFailedInitialSnapshotDoesNotChangeRedundancyRole(t *testing.T) {
+	ctx := context.Background()
+	store := openRedundancyStore(t)
+	configDir := t.TempDir()
+	manager := NewManager(store, nil, configDir, filepath.Join(t.TempDir(), "key"))
+
+	if _, err := manager.StartPairing(ctx, "Main Faro"); err == nil {
+		t.Fatal("pairing started without a generated CoreDNS configuration")
+	}
+	status, err := manager.PublicStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Role != RoleStandalone || status.ConfigRevision != 0 {
+		t.Fatalf("failed initialization left partial controller state: %#v", status)
+	}
+
+	writeRedundancyFiles(t, configDir)
+	if _, err := manager.StartPairing(ctx, "Main Faro"); err != nil {
+		t.Fatal(err)
+	}
+	status, err = manager.PublicStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Role != RoleController || status.ConfigRevision != 1 {
+		t.Fatalf("controller was not initialized atomically: %#v", status)
+	}
+}
+
+func TestStartPairingRepairsLegacyRevisionZeroController(t *testing.T) {
+	ctx := context.Background()
+	store := openRedundancyStore(t)
+	configDir := t.TempDir()
+	writeRedundancyFiles(t, configDir)
+	if _, err := store.DB.Exec(`
+		UPDATE redundancy_state
+		SET role = ?, home_id = 'legacy-home', config_revision = 0
+		WHERE id = 1`, RoleController); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store, nil, configDir, filepath.Join(t.TempDir(), "key"))
+
+	if _, err := manager.StartPairing(ctx, "Main Faro"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := manager.PublicStatus(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.ConfigRevision != 1 {
+		t.Fatalf("legacy controller was not repaired: %#v", status)
+	}
+	var snapshots int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM redundancy_snapshots WHERE revision = 1`).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 1 {
+		t.Fatalf("expected one repaired snapshot, got %d", snapshots)
+	}
+}
+
+func TestReadGeneratedFilesOnlyIncludesCorefileReferences(t *testing.T) {
+	configDir := t.TempDir()
+	corefile := ".:53 {\n  hosts /etc/coredns/protection-1.hosts\n  forward . 1.1.1.1\n}\n"
+	for name, content := range map[string]string{
+		"Corefile":           corefile,
+		"protection-1.hosts": "0.0.0.0 active.example\n",
+		"protection-2.hosts": "0.0.0.0 inactive.example\n",
+		"faro.hosts":         strings.Repeat("0.0.0.0 duplicate.example\n", 100),
+		"blocklist.hosts":    strings.Repeat("0.0.0.0 duplicate.example\n", 100),
+		"local.hosts":        "192.168.1.1 router.home\n",
+	} {
+		if err := os.WriteFile(filepath.Join(configDir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files, err := readGeneratedFiles(configDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 || files["protection-1.hosts"] == "" || files["Corefile"] != corefile {
+		t.Fatalf("unexpected synchronized files: %#v", files)
+	}
+	for _, omitted := range []string{"protection-2.hosts", "faro.hosts", "blocklist.hosts", "local.hosts"} {
+		if _, exists := files[omitted]; exists {
+			t.Fatalf("unused generated file %q was included", omitted)
+		}
+	}
+}
+
+func TestSnapshotCompressionRoundTrip(t *testing.T) {
+	snapshot := ConfigSnapshot{
+		SchemaVersion: snapshotSchemaVersion,
+		HomeID:        "home",
+		Revision:      1,
+		Files: map[string]string{
+			"Corefile":           ".:53 {\n  hosts /etc/coredns/protection-1.hosts\n  forward . 1.1.1.1\n}\n",
+			"protection-1.hosts": strings.Repeat("0.0.0.0 advertising.example\n", 200),
+		},
+		RuntimeSettings: map[string]string{"upstream_dns": "1.1.1.1", "upstream_transport": "standard"},
+	}
+	payload, err := encodeSnapshot(snapshot, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(payload), string(gzipHeader)) {
+		t.Fatal("oversized snapshot was not compressed")
+	}
+	decoded, err := decodeSnapshot(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.HomeID != snapshot.HomeID || decoded.Revision != snapshot.Revision ||
+		decoded.Files["protection-1.hosts"] != snapshot.Files["protection-1.hosts"] {
+		t.Fatalf("compressed snapshot changed during round trip: %#v", decoded)
+	}
+}
+
+func writeRedundancyFiles(t *testing.T, configDir string) {
+	t.Helper()
+	if err := os.WriteFile(
+		filepath.Join(configDir, "Corefile"),
+		[]byte(".:53 {\n  hosts /etc/coredns/protection-1.hosts\n  forward . 1.1.1.1\n}\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "protection-1.hosts"), []byte("0.0.0.0 ads.example\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

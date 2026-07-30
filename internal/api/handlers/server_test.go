@@ -127,6 +127,28 @@ func TestReplicaRejectsConfigurationWritesAtServerBoundary(t *testing.T) {
 	if lookalikeResponse.Code != http.StatusConflict || called {
 		t.Fatalf("replica lookalike write status = %d, downstream called = %v", lookalikeResponse.Code, called)
 	}
+
+	called = false
+	loginResponse := httptest.NewRecorder()
+	handler.ServeHTTP(loginResponse, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewBufferString(`{}`)))
+	if loginResponse.Code != http.StatusNoContent || !called {
+		t.Fatalf("replica login status = %d, downstream called = %v", loginResponse.Code, called)
+	}
+}
+
+func TestUnconfiguredReplicaExitStillRejectsCrossOriginRequests(t *testing.T) {
+	handler := cors(false, func(context.Context) bool { return false }, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	request := httptest.NewRequest(http.MethodDelete, "http://faro.local/api/redundancy", nil)
+	request.Host = "faro.local"
+	request.Header.Set("Origin", "https://attacker.example")
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin replica exit status = %d, want %d", response.Code, http.StatusForbidden)
+	}
 }
 
 func TestFailedDNSReloadRestoresPreviousSettings(t *testing.T) {

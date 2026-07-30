@@ -288,6 +288,17 @@ func (m *Manager) Require(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if r.Method == http.MethodDelete && r.URL.Path == "/api/redundancy" {
+			configured, err := m.configured(r.Context())
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "could not verify Faro authentication")
+				return
+			}
+			if !configured {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
 		user, ok := m.authenticate(r)
 		if !ok {
 			writeError(w, http.StatusUnauthorized, "authentication required")

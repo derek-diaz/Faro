@@ -64,8 +64,9 @@ export function JoinExistingFaro({ onBack, onJoined }: {
   );
 }
 
-export function ReplicaNodeScreen({ initialStatus, authenticated, username, onLeft }: {
+export function ReplicaNodeScreen({ initialStatus, configured, authenticated, username, onLeft }: {
   initialStatus: RedundancyPublicStatus;
+  configured: boolean;
   authenticated: boolean;
   username?: string;
   onLeft: (status: RedundancyPublicStatus) => void;
@@ -98,15 +99,16 @@ export function ReplicaNodeScreen({ initialStatus, authenticated, username, onLe
     }
     window.setTimeout(() => setCopyState("idle"), 2500);
   }
+  const requiresAuthentication = configured && !authenticated;
   async function leaveRedundancy() {
-    if (!authenticated && (!adminName.trim() || !adminPassword)) {
+    if (requiresAuthentication && (!adminName.trim() || !adminPassword)) {
       setLeaveError("Enter the Faro administrator username and password.");
       return;
     }
     setLeaveBusy(true);
     setLeaveError("");
     try {
-      if (!authenticated) await api.login(adminName.trim(), adminPassword);
+      if (requiresAuthentication) await api.login(adminName.trim(), adminPassword);
       const result = await api.leaveRedundancy();
       onLeft(result.status);
     } catch (caught) {
@@ -145,16 +147,18 @@ export function ReplicaNodeScreen({ initialStatus, authenticated, username, onLe
           confirmLabel="Leave Faro home"
           busyLabel="Restoring standalone DNS…"
           busy={leaveBusy}
+          icon={<LogOut size={20} />}
+          autoFocusCancel={false}
           onCancel={() => { setLeaveOpen(false); setLeaveError(""); setAdminPassword(""); }}
           onConfirm={() => void leaveRedundancy()}
           detail={(
             <>
-              <div className="confirm-dialog-impact warning"><AlertTriangle size={18} /><span><strong>Update your router first</strong><small>Remove this server's DNS address from DHCP before leaving, or devices may continue sending requests to it while it is being reconfigured.</small></span></div>
-              {!authenticated && (
+              <div className="confirm-dialog-impact warning"><AlertTriangle size={18} /><span><strong>Check your router afterward</strong><small>If this server is listed as a DNS address in DHCP, remove it after Faro returns to standalone mode.</small></span></div>
+              {requiresAuthentication && (
                 <div className="replica-leave-auth">
                   <p>Administrator confirmation</p>
                   <label><span>Username</span><input value={adminName} onChange={(event) => setAdminName(event.target.value)} autoComplete="username" /></label>
-                  <label><span>Password</span><input type="password" value={adminPassword} onChange={(event) => setAdminPassword(event.target.value)} autoComplete="current-password" /></label>
+                  <label><span>Password</span><input autoFocus type="password" value={adminPassword} onChange={(event) => setAdminPassword(event.target.value)} autoComplete="current-password" /></label>
                 </div>
               )}
               {leaveError && <div className="replica-leave-error" role="alert">{leaveError}</div>}

@@ -97,6 +97,7 @@ export function App() {
     return (
       <ReplicaNodeScreen
         initialStatus={redundancy}
+        configured={auth.configured}
         authenticated={auth.authenticated}
         username={auth.username}
         onLeft={(next) => {

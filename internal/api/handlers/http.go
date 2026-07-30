@@ -62,8 +62,9 @@ func cors(trustProxy bool, onboardingComplete func(context.Context) bool, next h
 		crossOrigin := origin != "" && !sameOrigin(r, origin, trustProxy)
 		crossSite := strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site")
 		initializing := r.URL.Path == "/api/auth/setup"
+		localRedundancyExit := r.Method == http.MethodDelete && r.URL.Path == "/api/redundancy"
 		if !initializing && (crossOrigin || crossSite) {
-			initializing = !onboardingComplete(r.Context())
+			initializing = !localRedundancyExit && !onboardingComplete(r.Context())
 		}
 		if !initializing && crossOrigin {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cross-origin requests are not allowed"})

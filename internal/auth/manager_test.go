@@ -62,6 +62,36 @@ func TestSetupIsRejectedOnReplica(t *testing.T) {
 	}
 }
 
+func TestUnconfiguredInstallationCanLeaveRedundancyWithoutSession(t *testing.T) {
+	manager := newTestManager(t)
+	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	response := httptest.NewRecorder()
+	protected.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/api/redundancy", nil))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("unconfigured redundancy exit status = %d, want %d", response.Code, http.StatusNoContent)
+	}
+}
+
+func TestConfiguredInstallationRequiresSessionToLeaveRedundancy(t *testing.T) {
+	manager := newTestManager(t)
+	setup := httptest.NewRequest(http.MethodPost, "/api/auth/setup", bytes.NewBufferString(`{"username":"admin","password":"correct-horse-battery-staple"}`))
+	setupResponse := httptest.NewRecorder()
+	manager.Setup(setupResponse, setup)
+	if setupResponse.Code != http.StatusCreated {
+		t.Fatalf("setup status = %d, body = %s", setupResponse.Code, setupResponse.Body.String())
+	}
+	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	response := httptest.NewRecorder()
+	protected.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/api/redundancy", nil))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("configured redundancy exit status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestHealthAndMetricsRemainPublic(t *testing.T) {
 	manager := newTestManager(t)
 	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))

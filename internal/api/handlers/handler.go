@@ -137,6 +137,10 @@ func replicaReadOnly(store *db.Store, next http.Handler) http.Handler {
 			next.ServeHTTP(w, request)
 			return
 		}
+		if request.Method == http.MethodPost && (request.URL.Path == "/api/auth/login" || request.URL.Path == "/api/auth/logout") {
+			next.ServeHTTP(w, request)
+			return
+		}
 		var role string
 		if err := store.DB.QueryRowContext(request.Context(), `SELECT role FROM redundancy_state WHERE id = 1`).Scan(&role); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify this Faro server's role"})

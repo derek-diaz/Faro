@@ -4,11 +4,42 @@ type DomainFaviconProps = {
   domain: string;
 };
 
+const publicDomainPattern = /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/;
+
+function canFetchFavicon(domain: string) {
+  const normalized = domain.trim().toLowerCase().replace(/\.$/, "");
+  if (normalized.length > 253 || !publicDomainPattern.test(normalized)) {
+    return false;
+  }
+
+  const labels = normalized.split(".");
+  if (!labels.every((label) =>
+    label.length > 0 &&
+    label.length <= 63 &&
+    !label.startsWith("-") &&
+    !label.endsWith("-")
+  )) {
+    return false;
+  }
+
+  let repeatedLabels = 1;
+  for (let index = 1; index < labels.length; index += 1) {
+    repeatedLabels = labels[index] === labels[index - 1] ? repeatedLabels + 1 : 1;
+    if (repeatedLabels >= 3) {
+      return false;
+    }
+  }
+
+  return !normalized.endsWith(".home") &&
+    !normalized.endsWith(".lan") &&
+    !normalized.endsWith(".local");
+}
+
 export function DomainFavicon({ domain }: DomainFaviconProps) {
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const initial = domain.slice(0, 1).toUpperCase();
-  const canFetch = domain.includes(".") && !domain.endsWith(".home") && !domain.endsWith(".lan") && !domain.endsWith(".local");
+  const canFetch = canFetchFavicon(domain);
 
   useEffect(() => {
     setImageSrc(null);

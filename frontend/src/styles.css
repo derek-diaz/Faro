@@ -13436,6 +13436,14 @@ select {
   background: var(--surface-muted);
 }
 
+:root[data-theme-resolved="dark"] .redundancy-nodes-panel > .panel-title {
+  border-color: var(--border-subtle);
+}
+
+:root[data-theme-resolved="dark"] .redundancy-node-list {
+  background: var(--surface-subtle);
+}
+
 :root[data-theme-resolved="dark"] :is(.redundancy-node.healthy, .redundancy-node.warning, .redundancy-node.syncing) {
   border-color: var(--border);
 }

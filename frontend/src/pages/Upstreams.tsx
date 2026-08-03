@@ -257,7 +257,11 @@ export function Upstreams({ settings, refresh }: UpstreamsProps) {
                       aria-pressed={fullySelected}
                       disabled={encryptedUnavailable}
                     >
-                      <span className="profile-check">{fullySelected ? <Check size={16} /> : partiallySelected ? selectedCount : null}</span>
+                      {(fullySelected || partiallySelected) && (
+                        <span className="profile-check" aria-hidden="true">
+                          {fullySelected ? <Check size={16} /> : selectedCount}
+                        </span>
+                      )}
                       <span className="profile-copy">
                         <span className="profile-title-row">
                           <strong>{profile.name}</strong>

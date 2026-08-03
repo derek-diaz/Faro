@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Comodo Secure DNS">
+  <rect width="64" height="64" rx="13" fill="#0e376d"/>
+  <path d="M32 8 51 15v16c0 13-7.5 21.5-19 26C20.5 52.5 13 44 13 31V15Z" fill="#fff"/>
+  <path d="M43 24c-2-4-5.5-6-10-6-7 0-12 5.5-12 14s5 14 12 14c4.5 0 8-2 10-6l-6-3c-1 2-2 3-4 3-3 0-5-3-5-8s2-8 5-8c2 0 3 1 4 3Z" fill="#e5464f"/>
+</svg>

@@ -249,6 +249,8 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_client_ip ON dns_queries(client_ip);`,
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_client_timestamp ON dns_queries(client_ip, timestamp);`,
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_action ON dns_queries(action);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_source_timestamp ON dns_queries(source, timestamp);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_action_timestamp ON dns_queries(action, timestamp);`,
 		`CREATE TABLE IF NOT EXISTS settings (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL,
@@ -311,6 +313,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);`,
+		`CREATE INDEX IF NOT EXISTS idx_events_timestamp_id ON events(timestamp, id);`,
 		`CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);`,
 		`CREATE INDEX IF NOT EXISTS idx_events_severity ON events(severity);`,
 		`CREATE INDEX IF NOT EXISTS idx_events_domain ON events(domain);`,

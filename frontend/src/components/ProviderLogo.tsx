@@ -3,7 +3,9 @@ import { useState } from "react";
 const providerAssets: Record<string, string> = {
   adguard: "/providers/adguard.ico",
   cloudflare: "/providers/cloudflare.ico",
+  comodo: "/providers/comodo.svg",
   google: "/providers/google.ico",
+  level3: "/providers/level3.svg",
   opendns: "/providers/opendns.svg",
   quad9: "/providers/quad9.svg"
 };

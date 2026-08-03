@@ -1,5 +1,5 @@
-import { Ban, CheckCircle2, ChevronLeft, ChevronRight, Filter, Search, ShieldCheck, SlidersHorizontal, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Activity, Ban, CheckCircle2, ChevronLeft, ChevronRight, Filter, Globe2, Search, Settings2, ShieldCheck, ShieldX, X } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 import { api, type ActivityPage, type FaroEvent } from "../api/client";
 import { DomainFavicon } from "../components/DomainFavicon";
 import { EmptyState } from "../components/EmptyState";
@@ -97,14 +97,13 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
           <button className="clear-search" type="button" disabled={!searchInput && !search} onClick={clearSearch} aria-label="Clear search"><X size={16} /></button>
           <button className="search-submit" type="submit">Search</button>
         </form>
-        <div className="activity-scope"><SlidersHorizontal size={16} /><span>Complete retained history</span></div>
       </section>
 
       <section className="activity-summary" aria-label="Activity summary">
-        <ActivityStat label="All events" value={counts.all} />
-        <ActivityStat label="DNS requests" value={counts.dns} />
-        <ActivityStat label="Blocked" value={counts.blocked} tone="blocked" />
-        <ActivityStat label="System changes" value={counts.system} />
+        <ActivityStat icon={<Activity size={16} />} label="All events" value={counts.all} tone="all" />
+        <ActivityStat icon={<Globe2 size={16} />} label="DNS requests" value={counts.dns} tone="dns" />
+        <ActivityStat icon={<ShieldX size={16} />} label="Blocked" value={counts.blocked} tone="blocked" />
+        <ActivityStat icon={<Settings2 size={16} />} label="System changes" value={counts.system} tone="system" />
       </section>
 
       <section className="panel activity-results-panel">
@@ -204,8 +203,8 @@ function eventUpstream(event: FaroEvent) {
   return typeof value === "string" ? value : null;
 }
 
-function ActivityStat({ label, value, tone = "default" }: { label: string; value: number; tone?: "default" | "blocked" }) {
-  return <div className={`activity-stat ${tone}`}><span>{label}</span><strong>{value}</strong></div>;
+function ActivityStat({ icon, label, value, tone = "all" }: { icon: ReactNode; label: string; value: number; tone?: "all" | "dns" | "blocked" | "system" }) {
+  return <div className={`activity-stat ${tone}`}><span className="activity-stat-icon" aria-hidden="true">{icon}</span><div className="activity-stat-copy"><span>{label}</span><strong>{value}</strong></div></div>;
 }
 
 function FilterButton({ active, label, count, onClick }: { active: boolean; label: string; count: number; onClick: () => void }) {

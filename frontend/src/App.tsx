@@ -26,6 +26,7 @@ import { QueryLog } from "./pages/QueryLog";
 import { ProtectionPage } from "./pages/Protection";
 import { Settings } from "./pages/Settings";
 import { Upstreams } from "./pages/Upstreams";
+import { applyThemeMode, persistThemeMode, readThemeMode, type ThemeMode } from "./theme";
 
 export type Page = "dashboard" | "queries" | "devices" | "records" | "upstreams" | "protection" | "blocklists" | "settings";
 
@@ -120,6 +121,7 @@ export function App() {
 }
 
 function AuthenticatedApp({ username, onSignedOut }: { username: string; onSignedOut: () => void }) {
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const [initialRoute] = useState(readRoute);
   const [page, setPageState] = useState<Page>(initialRoute.page);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -138,6 +140,16 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
   const liveRefreshBusy = useRef(false);
 
   const apiState = useMemo(() => (loading ? "checking" : error ? "offline" : "online"), [loading, error]);
+
+  useEffect(() => {
+    applyThemeMode(themeMode);
+    persistThemeMode(themeMode);
+    if (themeMode !== "system") return undefined;
+    const preference = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateResolvedTheme = () => applyThemeMode(themeMode);
+    preference.addEventListener("change", updateResolvedTheme);
+    return () => preference.removeEventListener("change", updateResolvedTheme);
+  }, [themeMode]);
 
   async function loadAll() {
     setLoading(true);
@@ -361,6 +373,8 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
     <Layout
       page={page}
       setPage={navigateToPage}
+      themeMode={themeMode}
+      onThemeModeChange={setThemeMode}
       apiState={apiState}
       onOpenSearch={() => setSearchOpen(true)}
       notifications={notifications}

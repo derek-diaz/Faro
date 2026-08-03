@@ -23,21 +23,23 @@ type CoreDNSManager interface {
 }
 
 type Handler struct {
-	store         *db.Store
-	reloader      CoreDNSManager
-	refresher     blocklists.Refresher
-	deviceNames   *deviceNameResolver
-	deviceCatalog *devicecatalog.Manager
-	faviconDir    string
-	faviconLocks  [32]sync.Mutex
-	metricsURL    string
-	upstreams     *upstreamhealth.Monitor
-	backups       *farobackup.Service
-	unifi         *unifi.Manager
-	classifier    *devicecatalog.Classifier
-	redundancy    *redundancy.Manager
-	startedAt     time.Time
-	configMu      sync.Mutex
+	store               *db.Store
+	reloader            CoreDNSManager
+	refresher           blocklists.Refresher
+	deviceNames         *deviceNameResolver
+	deviceCatalog       *devicecatalog.Manager
+	faviconDir          string
+	faviconLocks        [32]sync.Mutex
+	metricsURL          string
+	upstreams           *upstreamhealth.Monitor
+	backups             *farobackup.Service
+	unifi               *unifi.Manager
+	classifier          *devicecatalog.Classifier
+	redundancy          *redundancy.Manager
+	startedAt           time.Time
+	configMu            sync.Mutex
+	activityCountsMu    sync.Mutex
+	activityCountsCache map[string]activityCountCacheEntry
 }
 
 func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Monitor, dependencies ...any) http.Handler {

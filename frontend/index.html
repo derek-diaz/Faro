@@ -4,6 +4,21 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#071827" />
+    <script>
+      (() => {
+        try {
+          const mode = window.localStorage.getItem("faro-theme");
+          const selected = mode === "light" || mode === "dark" || mode === "system" ? mode : "system";
+          document.documentElement.dataset.theme = selected;
+          document.documentElement.dataset.themeResolved = selected === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : selected;
+          document.querySelector('meta[name="theme-color"]')?.setAttribute("content", document.documentElement.dataset.themeResolved === "dark" ? "#0e1923" : "#eaf0f4");
+        } catch {
+          document.documentElement.dataset.theme = "system";
+          document.documentElement.dataset.themeResolved = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+          document.querySelector('meta[name="theme-color"]')?.setAttribute("content", document.documentElement.dataset.themeResolved === "dark" ? "#0e1923" : "#eaf0f4");
+        }
+      })();
+    </script>
     <link rel="icon" href="/logos/web/favicon.ico" sizes="any" />
     <link rel="apple-touch-icon" href="/logos/web/apple-touch-icon.png" />
     <link rel="manifest" href="/manifest.webmanifest" />

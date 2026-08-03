@@ -11,13 +11,17 @@ import {
 	Router,
 	Search,
 	Settings,
-	ShieldCheck
+	ShieldCheck,
+	Moon,
+	Sun,
+	SunMoon
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { NotificationsResponse } from "../api/client";
 import type { Page } from "../App";
 import { BrandLogo } from "./BrandLogo";
+import type { ThemeMode } from "../theme";
 
 const navItems: { id: Page; label: string; description: string; href: string; icon: LucideIcon }[] = [
   { id: "dashboard", label: "Dashboard", description: "Live network health and DNS traffic at a glance.", href: "/", icon: BarChart3 },
@@ -33,6 +37,8 @@ const navItems: { id: Page; label: string; description: string; href: string; ic
 type LayoutProps = {
   page: Page;
   setPage: (page: Page) => void;
+  themeMode: ThemeMode;
+  onThemeModeChange: (mode: ThemeMode) => void;
   children: ReactNode;
   apiState: "checking" | "online" | "offline";
   onOpenSearch: () => void;
@@ -42,7 +48,7 @@ type LayoutProps = {
   onSignOut: () => Promise<void>;
 };
 
-export function Layout({ page, setPage, children, apiState, onOpenSearch, notifications, onOpenNotifications, username, onSignOut }: LayoutProps) {
+export function Layout({ page, setPage, themeMode, onThemeModeChange, children, apiState, onOpenSearch, notifications, onOpenNotifications, username, onSignOut }: LayoutProps) {
   const currentPage = navItems.find((item) => item.id === page) ?? navItems[0];
   return (
     <div className="app-shell">
@@ -93,6 +99,30 @@ export function Layout({ page, setPage, children, apiState, onOpenSearch, notifi
               <Bell size={18} />
               {notifications.unread_count > 0 && <span>{Math.min(notifications.unread_count, 9)}</span>}
             </button>
+            <details className="theme-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute("open"); }}>
+              <summary className="icon-button" aria-label="Choose appearance" title="Choose appearance">
+                {themeMode === "dark" ? <Moon size={18} /> : themeMode === "light" ? <Sun size={18} /> : <SunMoon size={18} />}
+              </summary>
+              <div className="theme-menu-popover" role="menu" aria-label="Appearance">
+                <span>Appearance</span>
+                {(["system", "light", "dark"] as ThemeMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={themeMode === mode}
+                    className={themeMode === mode ? "selected" : ""}
+                    onClick={(event) => {
+                      onThemeModeChange(mode);
+                      event.currentTarget.closest("details")?.removeAttribute("open");
+                    }}
+                  >
+                    {mode === "system" ? <SunMoon size={15} /> : mode === "light" ? <Sun size={15} /> : <Moon size={15} />}
+                    <span>{mode === "system" ? "System" : mode === "light" ? "Light" : "Dark"}</span>
+                  </button>
+                ))}
+              </div>
+            </details>
             <details className="account-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute("open"); }} onKeyDown={(event) => { if (event.key === "Escape") { event.currentTarget.removeAttribute("open"); event.currentTarget.querySelector("summary")?.focus(); } }}>
               <summary aria-label={`Account menu for ${username}`}><UserBadge username={username} /><ChevronDown size={14} /></summary>
               <div className="account-menu-popover">

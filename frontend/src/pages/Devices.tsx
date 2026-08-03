@@ -83,6 +83,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
   const [aliasSaving, setAliasSaving] = useState(false);
   const [view, setView] = useState<DeviceView>("overview");
   const [search, setSearch] = useState("");
+  const [activeTodayOnly, setActiveTodayOnly] = useState(false);
   const [sort, setSort] = useState<{ key: DeviceSortKey; direction: SortDirection }>({ key: "device", direction: "asc" });
   const [page, setPage] = useState(1);
   const [inventory, setInventory] = useState<DeviceInventoryPage>(() => inventoryFromDevices(devices));
@@ -111,7 +112,8 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
         pageSize: 50,
         search: search.trim(),
         sort: sort.key,
-        direction: sort.direction
+        direction: sort.direction,
+        activeToday: activeTodayOnly
       }, conditional ? inventoryETag.current : "", controller.signal);
       if (result.page) {
         setInventory(result.page);
@@ -127,7 +129,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
         setInventoryLoading(false);
       }
     }
-  }, [page, search, sort.direction, sort.key]);
+  }, [activeTodayOnly, page, search, sort.direction, sort.key]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -149,7 +151,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
 
   useEffect(() => {
     setPage(1);
-  }, [search, sort]);
+  }, [activeTodayOnly, search, sort]);
 
   useEffect(() => {
     if (!selectedClientIP) {
@@ -287,12 +289,23 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
             <h2>Device inventory</h2>
             <p>Select a device to inspect its domains, activity, and history.</p>
           </div>
-          <label className="device-search">
-            <span className="sr-only">Search devices</span>
-            <Search size={16} />
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search devices" />
-            <kbd>{inventory.total}</kbd>
-          </label>
+          <div className="device-inventory-tools">
+            <button
+              type="button"
+              className={`device-activity-filter ${activeTodayOnly ? "active" : ""}`}
+              aria-pressed={activeTodayOnly}
+              onClick={() => setActiveTodayOnly((active) => !active)}
+            >
+              <Check size={14} />
+              Active today
+            </button>
+            <label className="device-search">
+              <span className="sr-only">Search devices</span>
+              <Search size={16} />
+              <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search devices" />
+              <kbd>{inventory.total}</kbd>
+            </label>
+          </div>
         </div>
 
         {inventoryError && <div className="device-inventory-error" role="alert">{inventoryError}</div>}
@@ -330,7 +343,12 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
         </div>
 
         {!inventoryLoading && inventoryDevices.length === 0 && (
-          <div className="device-filter-empty"><Search size={20} /><strong>No matching devices</strong><span>Try a name, IP address, device type, or location.</span></div>
+          <div className="device-filter-empty">
+            <Search size={20} />
+            <strong>{activeTodayOnly && !search ? "No active devices today" : "No matching devices"}</strong>
+            <span>{activeTodayOnly && !search ? "Show all devices to see the full synced inventory." : "Try a name, IP address, device type, or location."}</span>
+            {activeTodayOnly && !search && <button type="button" className="secondary" onClick={() => setActiveTodayOnly(false)}>Show all devices</button>}
+          </div>
         )}
         {inventory.total_pages > 1 && (
           <div className="device-pagination" aria-label="Device inventory pages">

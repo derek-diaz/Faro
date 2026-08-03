@@ -229,10 +229,6 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
                 <SummaryRow label="Favicons" value={form.favicon_fetching_enabled === "true" ? "Enabled" : "Disabled"} />
               </div>
             </section>
-            <section className="panel settings-note">
-              <CheckCircle2 size={19} />
-              <div><strong>Safe configuration updates</strong><span>Faro validates generated DNS files before replacing the active configuration.</span></div>
-            </section>
           </aside>
         </div>
       ) : tab === "redundancy" ? (

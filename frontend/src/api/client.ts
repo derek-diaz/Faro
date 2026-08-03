@@ -514,7 +514,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function deviceInventoryRequest(
-  options: { page: number; pageSize: number; search: string; sort: string; direction: string },
+  options: { page: number; pageSize: number; search: string; sort: string; direction: string; activeToday: boolean },
   etag = "",
   signal?: AbortSignal
 ): Promise<DeviceInventoryResult> {
@@ -524,7 +524,8 @@ async function deviceInventoryRequest(
     page_size: String(options.pageSize),
     search: options.search,
     sort: options.sort,
-    direction: options.direction
+    direction: options.direction,
+    active_today: String(options.activeToday)
   });
   const response = await fetch(`${API_BASE}/api/devices?${query}`, {
     signal,

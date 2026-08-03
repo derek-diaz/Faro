@@ -11,12 +11,13 @@ import (
 )
 
 type deviceInventoryOptions struct {
-	page      int
-	pageSize  int
-	search    string
-	sort      string
-	direction string
-	paged     bool
+	page        int
+	pageSize    int
+	search      string
+	sort        string
+	direction   string
+	activeToday bool
+	paged       bool
 }
 
 type inventoryBaseDevice struct {
@@ -95,7 +96,7 @@ func (s *Handler) deviceInventory(w http.ResponseWriter, r *http.Request) {
 func parseDeviceInventoryOptions(r *http.Request) (deviceInventoryOptions, error) {
 	query := r.URL.Query()
 	paged := query.Get("format") == "page" || query.Has("page") || query.Has("page_size") ||
-		query.Has("search") || query.Has("sort") || query.Has("direction")
+		query.Has("search") || query.Has("sort") || query.Has("direction") || query.Has("active_today")
 	options := deviceInventoryOptions{
 		page:      1,
 		pageSize:  50,
@@ -123,6 +124,13 @@ func parseDeviceInventoryOptions(r *http.Request) (deviceInventoryOptions, error
 	}
 	if len(options.search) > 100 {
 		return options, fmt.Errorf("search must be 100 characters or fewer")
+	}
+	if raw := query.Get("active_today"); raw != "" {
+		value, err := strconv.ParseBool(raw)
+		if err != nil {
+			return options, fmt.Errorf("active_today must be true or false")
+		}
+		options.activeToday = value
 	}
 	switch options.sort {
 	case "", "device":
@@ -167,7 +175,7 @@ func (s *Handler) deviceInventoryRevision(r *http.Request) (string, error) {
 }
 
 func deviceInventoryETag(revision string, options deviceInventoryOptions) string {
-	input := fmt.Sprintf("%s|%d|%d|%s|%s|%s", revision, options.page, options.pageSize, options.search, options.sort, options.direction)
+	input := fmt.Sprintf("%s|%d|%d|%s|%s|%s|%t", revision, options.page, options.pageSize, options.search, options.sort, options.direction, options.activeToday)
 	sum := sha256.Sum256([]byte(input))
 	return `"` + hex.EncodeToString(sum[:]) + `"`
 }
@@ -175,6 +183,10 @@ func deviceInventoryETag(revision string, options deviceInventoryOptions) string
 func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOptions) ([]map[string]any, int, deviceInventorySummary, error) {
 	start := todayStart(r)
 	searchPattern := "%" + strings.ToLower(options.search) + "%"
+	activeToday := 0
+	if options.activeToday {
+		activeToday = 1
+	}
 	sortExpression := map[string]string{
 		"device":     "LOWER(COALESCE(NULLIF(TRIM(d.name), ''), NULLIF(TRIM(un.name), ''), NULLIF(TRIM(local.name), ''), la.address, ''))",
 		"requests":   "COALESCE(day.total, 0)",
@@ -254,21 +266,24 @@ func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOp
 		LEFT JOIN device_protection_assignments legacy ON legacy.client_ip = la.address
 		LEFT JOIN protection_profiles legacy_profile ON legacy_profile.id = legacy.protection_id
 		LEFT JOIN protection_profiles default_profile ON default_profile.is_default = 1
-		WHERE ? = ''
-		   OR LOWER(d.name) LIKE ?
-		   OR LOWER(COALESCE(un.name, '')) LIKE ?
-		   OR LOWER(COALESCE(local.name, '')) LIKE ?
-		   OR LOWER(COALESCE(la.address, '')) LIKE ?
-		   OR LOWER(COALESCE(NULLIF(d.device_type, ''), classification.predicted_type, '')) LIKE ?
-		   OR LOWER(COALESCE(d.location, '')) LIKE ?
-		   OR LOWER(COALESCE(member_profile.name, legacy_profile.name, default_profile.name, 'Home')) LIKE ?
-		   OR EXISTS (
+		WHERE (? = 0 OR COALESCE(day.total, 0) > 0)
+		  AND (
+		       ? = ''
+		       OR LOWER(d.name) LIKE ?
+		       OR LOWER(COALESCE(un.name, '')) LIKE ?
+		       OR LOWER(COALESCE(local.name, '')) LIKE ?
+		       OR LOWER(COALESCE(la.address, '')) LIKE ?
+		       OR LOWER(COALESCE(NULLIF(d.device_type, ''), classification.predicted_type, '')) LIKE ?
+		       OR LOWER(COALESCE(d.location, '')) LIKE ?
+		       OR LOWER(COALESCE(member_profile.name, legacy_profile.name, default_profile.name, 'Home')) LIKE ?
+		       OR EXISTS (
 				SELECT 1 FROM device_addresses searched
 				WHERE searched.device_id = d.id AND LOWER(searched.address) LIKE ?
-		   )
+		       )
+		  )
 		ORDER BY `+sortExpression+` `+order+`, d.id ASC
 		LIMIT ? OFFSET ?
-	`, start, options.search, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern,
+	`, start, activeToday, options.search, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern, searchPattern,
 		searchPattern, searchPattern, options.pageSize, (options.page-1)*options.pageSize)
 	if err != nil {
 		return nil, 0, deviceInventorySummary{}, err
@@ -294,7 +309,7 @@ func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOp
 		return nil, 0, deviceInventorySummary{}, err
 	}
 	if len(baseDevices) == 0 {
-		total, err = s.inventoryMatchingCount(r, options.search)
+		total, err = s.inventoryMatchingCount(r, start, options.search, options.activeToday)
 		if err != nil {
 			return nil, 0, deviceInventorySummary{}, err
 		}
@@ -350,11 +365,22 @@ func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOp
 	return items, total, summary, nil
 }
 
-func (s *Handler) inventoryMatchingCount(r *http.Request, search string) (int, error) {
+func (s *Handler) inventoryMatchingCount(r *http.Request, start, search string, activeOnly bool) (int, error) {
 	pattern := "%" + strings.ToLower(search) + "%"
+	activeToday := 0
+	if activeOnly {
+		activeToday = 1
+	}
 	var total int
 	err := s.store.DB.QueryRowContext(r.Context(), `
-		WITH latest_address AS (
+		WITH
+		day AS (
+			SELECT device_id, COUNT(*) AS total
+			FROM dns_queries
+			WHERE timestamp >= ? AND device_id IS NOT NULL
+			GROUP BY device_id
+		),
+		latest_address AS (
 			SELECT device_id, address
 			FROM (
 				SELECT device_id, address,
@@ -376,6 +402,7 @@ func (s *Handler) inventoryMatchingCount(r *http.Request, search string) (int, e
 		SELECT COUNT(*)
 		FROM devices d
 		LEFT JOIN latest_address la ON la.device_id = d.id
+		LEFT JOIN day ON day.device_id = d.id
 		LEFT JOIN device_names un ON un.device_id = d.id AND un.source = 'unifi'
 		LEFT JOIN local_name local ON local.value = la.address
 		LEFT JOIN device_classifications classification ON classification.device_id = d.id
@@ -384,19 +411,22 @@ func (s *Handler) inventoryMatchingCount(r *http.Request, search string) (int, e
 		LEFT JOIN device_protection_assignments legacy ON legacy.client_ip = la.address
 		LEFT JOIN protection_profiles legacy_profile ON legacy_profile.id = legacy.protection_id
 		LEFT JOIN protection_profiles default_profile ON default_profile.is_default = 1
-		WHERE ? = ''
-		   OR LOWER(d.name) LIKE ?
-		   OR LOWER(COALESCE(un.name, '')) LIKE ?
-		   OR LOWER(COALESCE(local.name, '')) LIKE ?
-		   OR LOWER(COALESCE(la.address, '')) LIKE ?
-		   OR LOWER(COALESCE(NULLIF(d.device_type, ''), classification.predicted_type, '')) LIKE ?
-		   OR LOWER(COALESCE(d.location, '')) LIKE ?
-		   OR LOWER(COALESCE(member_profile.name, legacy_profile.name, default_profile.name, 'Home')) LIKE ?
-		   OR EXISTS (
+		WHERE (? = 0 OR COALESCE(day.total, 0) > 0)
+		  AND (
+		       ? = ''
+		       OR LOWER(d.name) LIKE ?
+		       OR LOWER(COALESCE(un.name, '')) LIKE ?
+		       OR LOWER(COALESCE(local.name, '')) LIKE ?
+		       OR LOWER(COALESCE(la.address, '')) LIKE ?
+		       OR LOWER(COALESCE(NULLIF(d.device_type, ''), classification.predicted_type, '')) LIKE ?
+		       OR LOWER(COALESCE(d.location, '')) LIKE ?
+		       OR LOWER(COALESCE(member_profile.name, legacy_profile.name, default_profile.name, 'Home')) LIKE ?
+		       OR EXISTS (
 				SELECT 1 FROM device_addresses searched
 				WHERE searched.device_id = d.id AND LOWER(searched.address) LIKE ?
-		   )
-	`, search, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern).Scan(&total)
+		       )
+		  )
+	`, start, activeToday, search, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern).Scan(&total)
 	return total, err
 }
 

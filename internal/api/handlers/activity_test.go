@@ -67,3 +67,72 @@ func TestEventsPaginationUsesFullActivityHistory(t *testing.T) {
 		t.Fatalf("unexpected counts: %#v", payload.Counts)
 	}
 }
+
+func TestEventsPaginationMergesPersistedAndDerivedActivity(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, err := store.DB.Exec(`
+		INSERT INTO events(timestamp, type, severity, title, description, source)
+		VALUES('2026-07-12T12:00:03Z', 'dns.reload_failed', 'critical', 'Reload failed', 'CoreDNS rejected a configuration.', 'dns')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	for index, timestamp := range []string{"2026-07-12T12:00:02Z", "2026-07-12T12:00:01Z"} {
+		if _, err := store.DB.Exec(`
+			INSERT INTO dns_queries(timestamp, client_ip, domain, query_type, action, source)
+			VALUES(?, '192.168.7.21', ?, 'A', 'allowed', 'upstream')
+		`, timestamp, fmt.Sprintf("merged%d.example", index)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	handler := &Handler{store: store}
+	requestPage := func(page int) struct {
+		Items []struct {
+			ID string `json:"id"`
+		}
+		Page       int            `json:"page"`
+		Total      int            `json:"total"`
+		TotalPages int            `json:"total_pages"`
+		Counts     map[string]int `json:"counts"`
+	} {
+		request := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/events?scope=all&page=%d&page_size=2", page), nil)
+		response := httptest.NewRecorder()
+		handler.events(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("page %d status = %d, body = %s", page, response.Code, response.Body.String())
+		}
+		var payload struct {
+			Items []struct {
+				ID string `json:"id"`
+			}
+			Page       int            `json:"page"`
+			Total      int            `json:"total"`
+			TotalPages int            `json:"total_pages"`
+			Counts     map[string]int `json:"counts"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+
+	first := requestPage(1)
+	second := requestPage(2)
+	if first.Page != 1 || first.Total != 4 || first.TotalPages != 2 {
+		t.Fatalf("unexpected first-page metadata: %#v", first)
+	}
+	if len(first.Items) != 2 || first.Items[0].ID != "event-1" || first.Items[1].ID != "query-1" {
+		t.Fatalf("unexpected first page: %#v", first.Items)
+	}
+	if second.Page != 2 || len(second.Items) != 2 || second.Items[0].ID != "device-first-seen-192.168.7.21" || second.Items[1].ID != "query-2" {
+		t.Fatalf("unexpected second page: %#v", second.Items)
+	}
+	if first.Counts["all"] != 4 || first.Counts["dns"] != 2 || first.Counts["system"] != 2 {
+		t.Fatalf("unexpected merged counts: %#v", first.Counts)
+	}
+}

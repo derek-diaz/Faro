@@ -70,6 +70,24 @@ export const upstreamProviders: ResolverProvider[] = [
       { id: "opendns-standard", name: "Standard", description: "Public DNS with basic security and optional account-based filtering.", addresses: ["208.67.222.222", "208.67.220.220"], mode: "security", badges: ["Security", "Customizable"], recommended: true },
       { id: "opendns-familyshield", name: "FamilyShield", description: "Preconfigured to block adult content without requiring an OpenDNS account.", addresses: ["208.67.222.123", "208.67.220.123"], mode: "family", badges: ["Security", "Family"] }
     ]
+  },
+  {
+    id: "level3",
+    name: "Level 3",
+    domain: "level3.com",
+    description: "Classic public DNS resolvers associated with the Level 3 network.",
+    profiles: [
+      { id: "level3-standard", name: "Standard", description: "Straightforward public DNS without content filtering.", addresses: ["4.2.2.1", "4.2.2.2"], mode: "none", badges: ["Unfiltered"] }
+    ]
+  },
+  {
+    id: "comodo",
+    name: "Comodo Secure DNS",
+    domain: "comodo.com",
+    description: "Security-focused public DNS with malware and phishing protection.",
+    profiles: [
+      { id: "comodo-secure", name: "Secure", description: "Blocks known malicious, phishing, and harmful domains.", addresses: ["8.26.56.26", "8.20.247.20"], mode: "security", badges: ["Security", "Malware blocking"] }
+    ]
   }
 ];
 

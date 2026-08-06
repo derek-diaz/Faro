@@ -35,7 +35,7 @@ import {
   Tv,
   X
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject, type SubmitEvent } from "react";
 import { api, type DeviceInventoryPage, type DeviceReplay as DeviceReplayData, type DeviceSummary, type DNSQuery, type Protection, type ReplayBucket } from "../api/client";
 import { DeviceReplay } from "../components/DeviceReplay";
 import { DomainFavicon } from "../components/DomainFavicon";
@@ -45,12 +45,12 @@ import { TrafficChart } from "../components/TrafficChart";
 import { ProtectionIcon } from "./Protection";
 
 type DevicesProps = {
-  devices: DeviceSummary[];
-  protections: Protection[];
-  refresh: () => Promise<void>;
-  selectedClientIP: string | null;
-  onSelectClient: (clientIP: string | null) => void;
-  onDomainSelect: (domain: string) => void;
+  readonly devices: DeviceSummary[];
+  readonly protections: Protection[];
+  readonly refresh: () => Promise<void>;
+  readonly selectedClientIP: string | null;
+  readonly onSelectClient: (clientIP: string | null) => void;
+  readonly onDomainSelect: (domain: string) => void;
 };
 
 type DeviceView = "overview" | "replay";
@@ -120,9 +120,9 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
         inventoryETag.current = result.etag;
       }
       setInventoryError("");
-    } catch (caught) {
-      if (caught instanceof DOMException && caught.name === "AbortError") return;
-      setInventoryError(caught instanceof Error ? caught.message : "Could not refresh the device inventory.");
+    } catch (error_) {
+      if (error_ instanceof DOMException && error_.name === "AbortError") return;
+      setInventoryError(error_ instanceof Error ? error_.message : "Could not refresh the device inventory.");
     } finally {
       if (inventoryRequest.current === controller) {
         inventoryBusy.current = false;
@@ -175,8 +175,8 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
           setForm({ name: nextDetail.name || "", location: nextDetail.location ?? "", notes: nextDetail.notes ?? "", device_type: nextDetail.type_source === "manual" ? nextDetail.device_type : "" });
         }
       })
-      .catch((caught: unknown) => {
-        if (!cancelled) setDetailError(caught instanceof Error ? caught.message : "Failed to load device details.");
+      .catch((error_: unknown) => {
+        if (!cancelled) setDetailError(error_ instanceof Error ? error_.message : "Failed to load device details.");
       })
       .finally(() => {
         if (!cancelled) setDetailLoading(false);
@@ -226,7 +226,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
       : 0
   };
 
-  async function saveAlias(event: FormEvent) {
+  async function saveAlias(event: SubmitEvent) {
     event.preventDefault();
     if (!selectedClientIP) return;
     setAliasSaving(true);
@@ -238,8 +238,8 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
       inventoryETag.current = "";
       await loadInventory(false);
       setDetail(await api.device(selectedClientIP));
-    } catch (caught) {
-      setDetailError(caught instanceof Error ? caught.message : "Could not save this device.");
+    } catch (error_) {
+      setDetailError(error_ instanceof Error ? error_.message : "Could not save this device.");
     } finally {
       setAliasSaving(false);
     }
@@ -256,8 +256,8 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
       inventoryETag.current = "";
       await loadInventory(false);
       setDetail(await api.device(selectedClientIP));
-    } catch (caught) {
-      setDetailError(caught instanceof Error ? caught.message : "Could not change protection.");
+    } catch (error_) {
+      setDetailError(error_ instanceof Error ? error_.message : "Could not change protection.");
     } finally {
       setProtectionBusy(false);
     }
@@ -362,95 +362,82 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
         )}
       </section>
 
-      {selectedClientIP && (
-        <div className="drawer-backdrop device-drawer-backdrop" onClick={() => onSelectClient(null)}>
-          <aside className="device-detail-drawer" role="dialog" aria-modal="true" aria-label="Device details" onClick={(event) => event.stopPropagation()}>
-            <header className="device-drawer-header">
-              <div><strong>Device details</strong><span>Inspect identity, traffic, and history without losing your place.</span></div>
-              <button className="icon-button" type="button" onClick={() => onSelectClient(null)} aria-label="Close device details"><X size={18} /></button>
-            </header>
-            <section className={`device-detail-panel ${view === "replay" ? "replay-active" : ""}`}>
-              {detailLoading && <div className="device-detail-loading">Loading device details...</div>}
-              {detailError && <div className="device-detail-error">{detailError}</div>}
-              {!detailLoading && detail && (
-                <>
-                  <div className="device-detail-header">
-                    <div className="device-detail-identity">
-                      <span className="device-detail-icon">{deviceTypeIcon(detail.device_type)}</span>
-                      <div>
-                        <div className="device-detail-context">
-                          <div className="device-protection-picker" ref={protectionMenuRef}>
-                            <button
-                              type="button"
-                              className="device-protection-trigger"
-                              aria-label={`Protection: ${activeProtectionName}`}
-                              aria-haspopup="listbox"
-                              aria-expanded={protectionMenuOpen}
-                              aria-controls="device-protection-options"
-                              disabled={protectionBusy || protections.length === 0}
-                              onClick={() => setProtectionMenuOpen((open) => !open)}
-                            >
-                              <ProtectionIcon name={activeProtection?.icon ?? detail.protection_icon} size={15} />
-                              <span>{protectionBusy ? "Applying…" : activeProtectionName}</span>
-                              <ChevronDown className={protectionMenuOpen ? "open" : ""} size={14} />
-                            </button>
-                            {protectionMenuOpen && (
-                              <div className="device-protection-menu" id="device-protection-options" role="listbox" aria-label="Choose protection">
-                                <div className="device-protection-menu-heading"><strong>Choose protection</strong><span>Changes apply to this device immediately.</span></div>
-                                {protections.map((protection) => {
-                                  const selected = protection.id === detail.protection_id;
-                                  const assignedCount = protection.device_ips.length;
-                                  return (
-                                    <button
-                                      type="button"
-                                      role="option"
-                                      aria-selected={selected}
-                                      className={selected ? "selected" : ""}
-                                      key={protection.id}
-                                      onClick={() => void changeProtection(protection.id)}
-                                    >
-                                      <span className="device-protection-option-icon"><ProtectionIcon name={protection.icon} size={17} /></span>
-                                      <span><strong>{protection.name}</strong><small>{protection.is_default ? "Default for unassigned devices" : `${assignedCount} assigned device${assignedCount === 1 ? "" : "s"}`}</small></span>
-                                      <Check size={15} />
-                                    </button>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
-                          <span>{detail.client_ip}</span>
-                        </div>
-                        <h2>{deviceDisplayName(detail)}</h2>
-                        <p>{detail.device_type} · {detail.type_source === "manual" ? "Type chosen by you" : deviceIdentityDescription(detail)}</p>
-                      </div>
-                    </div>
-                    {view === "overview" && <button className="secondary device-edit-button" type="button" onClick={() => setEditing((value) => !value)}><Edit3 size={16} /><span>{editing ? "Cancel" : "Edit device"}</span></button>}
-                  </div>
-
-                  <div className="device-view-tabs" role="tablist" aria-label="Device views">
-                    <button className={view === "overview" ? "active" : ""} type="button" role="tab" aria-selected={view === "overview"} onClick={() => setView("overview")}><LayoutDashboard size={16} /><span>Overview</span></button>
-                    <button className={view === "replay" ? "active" : ""} type="button" role="tab" aria-selected={view === "replay"} onClick={() => { setEditing(false); setView("replay"); }}><History size={16} /><span>Activity replay</span></button>
-                  </div>
-
-                  {view === "overview" ? (
-                    <DeviceOverview detail={detail} form={form} setForm={setForm} editing={editing} saving={aliasSaving} saveAlias={saveAlias} onDomainSelect={onDomainSelect} onOpenReplay={() => setView("replay")} />
-                  ) : (
-                    <DeviceReplay clientIP={detail.client_ip} deviceName={deviceDisplayName(detail)} onDomainSelect={onDomainSelect} />
-                  )}
-                </>
-              )}
-            </section>
-          </aside>
-        </div>
-      )}
+      <DeviceDrawer selectedClientIP={selectedClientIP} detail={detail} detailLoading={detailLoading} detailError={detailError} view={view} setView={setView} protections={protections} activeProtection={activeProtection} activeProtectionName={activeProtectionName} protectionBusy={protectionBusy} protectionMenuOpen={protectionMenuOpen} setProtectionMenuOpen={setProtectionMenuOpen} protectionMenuRef={protectionMenuRef} changeProtection={changeProtection} editing={editing} setEditing={setEditing} form={form} setForm={setForm} aliasSaving={aliasSaving} saveAlias={saveAlias} onSelectClient={onSelectClient} onDomainSelect={onDomainSelect} />
     </div>
   );
 }
 
-function DeviceSortHeader({ label, sortKey, sort, onSort }: { label: string; sortKey: DeviceSortKey; sort: { key: DeviceSortKey; direction: SortDirection }; onSort: (key: DeviceSortKey) => void }) {
+function DeviceDrawer({ selectedClientIP, detail, detailLoading, detailError, view, setView, protections, activeProtection, activeProtectionName, protectionBusy, protectionMenuOpen, setProtectionMenuOpen, protectionMenuRef, changeProtection, editing, setEditing, form, setForm, aliasSaving, saveAlias, onSelectClient, onDomainSelect }: {
+  readonly selectedClientIP: string | null;
+  readonly detail: DeviceSummary | null;
+  readonly detailLoading: boolean;
+  readonly detailError: string;
+  readonly view: DeviceView;
+  readonly setView: (view: DeviceView) => void;
+  readonly protections: Protection[];
+  readonly activeProtection: Protection | undefined | null;
+  readonly activeProtectionName: string;
+  readonly protectionBusy: boolean;
+  readonly protectionMenuOpen: boolean;
+  readonly setProtectionMenuOpen: (open: boolean) => void;
+  readonly protectionMenuRef: RefObject<HTMLDivElement | null>;
+  readonly changeProtection: (protectionID: number) => Promise<void>;
+  readonly editing: boolean;
+  readonly setEditing: (editing: boolean) => void;
+  readonly form: DeviceEditForm;
+  readonly setForm: (form: DeviceEditForm) => void;
+  readonly aliasSaving: boolean;
+  readonly saveAlias: (event: SubmitEvent) => Promise<void>;
+  readonly onSelectClient: (clientIP: string | null) => void;
+  readonly onDomainSelect: (domain: string) => void;
+}) {
+  if (!selectedClientIP) return null;
+  return <dialog open className="drawer-backdrop device-drawer-backdrop" aria-label="Device details" onClick={(event) => { if (event.target === event.currentTarget) onSelectClient(null); }}><aside className="device-detail-drawer"><header className="device-drawer-header"><div><strong>Device details</strong><span>Inspect identity, traffic, and history without losing your place.</span></div><button className="icon-button" type="button" onClick={() => onSelectClient(null)} aria-label="Close device details"><X size={18} /></button></header><section className={`device-detail-panel ${view === "replay" ? "replay-active" : ""}`}>{detailLoading && <div className="device-detail-loading">Loading device details...</div>}{detailError && <div className="device-detail-error">{detailError}</div>}{!detailLoading && detail && <DeviceDrawerContent detail={detail} view={view} setView={setView} protections={protections} activeProtection={activeProtection} activeProtectionName={activeProtectionName} protectionBusy={protectionBusy} protectionMenuOpen={protectionMenuOpen} setProtectionMenuOpen={setProtectionMenuOpen} protectionMenuRef={protectionMenuRef} changeProtection={changeProtection} editing={editing} setEditing={setEditing} form={form} setForm={setForm} aliasSaving={aliasSaving} saveAlias={saveAlias} onDomainSelect={onDomainSelect} />}</section></aside></dialog>;
+}
+
+function DeviceDrawerContent({ detail, view, setView, protections, activeProtection, activeProtectionName, protectionBusy, protectionMenuOpen, setProtectionMenuOpen, protectionMenuRef, changeProtection, editing, setEditing, form, setForm, aliasSaving, saveAlias, onDomainSelect }: {
+  readonly detail: DeviceSummary;
+  readonly view: DeviceView;
+  readonly setView: (view: DeviceView) => void;
+  readonly protections: Protection[];
+  readonly activeProtection: Protection | undefined | null;
+  readonly activeProtectionName: string;
+  readonly protectionBusy: boolean;
+  readonly protectionMenuOpen: boolean;
+  readonly setProtectionMenuOpen: (open: boolean) => void;
+  readonly protectionMenuRef: RefObject<HTMLDivElement | null>;
+  readonly changeProtection: (protectionID: number) => Promise<void>;
+  readonly editing: boolean;
+  readonly setEditing: (editing: boolean) => void;
+  readonly form: DeviceEditForm;
+  readonly setForm: (form: DeviceEditForm) => void;
+  readonly aliasSaving: boolean;
+  readonly saveAlias: (event: SubmitEvent) => Promise<void>;
+  readonly onDomainSelect: (domain: string) => void;
+}) {
+  return <><div className="device-detail-header"><div className="device-detail-identity"><span className="device-detail-icon">{deviceTypeIcon(detail.device_type)}</span><div><div className="device-detail-context"><DeviceProtectionPicker detail={detail} protections={protections} activeProtection={activeProtection} activeProtectionName={activeProtectionName} protectionBusy={protectionBusy} protectionMenuOpen={protectionMenuOpen} setProtectionMenuOpen={setProtectionMenuOpen} protectionMenuRef={protectionMenuRef} changeProtection={changeProtection} /><span>{detail.client_ip}</span></div><h2>{deviceDisplayName(detail)}</h2><p>{detail.device_type} · {detail.type_source === "manual" ? "Type chosen by you" : deviceIdentityDescription(detail)}</p></div></div>{view === "overview" && <button className="secondary device-edit-button" type="button" onClick={() => setEditing(!editing)}><Edit3 size={16} /><span>{editing ? "Cancel" : "Edit device"}</span></button>}</div><div className="device-view-tabs" role="tablist" aria-label="Device views"><button className={view === "overview" ? "active" : ""} type="button" role="tab" aria-selected={view === "overview"} onClick={() => setView("overview")}><LayoutDashboard size={16} /><span>Overview</span></button><button className={view === "replay" ? "active" : ""} type="button" role="tab" aria-selected={view === "replay"} onClick={() => { setEditing(false); setView("replay"); }}><History size={16} /><span>Activity replay</span></button></div>{view === "overview" ? <DeviceOverview detail={detail} form={form} setForm={setForm} editing={editing} saving={aliasSaving} saveAlias={saveAlias} onDomainSelect={onDomainSelect} onOpenReplay={() => setView("replay")} /> : <DeviceReplay clientIP={detail.client_ip} deviceName={deviceDisplayName(detail)} onDomainSelect={onDomainSelect} />}</>;
+}
+
+function DeviceProtectionPicker({ detail, protections, activeProtection, activeProtectionName, protectionBusy, protectionMenuOpen, setProtectionMenuOpen, protectionMenuRef, changeProtection }: {
+  readonly detail: DeviceSummary;
+  readonly protections: Protection[];
+  readonly activeProtection: Protection | undefined | null;
+  readonly activeProtectionName: string;
+  readonly protectionBusy: boolean;
+  readonly protectionMenuOpen: boolean;
+  readonly setProtectionMenuOpen: (open: boolean) => void;
+  readonly protectionMenuRef: RefObject<HTMLDivElement | null>;
+  readonly changeProtection: (protectionID: number) => Promise<void>;
+}) {
+  return <div className="device-protection-picker" ref={protectionMenuRef}><button type="button" className="device-protection-trigger" aria-label={`Protection: ${activeProtectionName}`} aria-haspopup="true" aria-expanded={protectionMenuOpen} aria-controls="device-protection-options" disabled={protectionBusy || protections.length === 0} onClick={() => setProtectionMenuOpen(!protectionMenuOpen)}><ProtectionIcon name={activeProtection?.icon ?? detail.protection_icon} size={15} /><span>{protectionBusy ? "Applying…" : activeProtectionName}</span><ChevronDown className={protectionMenuOpen ? "open" : ""} size={14} /></button>{protectionMenuOpen && <div className="device-protection-menu" id="device-protection-options" aria-label="Choose protection"><div className="device-protection-menu-heading"><strong>Choose protection</strong><span>Changes apply to this device immediately.</span></div>{protections.map((protection) => <button type="button" aria-pressed={protection.id === detail.protection_id} className={protection.id === detail.protection_id ? "selected" : ""} key={protection.id} onClick={() => void changeProtection(protection.id)}><span className="device-protection-option-icon"><ProtectionIcon name={protection.icon} size={17} /></span><span><strong>{protection.name}</strong><small>{protectionAssignmentLabel(protection.is_default, protection.device_ips.length)}</small></span><Check size={15} /></button>)}</div>}</div>;
+}
+
+function DeviceSortHeader({ label, sortKey, sort, onSort }: { readonly label: string; readonly sortKey: DeviceSortKey; readonly sort: { readonly key: DeviceSortKey; readonly direction: SortDirection }; readonly onSort: (key: DeviceSortKey) => void }) {
   const active = sort.key === sortKey;
   const DirectionIcon = sort.direction === "asc" ? ArrowUp : ArrowDown;
-  return <button type="button" className={active ? "device-sort-header active" : "device-sort-header"} onClick={() => onSort(sortKey)} aria-label={`Sort by ${label}${active ? `, currently ${sort.direction === "asc" ? "ascending" : "descending"}` : ""}`}>
+  const directionLabel = sort.direction === "asc" ? "ascending" : "descending";
+  const sortLabel = active ? `Sort by ${label}, currently ${directionLabel}` : `Sort by ${label}`;
+  return <button type="button" className={active ? "device-sort-header active" : "device-sort-header"} onClick={() => onSort(sortKey)} aria-label={sortLabel}>
     <span>{label}</span>{active && <DirectionIcon size={13} strokeWidth={2.5} aria-hidden="true" />}
   </button>;
 }
@@ -479,25 +466,25 @@ function inventoryFromDevices(devices: DeviceSummary[]): DeviceInventoryPage {
 }
 
 function DeviceSummaryMetric({ icon, label, value, detail, tone = "default", compact = false }: {
-  icon: React.ReactNode;
-  label: string;
-  value: string | number;
-  detail: string;
-  tone?: "default" | "blocked";
-  compact?: boolean;
+  readonly icon: ReactNode;
+  readonly label: string;
+  readonly value: string | number;
+  readonly detail: string;
+  readonly tone?: "default" | "blocked";
+  readonly compact?: boolean;
 }) {
   return <div className={`device-summary-metric ${tone} ${compact ? "compact" : ""}`}><span className="device-summary-icon">{icon}</span><span><small>{label}</small><strong>{value}</strong><em>{detail}</em></span></div>;
 }
 
 function DeviceOverview({ detail, form, setForm, editing, saving, saveAlias, onDomainSelect, onOpenReplay }: {
-  detail: DeviceSummary;
-  form: DeviceEditForm;
-  setForm: (form: DeviceEditForm) => void;
-  editing: boolean;
-  saving: boolean;
-  saveAlias: (event: FormEvent) => Promise<void>;
-  onDomainSelect: (domain: string) => void;
-  onOpenReplay: () => void;
+  readonly detail: DeviceSummary;
+  readonly form: DeviceEditForm;
+  readonly setForm: (form: DeviceEditForm) => void;
+  readonly editing: boolean;
+  readonly saving: boolean;
+  readonly saveAlias: (event: SubmitEvent) => Promise<void>;
+  readonly onDomainSelect: (domain: string) => void;
+  readonly onOpenReplay: () => void;
 }) {
   const [traffic, setTraffic] = useState<DeviceReplayData | null>(null);
 
@@ -567,11 +554,7 @@ function DeviceOverview({ detail, form, setForm, editing, saving, saveAlias, onD
               <small>{detail.type_source === "manual" ? "Chosen by you" : "Automatic detection"}</small>
               <strong>{detail.type_source === "manual" ? detail.device_type : detail.classification.predicted_type}</strong>
               <p>
-                {detail.type_source === "manual"
-                  ? "Faro will keep your choice and will not replace it automatically."
-                  : detail.classification.evidence.length
-                    ? `Based on ${detail.classification.evidence.map((item) => item.description.toLowerCase()).join(" and ")}.`
-                    : "Faro has not seen enough distinctive activity to identify this device yet."}
+                {classificationEvidence(detail)}
               </p>
             </div>
             <span className={`device-confidence ${detail.classification.confidence}`}>
@@ -638,12 +621,12 @@ function DeviceOverview({ detail, form, setForm, editing, saving, saveAlias, onD
 }
 
 function OverviewKpi({ icon, label, value, detail, tone = "default", compact = false }: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  detail: string;
-  tone?: "default" | "blocked";
-  compact?: boolean;
+  readonly icon: ReactNode;
+  readonly label: string;
+  readonly value: string;
+  readonly detail: string;
+  readonly tone?: "default" | "blocked";
+  readonly compact?: boolean;
 }) {
   return <div className={`device-overview-kpi ${tone} ${compact ? "compact" : ""}`}><span>{icon}</span><div><small>{label}</small><strong>{value}</strong><em>{detail}</em></div></div>;
 }
@@ -769,6 +752,17 @@ function deviceIdentityDescription(device: DeviceSummary) {
   if (device.name_source === "reverse_dns") return "Name discovered from reverse DNS";
   if (device.name_source === "manual" || device.name) return "Friendly name configured";
   return "No reliable hostname discovered yet";
+}
+
+function protectionAssignmentLabel(isDefault: boolean, assignedCount: number) {
+  if (isDefault) return "Default for unassigned devices";
+  return `${assignedCount} assigned device${assignedCount === 1 ? "" : "s"}`;
+}
+
+function classificationEvidence(detail: DeviceSummary) {
+  if (detail.type_source === "manual") return "Faro will keep your choice and will not replace it automatically.";
+  if (detail.classification?.evidence.length) return `Based on ${detail.classification.evidence.map((item) => item.description.toLowerCase()).join(" and ")}.`;
+  return "Faro has not seen enough distinctive activity to identify this device yet.";
 }
 
 function formatLastSeen(timestamp?: string | null, includeDate = false) {

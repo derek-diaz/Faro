@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/derek/faro/internal/db"
+	faroversion "github.com/derek/faro/internal/version"
 )
 
 type testReloader struct {
@@ -212,8 +213,28 @@ func TestHealth(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if payload["service"] != "faro-api" || payload["ok"] != true {
+	if payload["service"] != "faro-api" || payload["version"] != faroversion.Display || payload["ok"] != true {
 		t.Fatalf("unexpected health payload: %#v", payload)
+	}
+}
+
+func TestVersionIsPublic(t *testing.T) {
+	handler, _ := newTestServer(t)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/version", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("version status = %d, want %d", response.Code, http.StatusOK)
+	}
+	var payload struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+		Display string `json:"display"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode version response: %v", err)
+	}
+	if payload.Name != "Faro" || payload.Version != faroversion.Number || payload.Display != faroversion.Display {
+		t.Fatalf("unexpected version payload: %#v", payload)
 	}
 }
 

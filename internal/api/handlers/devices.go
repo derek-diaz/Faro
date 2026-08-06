@@ -64,8 +64,8 @@ func deviceAddressHistory(ctx context.Context, database *sql.DB, deviceID int64)
 	if err != nil {
 		return []map[string]any{}
 	}
-	defer rows.Close()
-	items := []map[string]any{}
+	defer logActionError("close device address rows", rows.Close)
+	items := make([]map[string]any, 0)
 	for rows.Next() {
 		var address, family, source, confidence, firstSeen, lastSeen string
 		if rows.Scan(&address, &family, &source, &confidence, &firstSeen, &lastSeen) == nil {
@@ -84,45 +84,55 @@ func (s *Handler) device(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, errors.New("client ip is required"))
 		return
 	}
-	if strings.HasSuffix(path, "/alias") {
-		rawClientIP := strings.TrimSuffix(path, "/alias")
-		clientIP, err := url.PathUnescape(strings.Trim(rawClientIP, "/"))
-		if err != nil || strings.TrimSpace(clientIP) == "" {
-			writeBadRequest(w, errors.New("invalid client ip"))
-			return
-		}
-		s.deviceAlias(w, r, clientIP)
-		return
-	}
-	if strings.HasSuffix(path, "/protection") {
-		rawClientIP := strings.TrimSuffix(path, "/protection")
-		clientIP, err := url.PathUnescape(strings.Trim(rawClientIP, "/"))
-		if err != nil || strings.TrimSpace(clientIP) == "" {
-			writeBadRequest(w, errors.New("invalid client ip"))
-			return
-		}
-		s.assignDeviceProtection(w, r, clientIP)
-		return
-	}
-	if strings.HasSuffix(path, "/replay") {
-		rawClientIP := strings.TrimSuffix(path, "/replay")
-		clientIP, err := url.PathUnescape(strings.Trim(rawClientIP, "/"))
-		if err != nil || strings.TrimSpace(clientIP) == "" {
-			writeBadRequest(w, errors.New("invalid client ip"))
-			return
-		}
-		s.deviceReplay(w, r, clientIP)
+	if s.routeDeviceSubresource(w, r, path) {
 		return
 	}
 	if r.Method != http.MethodGet {
 		methodNotAllowed(w)
 		return
 	}
-	clientIP, err := url.PathUnescape(path)
-	if err != nil || strings.TrimSpace(clientIP) == "" {
+	clientIP, err := unescapeDeviceIP(path)
+	if err != nil {
 		writeBadRequest(w, errors.New("invalid client ip"))
 		return
 	}
+	s.deviceDetails(w, r, clientIP)
+}
+
+func (s *Handler) routeDeviceSubresource(w http.ResponseWriter, r *http.Request, path string) bool {
+	if rawClientIP, ok := strings.CutSuffix(path, "/alias"); ok {
+		s.handleDeviceSubresource(w, r, rawClientIP, s.deviceAlias)
+		return true
+	}
+	if rawClientIP, ok := strings.CutSuffix(path, "/protection"); ok {
+		s.handleDeviceSubresource(w, r, rawClientIP, s.assignDeviceProtection)
+		return true
+	}
+	if rawClientIP, ok := strings.CutSuffix(path, "/replay"); ok {
+		s.handleDeviceSubresource(w, r, rawClientIP, s.deviceReplay)
+		return true
+	}
+	return false
+}
+
+func (s *Handler) handleDeviceSubresource(w http.ResponseWriter, r *http.Request, rawClientIP string, handler func(http.ResponseWriter, *http.Request, string)) {
+	clientIP, err := unescapeDeviceIP(rawClientIP)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	handler(w, r, clientIP)
+}
+
+func unescapeDeviceIP(rawClientIP string) (string, error) {
+	clientIP, err := url.PathUnescape(strings.Trim(rawClientIP, "/"))
+	if err != nil || strings.TrimSpace(clientIP) == "" {
+		return "", errors.New("invalid client ip")
+	}
+	return clientIP, nil
+}
+
+func (s *Handler) deviceDetails(w http.ResponseWriter, r *http.Request, clientIP string) {
 	deviceID, found, lookupErr := deviceidentity.DeviceIDForAddress(r.Context(), s.store, clientIP)
 	if lookupErr != nil {
 		writeBadRequest(w, lookupErr)
@@ -226,41 +236,8 @@ func (s *Handler) deviceReplay(w http.ResponseWriter, r *http.Request, clientIP 
 	blocked := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE device_id = ? AND timestamp >= ? AND timestamp <= ? AND action = 'blocked'`, deviceID, fromText, toText)
 	uniqueDomains := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(DISTINCT domain) FROM dns_queries WHERE device_id = ? AND timestamp >= ? AND timestamp <= ?`, deviceID, fromText, toText)
 
-	bucketCount := int((to.Sub(from) + bucket - 1) / bucket)
-	if bucketCount < 1 {
-		bucketCount = 1
-	}
-	buckets := make([]map[string]any, bucketCount)
-	for index := range buckets {
-		buckets[index] = map[string]any{
-			"timestamp": from.Add(time.Duration(index) * bucket).UTC().Format(time.RFC3339),
-			"total":     0,
-			"blocked":   0,
-		}
-	}
-	rows, queryErr := s.store.DB.QueryContext(r.Context(), `
-		SELECT
-			CAST((strftime('%s', timestamp) - strftime('%s', ?)) / ? AS INTEGER) AS bucket_index,
-			COUNT(*),
-			COALESCE(SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END), 0)
-		FROM dns_queries
-		WHERE device_id = ? AND timestamp >= ? AND timestamp <= ?
-		GROUP BY bucket_index
-		ORDER BY bucket_index
-	`, fromText, int(bucket.Seconds()), deviceID, fromText, toText)
-	if queryErr == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var index, count, blockedCount int
-			if scanErr := rows.Scan(&index, &count, &blockedCount); scanErr != nil {
-				break
-			}
-			if index >= 0 && index < len(buckets) {
-				buckets[index]["total"] = count
-				buckets[index]["blocked"] = blockedCount
-			}
-		}
-	}
+	buckets := newReplayBuckets(from, to, bucket)
+	populateReplayBuckets(r.Context(), s.store.DB, deviceID, fromText, toText, bucket, buckets)
 
 	events, truncated := replayQueries(r.Context(), s.store.DB, deviceID, fromText, toText, 2500)
 	durationMinutes := to.Sub(from).Minutes()
@@ -297,6 +274,47 @@ func (s *Handler) deviceReplay(w http.ResponseWriter, r *http.Request, clientIP 
 		"events":    events,
 		"truncated": truncated,
 	})
+}
+
+func newReplayBuckets(from, to time.Time, bucket time.Duration) []map[string]any {
+	bucketCount := max(int((to.Sub(from)+bucket-1)/bucket), 1)
+	buckets := make([]map[string]any, bucketCount)
+	for index := range buckets {
+		buckets[index] = map[string]any{
+			"timestamp": from.Add(time.Duration(index) * bucket).UTC().Format(time.RFC3339),
+			"total":     0,
+			"blocked":   0,
+		}
+	}
+	return buckets
+}
+
+func populateReplayBuckets(ctx context.Context, database *sql.DB, deviceID int64, from, to string, bucket time.Duration, buckets []map[string]any) {
+	rows, err := database.QueryContext(ctx, `
+		SELECT
+			CAST((strftime('%s', timestamp) - strftime('%s', ?)) / ? AS INTEGER) AS bucket_index,
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END), 0)
+		FROM dns_queries
+		WHERE device_id = ? AND timestamp >= ? AND timestamp <= ?
+		GROUP BY bucket_index
+		ORDER BY bucket_index
+	`, from, int(bucket.Seconds()), deviceID, from, to)
+	if err != nil {
+		return
+	}
+	defer logActionError("close replay bucket rows", rows.Close)
+	for rows.Next() {
+		var index, count, blockedCount int
+		if err := rows.Scan(&index, &count, &blockedCount); err != nil {
+			return
+		}
+		if index < 0 || index >= len(buckets) {
+			continue
+		}
+		buckets[index]["total"] = count
+		buckets[index]["blocked"] = blockedCount
+	}
 }
 
 func replayWindow(ctx context.Context, database *sql.DB, deviceID int64, r *http.Request) (time.Time, time.Time, time.Duration, string, error) {
@@ -352,10 +370,7 @@ func replayBucketSize(duration time.Duration) time.Duration {
 	case duration <= 32*24*time.Hour:
 		return 12 * time.Hour
 	default:
-		hours := int(duration.Hours()/72) + 1
-		if hours < 1 {
-			hours = 1
-		}
+		hours := max(int(duration.Hours()/72)+1, 1)
 		return time.Duration(hours) * time.Hour
 	}
 }
@@ -365,14 +380,14 @@ func replayQueries(ctx context.Context, database *sql.DB, deviceID int64, from, 
 		SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata
 		FROM dns_queries
 		WHERE device_id = ? AND timestamp >= ? AND timestamp <= ?
-		ORDER BY timestamp ASC, id ASC
+		ORDER BY timestamp, id
 		LIMIT ?
 	`, deviceID, from, to, limit+1)
 	if err != nil {
 		return []map[string]any{}, false
 	}
-	defer rows.Close()
-	items := []map[string]any{}
+	defer logActionError("close replay query rows", rows.Close)
+	items := make([]map[string]any, 0)
 	for rows.Next() {
 		var id int64
 		var timestamp, rowClientIP, domain, queryType, action, source, upstream, rcode, decisionReason, decisionMetadata string
@@ -489,17 +504,4 @@ var manualDeviceTypes = map[string]bool{
 
 func validManualDeviceType(deviceType string) bool {
 	return manualDeviceTypes[strings.TrimSpace(deviceType)]
-}
-
-func displayDeviceName(ctx context.Context, database *sql.DB, clientIP string) string {
-	var name string
-	if err := database.QueryRowContext(ctx, `
-		SELECT d.name FROM devices d JOIN device_addresses a ON a.device_id = d.id
-		WHERE a.address = ?`, clientIP).Scan(&name); err == nil && strings.TrimSpace(name) != "" {
-		return name
-	}
-	if err := database.QueryRowContext(ctx, `SELECT name FROM device_aliases WHERE client_ip = ?`, clientIP).Scan(&name); err == nil && strings.TrimSpace(name) != "" {
-		return name
-	}
-	return clientIP
 }

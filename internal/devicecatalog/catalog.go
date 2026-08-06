@@ -95,6 +95,14 @@ type Prediction struct {
 	EvaluatedAt    string     `json:"evaluated_at"`
 }
 
+type predictionCandidate struct {
+	definition Definition
+	score      int
+	evidence   []Evidence
+	domains    int
+	nameMatch  bool
+}
+
 type Info struct {
 	SchemaVersion  int    `json:"schema_version"`
 	CatalogVersion string `json:"catalog_version"`
@@ -171,62 +179,87 @@ func Validate(catalog Catalog) error {
 
 	ids := map[string]bool{}
 	for index, definition := range catalog.Definitions {
-		prefix := fmt.Sprintf("definition %d", index+1)
-		if !validID(definition.ID) {
-			return fmt.Errorf("%s has invalid id %q", prefix, definition.ID)
+		if err := validateDefinition(index, definition, ids); err != nil {
+			return err
 		}
-		if ids[definition.ID] {
-			return fmt.Errorf("duplicate device definition id %q", definition.ID)
+	}
+	return nil
+}
+
+func validateDefinition(index int, definition Definition, ids map[string]bool) error {
+	prefix := fmt.Sprintf("definition %d", index+1)
+	if !validID(definition.ID) {
+		return fmt.Errorf("%s has invalid id %q", prefix, definition.ID)
+	}
+	if ids[definition.ID] {
+		return fmt.Errorf("duplicate device definition id %q", definition.ID)
+	}
+	ids[definition.ID] = true
+	if strings.TrimSpace(definition.Name) == "" || strings.TrimSpace(definition.Category) == "" || strings.TrimSpace(definition.Icon) == "" {
+		return fmt.Errorf("%s must define name, category, and icon", definition.ID)
+	}
+	if len(definition.Name) > 64 || len(definition.Category) > 64 || len(definition.Icon) > 64 {
+		return fmt.Errorf("%s has display metadata that is too long", definition.ID)
+	}
+	if definition.Requirements.MinimumScore < 1 {
+		return fmt.Errorf("%s has invalid minimum score", definition.ID)
+	}
+	if len(definition.NameSignals)+len(definition.DomainSignals)+len(definition.AddressSignals) == 0 {
+		return fmt.Errorf("%s has no recognition signals", definition.ID)
+	}
+	if len(definition.NameSignals) > maxNameSignalsPerDevice ||
+		len(definition.DomainSignals) > maxDomainSignalsPerDevice ||
+		len(definition.AddressSignals) > maxAddressSignalsPerDevice {
+		return fmt.Errorf("%s defines too many recognition signals", definition.ID)
+	}
+	if err := validateNameSignals(definition); err != nil {
+		return err
+	}
+	if err := validateDomainSignals(definition); err != nil {
+		return err
+	}
+	return validateAddressSignals(definition)
+}
+
+func validateNameSignals(definition Definition) error {
+	for _, signal := range definition.NameSignals {
+		if signal.Mode != "any" && signal.Mode != "all" {
+			return fmt.Errorf("%s has unsupported name signal mode %q", definition.ID, signal.Mode)
 		}
-		ids[definition.ID] = true
-		if strings.TrimSpace(definition.Name) == "" || strings.TrimSpace(definition.Category) == "" || strings.TrimSpace(definition.Icon) == "" {
-			return fmt.Errorf("%s must define name, category, and icon", definition.ID)
+		if len(signal.Tokens) == 0 || len(signal.Tokens) > maxTokensPerNameSignal || !validWeight(signal.Weight) {
+			return fmt.Errorf("%s has invalid name signal", definition.ID)
 		}
-		if len(definition.Name) > 64 || len(definition.Category) > 64 || len(definition.Icon) > 64 {
-			return fmt.Errorf("%s has display metadata that is too long", definition.ID)
-		}
-		if definition.Requirements.MinimumScore < 1 {
-			return fmt.Errorf("%s has invalid minimum score", definition.ID)
-		}
-		if len(definition.NameSignals)+len(definition.DomainSignals)+len(definition.AddressSignals) == 0 {
-			return fmt.Errorf("%s has no recognition signals", definition.ID)
-		}
-		if len(definition.NameSignals) > maxNameSignalsPerDevice ||
-			len(definition.DomainSignals) > maxDomainSignalsPerDevice ||
-			len(definition.AddressSignals) > maxAddressSignalsPerDevice {
-			return fmt.Errorf("%s defines too many recognition signals", definition.ID)
-		}
-		for _, signal := range definition.NameSignals {
-			if signal.Mode != "any" && signal.Mode != "all" {
-				return fmt.Errorf("%s has unsupported name signal mode %q", definition.ID, signal.Mode)
+		for _, token := range signal.Tokens {
+			if !validToken(token) {
+				return fmt.Errorf("%s has invalid hostname token %q", definition.ID, token)
 			}
-			if len(signal.Tokens) == 0 || len(signal.Tokens) > maxTokensPerNameSignal || !validWeight(signal.Weight) {
-				return fmt.Errorf("%s has invalid name signal", definition.ID)
-			}
-			for _, token := range signal.Tokens {
-				if !validToken(token) {
-					return fmt.Errorf("%s has invalid hostname token %q", definition.ID, token)
-				}
-			}
 		}
-		seenDomains := map[string]bool{}
-		for _, signal := range definition.DomainSignals {
-			suffix := normalizeDomain(signal.Suffix)
-			if !validDomain(suffix) || !validWeight(signal.Weight) {
-				return fmt.Errorf("%s has invalid domain signal %q", definition.ID, signal.Suffix)
-			}
-			if seenDomains[suffix] {
-				return fmt.Errorf("%s repeats domain signal %q", definition.ID, suffix)
-			}
-			seenDomains[suffix] = true
+	}
+	return nil
+}
+
+func validateDomainSignals(definition Definition) error {
+	seenDomains := map[string]bool{}
+	for _, signal := range definition.DomainSignals {
+		suffix := normalizeDomain(signal.Suffix)
+		if !validDomain(suffix) || !validWeight(signal.Weight) {
+			return fmt.Errorf("%s has invalid domain signal %q", definition.ID, signal.Suffix)
 		}
-		if definition.Requirements.MinimumDomainSignatures > len(definition.DomainSignals) {
-			return fmt.Errorf("%s requires more domain signatures than it defines", definition.ID)
+		if seenDomains[suffix] {
+			return fmt.Errorf("%s repeats domain signal %q", definition.ID, suffix)
 		}
-		for _, signal := range definition.AddressSignals {
-			if net.ParseIP(strings.TrimSpace(signal.Address)) == nil || !validWeight(signal.Weight) {
-				return fmt.Errorf("%s has invalid address signal %q", definition.ID, signal.Address)
-			}
+		seenDomains[suffix] = true
+	}
+	if definition.Requirements.MinimumDomainSignatures > len(definition.DomainSignals) {
+		return fmt.Errorf("%s requires more domain signatures than it defines", definition.ID)
+	}
+	return nil
+}
+
+func validateAddressSignals(definition Definition) error {
+	for _, signal := range definition.AddressSignals {
+		if net.ParseIP(strings.TrimSpace(signal.Address)) == nil || !validWeight(signal.Weight) {
+			return fmt.Errorf("%s has invalid address signal %q", definition.ID, signal.Address)
 		}
 	}
 	return nil
@@ -255,83 +288,15 @@ func (m *Manager) Info() Info {
 }
 
 func (catalog Catalog) Predict(name, address string, domains []string) Prediction {
-	type candidate struct {
-		definition Definition
-		score      int
-		evidence   []Evidence
-		domains    int
-		nameMatch  bool
-	}
-
 	nameTokens := signalTokens(name)
 	normalizedAddress := strings.TrimSpace(address)
 	normalizedDomains := normalizeDomains(domains)
-	candidates := make([]candidate, 0, len(catalog.Definitions))
-	for _, definition := range catalog.Definitions {
-		current := candidate{definition: definition, evidence: []Evidence{}}
-		for _, signal := range definition.NameSignals {
-			matched, value := matchNameSignal(nameTokens, signal)
-			if !matched {
-				continue
-			}
-			current.nameMatch = true
-			current.score += signal.Weight
-			current.evidence = append(current.evidence, Evidence{
-				Kind:        "hostname",
-				Value:       value,
-				Description: fmt.Sprintf("Device name contained %s", humanList(strings.Split(value, ","))),
-				Weight:      signal.Weight,
-			})
-		}
-		for _, signal := range definition.DomainSignals {
-			for _, domain := range normalizedDomains {
-				if !domainMatches(domain, signal.Suffix) {
-					continue
-				}
-				current.domains++
-				current.score += signal.Weight
-				current.evidence = append(current.evidence, Evidence{
-					Kind:        "domain",
-					Value:       normalizeDomain(signal.Suffix),
-					Description: fmt.Sprintf("Queried the %s domain family", normalizeDomain(signal.Suffix)),
-					Weight:      signal.Weight,
-				})
-				break
-			}
-		}
-		for _, signal := range definition.AddressSignals {
-			if normalizedAddress != strings.TrimSpace(signal.Address) {
-				continue
-			}
-			current.score += signal.Weight
-			current.evidence = append(current.evidence, Evidence{
-				Kind:        "address",
-				Value:       normalizedAddress,
-				Description: "Matched a reserved local address",
-				Weight:      signal.Weight,
-			})
-		}
-		if !current.nameMatch && current.domains < definition.Requirements.MinimumDomainSignatures {
-			continue
-		}
-		if current.score >= definition.Requirements.MinimumScore {
-			candidates = append(candidates, current)
-		}
-	}
+	candidates := collectCandidates(catalog.Definitions, nameTokens, normalizedAddress, normalizedDomains)
 
 	now := time.Now().UTC().Format(time.RFC3339)
 	inputHash := signalHash(catalog.CatalogVersion, name, normalizedAddress, normalizedDomains)
 	if len(candidates) == 0 {
-		return Prediction{
-			DeviceType:     "Unknown",
-			Category:       "unknown",
-			Icon:           "monitor",
-			Confidence:     "unknown",
-			CatalogVersion: catalog.CatalogVersion,
-			SignalHash:     inputHash,
-			Evidence:       []Evidence{},
-			EvaluatedAt:    now,
-		}
+		return unknownPrediction(catalog.CatalogVersion, inputHash, now, nil)
 	}
 	sort.SliceStable(candidates, func(i, j int) bool {
 		if candidates[i].score == candidates[j].score {
@@ -340,20 +305,11 @@ func (catalog Catalog) Predict(name, address string, domains []string) Predictio
 		return candidates[i].score > candidates[j].score
 	})
 	if len(candidates) > 1 && candidates[0].score == candidates[1].score {
-		return Prediction{
-			DeviceType:     "Unknown",
-			Category:       "unknown",
-			Icon:           "monitor",
-			Confidence:     "unknown",
-			CatalogVersion: catalog.CatalogVersion,
-			SignalHash:     inputHash,
-			Evidence: []Evidence{{
-				Kind:        "conflict",
-				Value:       candidates[0].definition.ID + "," + candidates[1].definition.ID,
-				Description: "The strongest catalog matches were tied",
-			}},
-			EvaluatedAt: now,
-		}
+		return unknownPrediction(catalog.CatalogVersion, inputHash, now, []Evidence{{
+			Kind:        "conflict",
+			Value:       candidates[0].definition.ID + "," + candidates[1].definition.ID,
+			Description: "The strongest catalog matches were tied",
+		}})
 	}
 
 	best := candidates[0]
@@ -374,6 +330,95 @@ func (catalog Catalog) Predict(name, address string, domains []string) Predictio
 		SignalHash:     inputHash,
 		Evidence:       best.evidence,
 		EvaluatedAt:    now,
+	}
+}
+
+func collectCandidates(definitions []Definition, nameTokens map[string]bool, address string, domains []string) []predictionCandidate {
+	candidates := make([]predictionCandidate, 0, len(definitions))
+	for _, definition := range definitions {
+		current := scoreDefinition(definition, nameTokens, address, domains)
+		if !current.nameMatch && current.domains < definition.Requirements.MinimumDomainSignatures {
+			continue
+		}
+		if current.score >= definition.Requirements.MinimumScore {
+			candidates = append(candidates, current)
+		}
+	}
+	return candidates
+}
+
+func scoreDefinition(definition Definition, nameTokens map[string]bool, address string, domains []string) predictionCandidate {
+	candidate := predictionCandidate{definition: definition}
+	addNameEvidence(&candidate, nameTokens)
+	addDomainEvidence(&candidate, domains)
+	addAddressEvidence(&candidate, address)
+	return candidate
+}
+
+func addNameEvidence(candidate *predictionCandidate, tokens map[string]bool) {
+	for _, signal := range candidate.definition.NameSignals {
+		matched, value := matchNameSignal(tokens, signal)
+		if !matched {
+			continue
+		}
+		candidate.nameMatch = true
+		candidate.score += signal.Weight
+		candidate.evidence = append(candidate.evidence, Evidence{
+			Kind:        "hostname",
+			Value:       value,
+			Description: fmt.Sprintf("Device name contained %s", humanList(strings.Split(value, ","))),
+			Weight:      signal.Weight,
+		})
+	}
+}
+
+func addDomainEvidence(candidate *predictionCandidate, domains []string) {
+	for _, signal := range candidate.definition.DomainSignals {
+		for _, domain := range domains {
+			if !domainMatches(domain, signal.Suffix) {
+				continue
+			}
+			candidate.domains++
+			candidate.score += signal.Weight
+			candidate.evidence = append(candidate.evidence, Evidence{
+				Kind:        "domain",
+				Value:       normalizeDomain(signal.Suffix),
+				Description: fmt.Sprintf("Queried the %s domain family", normalizeDomain(signal.Suffix)),
+				Weight:      signal.Weight,
+			})
+			break
+		}
+	}
+}
+
+func addAddressEvidence(candidate *predictionCandidate, address string) {
+	for _, signal := range candidate.definition.AddressSignals {
+		if address != strings.TrimSpace(signal.Address) {
+			continue
+		}
+		candidate.score += signal.Weight
+		candidate.evidence = append(candidate.evidence, Evidence{
+			Kind:        "address",
+			Value:       address,
+			Description: "Matched a reserved local address",
+			Weight:      signal.Weight,
+		})
+	}
+}
+
+func unknownPrediction(catalogVersion, signalHashValue, evaluatedAt string, evidence []Evidence) Prediction {
+	if evidence == nil {
+		evidence = make([]Evidence, 0)
+	}
+	return Prediction{
+		DeviceType:     "Unknown",
+		Category:       "unknown",
+		Icon:           "monitor",
+		Confidence:     "unknown",
+		CatalogVersion: catalogVersion,
+		SignalHash:     signalHashValue,
+		Evidence:       evidence,
+		EvaluatedAt:    evaluatedAt,
 	}
 }
 
@@ -447,7 +492,7 @@ func loadEmbedded() (Catalog, error) {
 }
 
 func matchNameSignal(tokens map[string]bool, signal NameSignal) (bool, string) {
-	matched := []string{}
+	matched := make([]string, 0, len(signal.Tokens))
 	for _, token := range signal.Tokens {
 		normalized := strings.ToLower(strings.TrimSpace(token))
 		if tokens[normalized] {

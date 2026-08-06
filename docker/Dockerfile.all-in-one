@@ -2,7 +2,7 @@
 # ship, upgrade, and persist as one application.
 FROM coredns/coredns:1.11.3 AS coredns
 
-FROM --platform=$BUILDPLATFORM golang:1.22-bookworm AS go-build
+FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS go-build
 
 ARG TARGETOS
 ARG TARGETARCH

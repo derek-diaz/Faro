@@ -4,11 +4,11 @@ import { api, type SearchItem, type SearchResults } from "../api/client";
 import type { Page } from "../App";
 
 type GlobalSearchProps = {
-  open: boolean;
-  onClose: () => void;
-  setPage: (page: Page) => void;
-  onDomainSelect: (domain: string) => void;
-  onDeviceSelect: (clientIP: string) => void;
+  readonly open: boolean;
+  readonly onClose: () => void;
+  readonly setPage: (page: Page) => void;
+  readonly onDomainSelect: (domain: string) => void;
+  readonly onDeviceSelect: (clientIP: string) => void;
 };
 
 const emptyResults: SearchResults = {
@@ -86,8 +86,15 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
   }
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="search-modal command-palette" onClick={(event) => event.stopPropagation()} role="dialog" aria-label="Search Faro">
+    <dialog
+      className="modal-backdrop"
+      open
+      aria-label="Search Faro"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="search-modal command-palette">
         <div className="search-modal-bar">
           <Search size={19} />
           <input
@@ -144,7 +151,7 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
           )}
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }
 

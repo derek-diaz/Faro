@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useState, type SubmitEvent } from "react";
 import { api, type DNSRecord, type Setting } from "../api/client";
 import { EmptyState } from "../components/EmptyState";
 
 type LocalDnsProps = {
-  records: DNSRecord[];
-  settings: Setting[];
-  refresh: () => Promise<void>;
+  readonly records: DNSRecord[];
+  readonly settings: Setting[];
+  readonly refresh: () => Promise<void>;
 };
 
 const blankRecord: Omit<DNSRecord, "id"> = {
@@ -20,7 +20,7 @@ export function LocalDns({ records, settings, refresh }: LocalDnsProps) {
   const [editing, setEditing] = useState<DNSRecord | null>(null);
   const localSuffix = settings.find((setting) => setting.key === "local_domain_suffix")?.value || "home";
 
-  async function submit(event: React.FormEvent) {
+  async function submit(event: SubmitEvent) {
     event.preventDefault();
     if (editing) {
       await api.updateRecord({ ...editing, ...form });
@@ -93,23 +93,23 @@ export function LocalDns({ records, settings, refresh }: LocalDnsProps) {
         </div>
         <form className="stack-form" onSubmit={(event) => void submit(event)}>
           <label>
-            Hostname
+            <span>Hostname</span>
             <input value={form.hostname} onChange={(event) => setForm({ ...form, hostname: event.target.value })} placeholder={`plex or plex.${localSuffix}`} />
             <small>Single-label names automatically use the .{localSuffix} suffix.</small>
           </label>
           <label>
-            Type
+            <span>Type</span>
             <select value={form.type} onChange={(event) => setForm({ ...form, type: event.target.value as DNSRecord["type"] })}>
               <option>A</option>
               <option>AAAA</option>
             </select>
           </label>
           <label>
-            Value
-            <input value={form.value} onChange={(event) => setForm({ ...form, value: event.target.value })} placeholder="192.168.7.50" />
+            <span>Value</span>
+            <input value={form.value} onChange={(event) => setForm({ ...form, value: event.target.value })} placeholder="IPv4 or IPv6 address" />
           </label>
           <label>
-            Description
+            <span>Description</span>
             <input value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} placeholder="Media server" />
           </label>
           <button type="submit">{editing ? "Save record" : "Add record"}</button>

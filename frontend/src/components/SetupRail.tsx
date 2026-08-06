@@ -9,13 +9,13 @@ export const setupStages = [
   { label: "Connect", detail: "Review and finish" }
 ];
 
-export function SetupRail({ currentStep, username }: { currentStep: number; username?: string }) {
+export function SetupRail({ currentStep, username }: { readonly currentStep: number; readonly username?: string }) {
   return (
     <aside className="onboarding-rail setup-rail">
       <div className="onboarding-brand"><BrandLogo /><div><strong className="brand-wordmark">Faro</strong><span>Initial setup</span></div></div>
       <ol>
         {setupStages.map((stage, index) => (
-          <li key={stage.label} className={index === currentStep ? "active" : index < currentStep ? "complete" : ""}>
+          <li key={stage.label} className={setupStageClass(index, currentStep)}>
             <span>{index < currentStep ? <Check size={14} /> : index + 1}</span>
             <div><strong>{stage.label}</strong><small>{stage.detail}</small></div>
           </li>
@@ -28,4 +28,10 @@ export function SetupRail({ currentStep, username }: { currentStep: number; user
       )}
     </aside>
   );
+}
+
+function setupStageClass(index: number, currentStep: number) {
+  if (index === currentStep) return "active";
+  if (index < currentStep) return "complete";
+  return "";
 }

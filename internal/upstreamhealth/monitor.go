@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -52,7 +53,7 @@ func NewMonitor(store *db.Store, interval time.Duration, probe ProbeFunc) *Monit
 		interval: interval,
 		probe:    probe,
 		trigger:  make(chan struct{}, 1),
-		snapshot: Snapshot{Status: "unknown", Summary: "Upstream health has not been checked yet.", Items: []Probe{}},
+		snapshot: Snapshot{Status: "unknown", Summary: "Upstream health has not been checked yet.", Items: make([]Probe, 0)},
 	}
 }
 
@@ -143,8 +144,11 @@ func ProbeAddress(ctx context.Context, address string) Probe {
 		result.Error = compactProbeError(err)
 		return result
 	}
-	defer connection.Close()
-	_ = connection.SetDeadline(time.Now().Add(1500 * time.Millisecond))
+	defer closeProbeConnection(connection)
+	if err := connection.SetDeadline(time.Now().Add(1500 * time.Millisecond)); err != nil {
+		result.Error = compactProbeError(err)
+		return result
+	}
 
 	queryID := uint16(time.Now().UnixNano())
 	query := dnsProbeQuery(queryID, "example.com")
@@ -188,10 +192,10 @@ func ProbeEncryptedAddress(ctx context.Context, address string) Probe {
 func configuredAddresses(ctx context.Context, store *db.Store) []string {
 	var raw string
 	if err := store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&raw); err != nil {
-		return []string{}
+		return make([]string, 0)
 	}
 	seen := map[string]bool{}
-	addresses := []string{}
+	addresses := make([]string, 0)
 	for _, value := range strings.Split(raw, ",") {
 		address := strings.TrimSpace(value)
 		if address == "" || seen[address] {
@@ -201,6 +205,12 @@ func configuredAddresses(ctx context.Context, store *db.Store) []string {
 		addresses = append(addresses, address)
 	}
 	return addresses
+}
+
+func closeProbeConnection(connection net.Conn) {
+	if err := connection.Close(); err != nil {
+		log.Printf("close upstream health probe connection: %v", err)
+	}
 }
 
 func configuredTransport(ctx context.Context, store *db.Store) string {
@@ -216,7 +226,7 @@ func configuredTransport(ctx context.Context, store *db.Store) string {
 
 func summarize(items []Probe, checkedAt string) Snapshot {
 	if len(items) == 0 {
-		return Snapshot{Status: "unknown", Summary: "No upstream resolvers are configured.", CheckedAt: checkedAt, Items: []Probe{}}
+		return Snapshot{Status: "unknown", Summary: "No upstream resolvers are configured.", CheckedAt: checkedAt, Items: make([]Probe, 0)}
 	}
 	online := 0
 	for _, item := range items {

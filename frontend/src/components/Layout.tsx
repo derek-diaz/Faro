@@ -5,6 +5,7 @@ import {
 	CheckCircle2,
 	ChevronDown,
 	Database,
+	ExternalLink,
 	MonitorSmartphone,
 	LogOut,
 	Network,
@@ -18,7 +19,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
-import type { NotificationsResponse } from "../api/client";
+import type { AppVersion, NotificationsResponse, ReleaseInfo } from "../api/client";
 import type { Page } from "../App";
 import { BrandLogo } from "./BrandLogo";
 import type { ThemeMode } from "../theme";
@@ -35,21 +36,25 @@ const navItems: { id: Page; label: string; description: string; href: string; ic
 ];
 
 type LayoutProps = {
-  page: Page;
-  setPage: (page: Page) => void;
-  themeMode: ThemeMode;
-  onThemeModeChange: (mode: ThemeMode) => void;
-  children: ReactNode;
-  apiState: "checking" | "online" | "offline";
-  onOpenSearch: () => void;
-  notifications: NotificationsResponse;
-  onOpenNotifications: () => void;
-  username: string;
-  onSignOut: () => Promise<void>;
+  readonly page: Page;
+  readonly setPage: (page: Page) => void;
+  readonly themeMode: ThemeMode;
+  readonly onThemeModeChange: (mode: ThemeMode) => void;
+  readonly children: ReactNode;
+  readonly apiState: "checking" | "online" | "offline";
+  readonly onOpenSearch: () => void;
+  readonly notifications: NotificationsResponse;
+  readonly onOpenNotifications: () => void;
+  readonly username: string;
+  readonly onSignOut: () => Promise<void>;
+  readonly appVersion: AppVersion | null;
+  readonly releaseUpdate: ReleaseInfo | null;
 };
 
-export function Layout({ page, setPage, themeMode, onThemeModeChange, children, apiState, onOpenSearch, notifications, onOpenNotifications, username, onSignOut }: LayoutProps) {
+export function Layout({ page, setPage, themeMode, onThemeModeChange, children, apiState, onOpenSearch, notifications, onOpenNotifications, username, onSignOut, appVersion, releaseUpdate }: LayoutProps) {
   const currentPage = navItems.find((item) => item.id === page) ?? navItems[0];
+  const apiStatusTitle = getApiStatusTitle(apiState);
+  const apiStatusLabel = getApiStatusLabel(apiState);
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -77,6 +82,10 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
             );
           })}
         </nav>
+        <div className="sidebar-footer" title="Faro application version">
+          <span>Version</span>
+          <small>{appVersion?.display ?? "Checking"}</small>
+        </div>
       </aside>
 
       <main className="main">
@@ -91,9 +100,9 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
               <span>Search</span>
               <kbd>Ctrl K</kbd>
             </button>
-            <div className={`system-status ${apiState}`} title={apiState === "online" ? "Faro's control plane is responding; DNS and upstream health are shown on the dashboard" : apiState === "offline" ? "Faro API is not responding" : "Checking Faro services"}>
+            <div className={`system-status ${apiState}`} title={apiStatusTitle}>
               <CheckCircle2 size={17} />
-              <span>{apiState === "online" ? "API online" : apiState === "offline" ? "Offline" : "Checking"}</span>
+              <span>{apiStatusLabel}</span>
             </div>
             <button className="icon-button notification-button" type="button" onClick={onOpenNotifications} aria-label="Network updates">
               <Bell size={18} />
@@ -101,30 +110,43 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
             </button>
             <details className="theme-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute("open"); }}>
               <summary className="icon-button" aria-label="Choose appearance" title="Choose appearance">
-                {themeMode === "dark" ? <Moon size={18} /> : themeMode === "light" ? <Sun size={18} /> : <SunMoon size={18} />}
+                {themeIcon(themeMode, 18)}
               </summary>
               <div className="theme-menu-popover" role="menu" aria-label="Appearance">
                 <span>Appearance</span>
-                {(["system", "light", "dark"] as ThemeMode[]).map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={themeMode === mode}
-                    className={themeMode === mode ? "selected" : ""}
-                    onClick={(event) => {
-                      onThemeModeChange(mode);
-                      event.currentTarget.closest("details")?.removeAttribute("open");
-                    }}
-                  >
-                    {mode === "system" ? <SunMoon size={15} /> : mode === "light" ? <Sun size={15} /> : <Moon size={15} />}
-                    <span>{mode === "system" ? "System" : mode === "light" ? "Light" : "Dark"}</span>
-                  </button>
-                ))}
+                {(["system", "light", "dark"] as ThemeMode[]).map((mode) => {
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={themeMode === mode}
+                      className={themeMode === mode ? "selected" : ""}
+                      onClick={(event) => {
+                        onThemeModeChange(mode);
+                        event.currentTarget.closest("details")?.removeAttribute("open");
+                      }}
+                    >
+                      {themeIcon(mode, 15)}
+                      <span>{themeModeLabel(mode)}</span>
+                    </button>
+                  );
+                })}
               </div>
             </details>
-            <details className="account-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute("open"); }} onKeyDown={(event) => { if (event.key === "Escape") { event.currentTarget.removeAttribute("open"); event.currentTarget.querySelector("summary")?.focus(); } }}>
-              <summary aria-label={`Account menu for ${username}`}><UserBadge username={username} /><ChevronDown size={14} /></summary>
+            <details className="account-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute("open"); }}>
+              <summary
+                aria-label={`Account menu for ${username}`}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    const details = event.currentTarget.closest("details");
+                    details?.removeAttribute("open");
+                    event.currentTarget.focus();
+                  }
+                }}
+              >
+                <UserBadge username={username} /><ChevronDown size={14} />
+              </summary>
               <div className="account-menu-popover">
                 <header><small>Signed in as</small><strong>{username}</strong></header>
                 <button type="button" onClick={(event) => { event.currentTarget.closest("details")?.removeAttribute("open"); setPage("settings"); }}><Settings size={16} /><span>Settings</span></button>
@@ -133,12 +155,67 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
             </details>
           </div>
         </header>
+        {releaseUpdate && (
+          <div className="update-banner" role="status">
+            <div className="update-banner-copy">
+              <strong>Faro {releaseUpdate.display} is available.</strong>
+              <span>You are running {appVersion?.display ?? "an earlier version"}.</span>
+            </div>
+            <a href={releaseUpdate.url} target="_blank" rel="noreferrer">
+              View release <ExternalLink size={15} />
+            </a>
+          </div>
+        )}
         <div className="main-content">{children}</div>
       </main>
     </div>
   );
 }
 
-function UserBadge({ username }: { username: string }) {
+function UserBadge({ username }: { readonly username: string }) {
   return <span className="user-badge" aria-hidden="true">{username.slice(0, 1).toUpperCase()}</span>;
+}
+
+function getApiStatusTitle(apiState: LayoutProps["apiState"]) {
+  switch (apiState) {
+    case "online":
+      return "Faro's control plane is responding; DNS and upstream health are shown on the dashboard";
+    case "offline":
+      return "Faro API is not responding";
+    default:
+      return "Checking Faro services";
+  }
+}
+
+function getApiStatusLabel(apiState: LayoutProps["apiState"]) {
+  switch (apiState) {
+    case "online":
+      return "API online";
+    case "offline":
+      return "Offline";
+    default:
+      return "Checking";
+  }
+}
+
+function themeIcon(mode: ThemeMode, size: number) {
+  switch (mode) {
+    case "dark":
+      return <Moon size={size} />;
+    case "light":
+      return <Sun size={size} />;
+    default:
+      return <SunMoon size={size} />;
+  }
+}
+
+function themeModeLabel(mode: ThemeMode) {
+  switch (mode) {
+    case "dark":
+      return "Dark";
+    case "light":
+      return "Light";
+    default:
+      return "System";
+  }
 }

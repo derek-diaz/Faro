@@ -16,6 +16,7 @@ import (
 	"github.com/derek/faro/internal/integrations/unifi"
 	"github.com/derek/faro/internal/redundancy"
 	"github.com/derek/faro/internal/upstreamhealth"
+	faroversion "github.com/derek/faro/internal/version"
 )
 
 type CoreDNSManager interface {
@@ -37,6 +38,7 @@ type Handler struct {
 	classifier          *devicecatalog.Classifier
 	redundancy          *redundancy.Manager
 	startedAt           time.Time
+	releaseChecker      *faroversion.Checker
 	configMu            sync.Mutex
 	activityCountsMu    sync.Mutex
 	activityCountsCache map[string]activityCountCacheEntry
@@ -62,22 +64,25 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 		catalog = classifier.Catalog()
 	}
 	handler := &Handler{
-		store:         store,
-		reloader:      reloader,
-		refresher:     blocklists.Refresher{Store: store},
-		deviceNames:   newDeviceNameResolver(),
-		deviceCatalog: catalog,
-		faviconDir:    env("FARO_FAVICON_DIR", "/data/favicons"),
-		metricsURL:    env("FARO_COREDNS_METRICS_URL", "http://coredns:9153/metrics"),
-		upstreams:     upstreams,
-		backups:       farobackup.NewService(store),
-		unifi:         unifiManager,
-		classifier:    classifier,
-		redundancy:    redundancyManager,
-		startedAt:     time.Now(),
+		store:          store,
+		reloader:       reloader,
+		refresher:      blocklists.Refresher{Store: store},
+		deviceNames:    newDeviceNameResolver(),
+		deviceCatalog:  catalog,
+		faviconDir:     env("FARO_FAVICON_DIR", "/data/favicons"),
+		metricsURL:     env("FARO_COREDNS_METRICS_URL", "http://coredns:9153/metrics"),
+		upstreams:      upstreams,
+		backups:        farobackup.NewService(store),
+		unifi:          unifiManager,
+		classifier:     classifier,
+		redundancy:     redundancyManager,
+		startedAt:      time.Now(),
+		releaseChecker: faroversion.NewChecker(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handler.health)
+	mux.HandleFunc("/api/version", handler.version)
+	mux.HandleFunc("/api/version/check", handler.versionCheck)
 	mux.HandleFunc("/metrics", handler.metrics)
 	mux.HandleFunc("/api/auth/status", authManager.Status)
 	mux.HandleFunc("/api/auth/setup", authManager.Setup)

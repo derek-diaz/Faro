@@ -50,6 +50,12 @@ type deviceInventorySummary struct {
 	MostActiveRequests int    `json:"most_active_requests"`
 }
 
+// noinspection SpellCheckingInspection
+const etagHeader = "ETag"
+
+// noinspection SpellCheckingInspection
+const sqliteStrftime = "strftime"
+
 func (s *Handler) deviceInventory(w http.ResponseWriter, r *http.Request) {
 	options, err := parseDeviceInventoryOptions(r)
 	if err != nil {
@@ -62,7 +68,7 @@ func (s *Handler) deviceInventory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	etag := deviceInventoryETag(revision, options)
-	w.Header().Set("ETag", etag)
+	w.Header().Set(etagHeader, etag)
 	w.Header().Set("Cache-Control", "private, no-cache")
 	if options.paged && r.Header.Get("If-None-Match") == etag {
 		w.WriteHeader(http.StatusNotModified)
@@ -108,49 +114,82 @@ func parseDeviceInventoryOptions(r *http.Request) (deviceInventoryOptions, error
 	if !paged {
 		options.pageSize = 10000
 	}
-	if raw := query.Get("page"); raw != "" {
-		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 {
-			return options, fmt.Errorf("page must be a positive integer")
-		}
-		options.page = value
-	}
-	if raw := query.Get("page_size"); raw != "" {
-		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 || value > 200 {
-			return options, fmt.Errorf("page_size must be between 1 and 200")
-		}
-		options.pageSize = value
-	}
 	if len(options.search) > 100 {
 		return options, fmt.Errorf("search must be 100 characters or fewer")
 	}
-	if raw := query.Get("active_today"); raw != "" {
-		value, err := strconv.ParseBool(raw)
-		if err != nil {
-			return options, fmt.Errorf("active_today must be true or false")
-		}
-		options.activeToday = value
+	var err error
+	if options.page, err = parseInventoryPage(query.Get("page"), options.page); err != nil {
+		return options, err
 	}
-	switch options.sort {
+	if options.pageSize, err = parseInventoryPageSize(query.Get("page_size"), options.pageSize); err != nil {
+		return options, err
+	}
+	if options.activeToday, err = parseInventoryActiveToday(query.Get("active_today")); err != nil {
+		return options, err
+	}
+	if options.sort, err = normalizeInventorySort(options.sort); err != nil {
+		return options, err
+	}
+	options.direction, err = normalizeInventoryDirection(options.direction, options.sort)
+	return options, err
+}
+
+func parseInventoryPage(raw string, fallback int) (int, error) {
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 {
+		return fallback, fmt.Errorf("page must be a positive integer")
+	}
+	return value, nil
+}
+
+func parseInventoryPageSize(raw string, fallback int) (int, error) {
+	if raw == "" {
+		return fallback, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 || value > 200 {
+		return fallback, fmt.Errorf("page_size must be between 1 and 200")
+	}
+	return value, nil
+}
+
+func parseInventoryActiveToday(raw string) (bool, error) {
+	if raw == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("active_today must be true or false")
+	}
+	return value, nil
+}
+
+func normalizeInventorySort(value string) (string, error) {
+	switch value {
 	case "", "device":
-		options.sort = "device"
+		return "device", nil
 	case "requests", "blocked", "last_seen", "protection":
+		return value, nil
 	default:
-		return options, fmt.Errorf("sort must be device, requests, blocked, last_seen, or protection")
+		return value, fmt.Errorf("sort must be device, requests, blocked, last_seen, or protection")
 	}
-	switch options.direction {
+}
+
+func normalizeInventoryDirection(value, sortValue string) (string, error) {
+	switch value {
 	case "":
-		if options.sort == "device" || options.sort == "protection" {
-			options.direction = "asc"
-		} else {
-			options.direction = "desc"
+		if sortValue == "device" || sortValue == "protection" {
+			return "asc", nil
 		}
+		return "desc", nil
 	case "asc", "desc":
+		return value, nil
 	default:
-		return options, fmt.Errorf("direction must be asc or desc")
+		return value, fmt.Errorf("direction must be asc or desc")
 	}
-	return options, nil
 }
 
 func (s *Handler) deviceInventoryRevision(r *http.Request) (string, error) {
@@ -240,7 +279,7 @@ func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOp
 			d.type_source,
 			COALESCE(day.total, 0),
 			COALESCE(day.blocked, 0),
-			COALESCE(day.last_seen, strftime('%Y-%m-%dT%H:%M:%SZ', d.last_seen_at)),
+			COALESCE(day.last_seen, `+sqliteStrftime+`('%Y-%m-%dT%H:%M:%SZ', d.last_seen_at)),
 			COALESCE(classification.predicted_type, 'Unknown'),
 			COALESCE(classification.category, 'unknown'),
 			COALESCE(classification.icon, 'monitor'),
@@ -288,7 +327,7 @@ func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOp
 	if err != nil {
 		return nil, 0, deviceInventorySummary{}, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 
 	baseDevices := make([]inventoryBaseDevice, 0, options.pageSize)
 	total := 0
@@ -320,6 +359,15 @@ func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOp
 		return nil, 0, deviceInventorySummary{}, err
 	}
 	discoveredNames := s.discoverDeviceNames(r.Context(), clientIPs)
+	items := buildDeviceInventoryItems(baseDevices, addressesByDevice, discoveredNames)
+	summary, err := s.inventorySummary(r, start)
+	if err != nil {
+		return nil, 0, deviceInventorySummary{}, err
+	}
+	return items, total, summary, nil
+}
+
+func buildDeviceInventoryItems(baseDevices []inventoryBaseDevice, addressesByDevice map[int64][]string, discoveredNames map[string]deviceIdentity) []map[string]any {
 	items := make([]map[string]any, 0, len(baseDevices))
 	for _, device := range baseDevices {
 		addresses := addressesByDevice[device.deviceID]
@@ -350,7 +398,7 @@ func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOp
 			"total_queries_today":   device.total,
 			"blocked_queries_today": device.blocked,
 			"block_percentage":      percentage(device.blocked, device.total),
-			"top_domains":           []map[string]any{},
+			"top_domains":           make([]map[string]any, 0),
 			"last_seen":             nullableString(device.lastSeen),
 			"profile":               device.protectionName,
 			"protection":            device.protectionName,
@@ -358,11 +406,7 @@ func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOp
 			"protection_icon":       device.protectionIcon,
 		})
 	}
-	summary, err := s.inventorySummary(r, start)
-	if err != nil {
-		return nil, 0, deviceInventorySummary{}, err
-	}
-	return items, total, summary, nil
+	return items
 }
 
 func (s *Handler) inventoryMatchingCount(r *http.Request, start, search string, activeOnly bool) (int, error) {
@@ -433,7 +477,7 @@ func (s *Handler) inventoryMatchingCount(r *http.Request, start, search string, 
 func (s *Handler) inventoryAddresses(r *http.Request, devices []inventoryBaseDevice) (map[int64][]string, []string, error) {
 	result := make(map[int64][]string, len(devices))
 	if len(devices) == 0 {
-		return result, []string{}, nil
+		return result, make([]string, 0), nil
 	}
 	arguments := make([]any, 0, len(devices))
 	placeholders := make([]string, 0, len(devices))
@@ -450,7 +494,7 @@ func (s *Handler) inventoryAddresses(r *http.Request, devices []inventoryBaseDev
 	if err != nil {
 		return nil, nil, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	clientIPs := make([]string, 0, len(devices)*2)
 	for rows.Next() {
 		var deviceID int64

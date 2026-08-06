@@ -9,7 +9,8 @@ import {
   type NotificationsResponse,
   type AuthStatus,
   type RedundancyPublicStatus,
-  type Setting
+  type Setting,
+  type VersionCheck
 } from "./api/client";
 import { DomainDrawer } from "./components/DomainDrawer";
 import { AuthLoading, AuthScreen } from "./components/AuthScreen";
@@ -72,7 +73,7 @@ export function App() {
       api.redundancyPublic().catch(() => ({ role: "standalone", node_id: "", node_name: "", config_revision: 0 } as RedundancyPublicStatus))
     ])
       .then(([status, redundancyStatus]) => { if (active) { setAuth(status); setRedundancy(redundancyStatus); } })
-      .catch((caught) => { if (active) setAuthError(caught instanceof Error ? caught.message : "Faro API is unavailable."); });
+      .catch((error_) => { if (active) setAuthError(error_ instanceof Error ? error_.message : "Faro API is unavailable."); });
     function unauthorized() {
       setAuth((current) => current ? { ...current, authenticated: false, username: undefined } : current);
     }
@@ -88,8 +89,8 @@ export function App() {
     try {
       auth?.configured ? await api.login(username, password) : await api.setupAuth(username, password);
       setAuth(await api.authStatus());
-    } catch (caught) {
-      setAuthError(caught instanceof Error ? caught.message : "Authentication failed.");
+    } catch (error_) {
+      setAuthError(error_ instanceof Error ? error_.message : "Authentication failed.");
     }
   }
 
@@ -120,9 +121,15 @@ export function App() {
   return <AuthenticatedApp username={auth.username || "admin"} onSignedOut={() => setAuth({ configured: true, authenticated: false, onboarding_complete: true })} />;
 }
 
-function AuthenticatedApp({ username, onSignedOut }: { username: string; onSignedOut: () => void }) {
-  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
-  const [initialRoute] = useState(readRoute);
+type AuthenticatedAppProps = Readonly<{
+  username: string;
+  onSignedOut: () => void;
+}>;
+
+function AuthenticatedApp({ username, onSignedOut }: AuthenticatedAppProps) {
+	const [versionInfo, setVersionInfo] = useState<VersionCheck | null>(null);
+	const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
+  const initialRoute = useMemo(readRoute, []);
   const [page, setPageState] = useState<Page>(initialRoute.page);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
@@ -134,12 +141,14 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDomain, setSelectedDomain] = useState<string | null>(initialRoute.domain);
-  const [selectedClientIP, setSelectedClientIPState] = useState<string | null>(initialRoute.clientIP);
+  const [selectedClientIP, setSelectedClientIP] = useState<string | null>(initialRoute.clientIP);
   const [searchOpen, setSearchOpen] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const liveRefreshBusy = useRef(false);
 
-  const apiState = useMemo(() => (loading ? "checking" : error ? "offline" : "online"), [loading, error]);
+  let apiState: "checking" | "offline" | "online" = "online";
+  if (loading) apiState = "checking";
+  else if (error) apiState = "offline";
 
   useEffect(() => {
     applyThemeMode(themeMode);
@@ -172,8 +181,8 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
       setProtections(nextProtections);
       setSettings(nextSettings);
       setNotifications(nextNotifications);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Failed to reach Faro API");
+    } catch (error_) {
+      setError(error_ instanceof Error ? error_.message : "Failed to reach Faro API");
     } finally {
       setLoading(false);
     }
@@ -184,13 +193,28 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
   }, []);
 
   useEffect(() => {
+    let active = true;
+    const checkVersion = () => {
+      void api.versionCheck().then((nextVersion) => {
+        if (active) setVersionInfo(nextVersion);
+      }).catch(() => undefined);
+    };
+    checkVersion();
+    const timer = window.setInterval(checkVersion, 6 * 60 * 60 * 1000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  useEffect(() => {
     if (`${window.location.pathname}${window.location.search}` !== initialRoute.canonicalPath) {
       window.history.replaceState({}, "", initialRoute.canonicalPath);
     }
     function onPopState() {
       const route = readRoute();
       setPageState(route.page);
-      setSelectedClientIPState(route.clientIP);
+      setSelectedClientIP(route.clientIP);
       setSelectedDomain(route.domain);
       setSearchOpen(false);
       setNotificationOpen(false);
@@ -229,8 +253,8 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
       setSummary(nextSummary);
       setNotifications(nextNotifications);
       setError(null);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Failed to refresh live data");
+    } catch (error_) {
+      setError(error_ instanceof Error ? error_.message : "Failed to refresh live data");
     } finally {
       liveRefreshBusy.current = false;
     }
@@ -287,7 +311,7 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
   function navigateToPage(nextPage: Page) {
     setPageState(nextPage);
     setSelectedDomain(null);
-    if (nextPage !== "devices") setSelectedClientIPState(null);
+    if (nextPage !== "devices") setSelectedClientIP(null);
     const target = nextPage === "devices" && selectedClientIP
       ? `/devices/${encodeURIComponent(selectedClientIP)}`
       : pagePaths[nextPage];
@@ -297,7 +321,7 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
 
   function selectDevice(clientIP: string | null, replace = false) {
     setPageState("devices");
-    setSelectedClientIPState(clientIP);
+    setSelectedClientIP(clientIP);
     setSelectedDomain(null);
     const target = clientIP ? `/devices/${encodeURIComponent(clientIP)}` : pagePaths.devices;
     const invalidCurrentSelection = selectedClientIP !== null && !devices.some((device) => device.client_ip === selectedClientIP);
@@ -381,6 +405,8 @@ function AuthenticatedApp({ username, onSignedOut }: { username: string; onSigne
       onOpenNotifications={() => setNotificationOpen(true)}
       username={username}
       onSignOut={signOut}
+      appVersion={versionInfo}
+      releaseUpdate={versionInfo?.latest ?? null}
     >
       {error && (
         <div className="error-banner">
@@ -442,7 +468,11 @@ function readRoute(): AppRoute {
 
 function normalizePath(pathname: string) {
   if (pathname === "/") return pathname;
-  return pathname.replace(/\/+$/, "") || "/";
+  let normalized = pathname;
+  while (normalized.length > 1 && normalized.endsWith("/")) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized || "/";
 }
 
 function withDomain(pathname: string, domain: string | null) {

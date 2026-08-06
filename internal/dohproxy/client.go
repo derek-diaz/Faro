@@ -18,6 +18,7 @@ import (
 
 const (
 	dnsMessageContentType = "application/dns-message"
+	contentTypeHeader     = "Content-Type"
 	maxDNSMessageBytes    = 65535
 )
 
@@ -86,7 +87,7 @@ func (c *endpointClient) exchange(ctx context.Context, query []byte) ([]byte, er
 	return exchangeWithClient(ctx, c.endpoint.URL, query, c.client)
 }
 
-func exchangeWithClient(ctx context.Context, endpointURL string, query []byte, client *http.Client) ([]byte, error) {
+func exchangeWithClient(ctx context.Context, endpointURL string, query []byte, client *http.Client) (message []byte, err error) {
 	if err := validateQuery(query); err != nil {
 		return nil, err
 	}
@@ -95,21 +96,26 @@ func exchangeWithClient(ctx context.Context, endpointURL string, query []byte, c
 		return nil, err
 	}
 	request.Header.Set("Accept", dnsMessageContentType)
-	request.Header.Set("Content-Type", dnsMessageContentType)
+	request.Header.Set(contentTypeHeader, dnsMessageContentType)
 	response, err := client.Do(request)
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			message = nil
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		return nil, fmt.Errorf("encrypted DNS returned HTTP %d", response.StatusCode)
 	}
-	contentType, _, parseErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	contentType, _, parseErr := mime.ParseMediaType(response.Header.Get(contentTypeHeader))
 	if parseErr != nil || !strings.EqualFold(contentType, dnsMessageContentType) {
-		return nil, fmt.Errorf("encrypted DNS returned unexpected content type %q", response.Header.Get("Content-Type"))
+		return nil, fmt.Errorf("encrypted DNS returned unexpected content type %q", response.Header.Get(contentTypeHeader))
 	}
-	message, err := io.ReadAll(io.LimitReader(response.Body, maxDNSMessageBytes+1))
+	message, err = io.ReadAll(io.LimitReader(response.Body, maxDNSMessageBytes+1))
 	if err != nil {
 		return nil, err
 	}

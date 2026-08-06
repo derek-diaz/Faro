@@ -1,16 +1,17 @@
 import { Check, Eye, EyeOff, LockKeyhole, LogIn, Network, ShieldCheck, UserRound } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useState, type SubmitEvent } from "react";
 import { SetupRail } from "./SetupRail";
 import { BrandLogo } from "./BrandLogo";
 
 type AuthScreenProps = {
-  mode: "setup" | "login";
-  onSubmit: (username: string, password: string) => Promise<void>;
-  error: string;
-  onJoinExisting?: () => void;
+  readonly mode: "setup" | "login";
+  readonly onSubmit: (username: string, password: string) => Promise<void>;
+  readonly error: string;
+  readonly onJoinExisting?: () => void;
 };
 
 export function AuthScreen({ mode, onSubmit, error, onJoinExisting }: AuthScreenProps) {
+  const isSetup = mode === "setup";
   const [username, setUsername] = useState(mode === "setup" ? "admin" : "");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -20,15 +21,12 @@ export function AuthScreen({ mode, onSubmit, error, onJoinExisting }: AuthScreen
   const passwordLongEnough = password.length >= 8;
   const passwordsMatch = confirmation.length > 0 && password === confirmation;
 
-  async function submit(event: FormEvent) {
+  async function submit(event: SubmitEvent) {
     event.preventDefault();
     setLocalError("");
-    if (mode === "setup" && !passwordLongEnough) {
-      setLocalError("Use at least 8 characters for the administrator password.");
-      return;
-    }
-    if (mode === "setup" && !passwordsMatch) {
-      setLocalError("Passwords do not match.");
+    const validationError = authValidationError(isSetup, passwordLongEnough, passwordsMatch);
+    if (validationError) {
+      setLocalError(validationError);
       return;
     }
     setBusy(true);
@@ -40,61 +38,194 @@ export function AuthScreen({ mode, onSubmit, error, onJoinExisting }: AuthScreen
   }
 
   return (
-    <main className={`auth-shell ${mode === "setup" ? "setup-auth-shell" : ""}`}>
-      {mode === "setup" ? <SetupRail currentStep={0} /> : <LoginRail />}
+    <AuthLayout
+      mode={mode}
+      username={username}
+      setUsername={setUsername}
+      password={password}
+      setPassword={setPassword}
+      confirmation={confirmation}
+      setConfirmation={setConfirmation}
+      visible={visible}
+      setVisible={setVisible}
+      busy={busy}
+      error={localError || error}
+      passwordLongEnough={passwordLongEnough}
+      passwordsMatch={passwordsMatch}
+      onSubmit={submit}
+      onJoinExisting={onJoinExisting}
+    />
+  );
+}
 
+type AuthLayoutProps = {
+  readonly mode: AuthScreenProps["mode"];
+  readonly username: string;
+  readonly setUsername: (value: string) => void;
+  readonly password: string;
+  readonly setPassword: (value: string) => void;
+  readonly confirmation: string;
+  readonly setConfirmation: (value: string) => void;
+  readonly visible: boolean;
+  readonly setVisible: (value: boolean) => void;
+  readonly busy: boolean;
+  readonly error: string;
+  readonly passwordLongEnough: boolean;
+  readonly passwordsMatch: boolean;
+  readonly onSubmit: (event: SubmitEvent) => Promise<void>;
+  readonly onJoinExisting?: () => void;
+};
+
+function AuthLayout({ mode, onJoinExisting, ...formProps }: AuthLayoutProps) {
+  const isSetup = mode === "setup";
+  return (
+    <main className={`auth-shell ${isSetup ? "setup-auth-shell" : ""}`}>
+      {isSetup ? <SetupRail currentStep={0} /> : <LoginRail />}
       <section className="auth-main" aria-labelledby="auth-title">
         <div className="auth-form-wrap">
-          <header className="auth-form-heading">
-            <span>{mode === "setup" ? "Account setup" : "Administrator access"}</span>
-            <h2 id="auth-title">{mode === "setup" ? "Create your administrator" : "Sign in to Faro"}</h2>
-            <p>{mode === "setup" ? "Use this account to access Faro from browsers on your network." : "Enter the local administrator credentials for this installation."}</p>
-          </header>
-
-          <form className="auth-form" onSubmit={(event) => void submit(event)}>
-            <label>
-              <span>Username</span>
-              <div className="auth-input"><UserRound size={18} /><input autoComplete="username" autoFocus value={username} onChange={(event) => setUsername(event.target.value)} required minLength={3} maxLength={64} /></div>
-            </label>
-            <label>
-              <span>Password</span>
-              <div className="auth-input"><LockKeyhole size={18} /><input type={visible ? "text" : "password"} autoComplete={mode === "setup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} required minLength={mode === "setup" ? 8 : undefined} /><button type="button" onClick={() => setVisible(!visible)} aria-label={visible ? "Hide password" : "Show password"}>{visible ? <EyeOff size={18} /> : <Eye size={18} />}</button></div>
-            </label>
-            {mode === "setup" && (
-              <>
-                <label>
-                  <span>Confirm password</span>
-                  <div className="auth-input"><LockKeyhole size={18} /><input type={visible ? "text" : "password"} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required minLength={8} /></div>
-                </label>
-                <div className="password-requirements" aria-label="Password requirements">
-                  <span className={passwordLongEnough ? "met" : ""}><Check size={13} /> 8 or more characters</span>
-                  <span className={passwordsMatch ? "met" : ""}><Check size={13} /> Passwords match</span>
-                </div>
-              </>
-            )}
-            {(localError || error) && <div className="auth-error" role="alert">{localError || error}</div>}
-            <button className="auth-submit" type="submit" disabled={busy}>
-              {mode === "setup" ? <ShieldCheck size={17} /> : <LogIn size={17} />}
-              <span>{busy ? "Please wait" : mode === "setup" ? "Continue to DNS setup" : "Sign in"}</span>
-            </button>
-          </form>
-
-          {mode === "setup" && onJoinExisting && (
-            <div className="auth-join-existing">
-              <span>Already have Faro running elsewhere?</span>
-              <button type="button" className="secondary" onClick={onJoinExisting}><Network size={16} />Join an existing Faro home</button>
-            </div>
-          )}
-
-          <div className="auth-privacy-note"><LockKeyhole size={14} /><span>Credentials are hashed and sessions remain in Faro's local database.</span></div>
+          <AuthForm mode={mode} {...formProps} />
+          {isSetup && onJoinExisting && <JoinExisting onJoinExisting={onJoinExisting} />}
         </div>
       </section>
     </main>
   );
 }
 
+function AuthForm({ mode, username, setUsername, password, setPassword, confirmation, setConfirmation, visible, setVisible, busy, error, passwordLongEnough, passwordsMatch, onSubmit }: Omit<AuthLayoutProps, "onJoinExisting">) {
+  return (
+    <>
+      <AuthHeader mode={mode} />
+      <form className="auth-form" onSubmit={(event) => void onSubmit(event)}>
+        <label>
+          <span>Username</span>
+          <div className="auth-input"><UserRound size={18} /><input autoComplete="username" autoFocus value={username} onChange={(event) => setUsername(event.target.value)} required minLength={3} maxLength={64} /></div>
+        </label>
+        <PasswordField mode={mode} password={password} setPassword={setPassword} visible={visible} setVisible={setVisible} />
+        {mode === "setup" && <SetupPasswordFields confirmation={confirmation} setConfirmation={setConfirmation} visible={visible} passwordLongEnough={passwordLongEnough} passwordsMatch={passwordsMatch} />}
+        {error && <div className="auth-error" role="alert">{error}</div>}
+        <SubmitButton mode={mode} busy={busy} />
+      </form>
+    </>
+  );
+}
+
+function AuthHeader({ mode }: Readonly<Pick<AuthLayoutProps, "mode">>) {
+  const copy = authCopy(mode);
+  return (
+    <header className="auth-form-heading">
+      <span>{copy.label}</span>
+      <h2 id="auth-title">{copy.title}</h2>
+      <p>{copy.description}</p>
+    </header>
+  );
+}
+
+function authCopy(mode: AuthScreenProps["mode"]) {
+  if (mode === "setup") {
+    return {
+      label: "Account setup",
+      title: "Create your administrator",
+      description: "Use this account to access Faro from browsers on your network."
+    };
+  }
+  return { label: "Welcome back", title: "Sign in to Faro", description: "Use your administrator account to continue." };
+}
+
+type PasswordFieldProps = {
+  readonly mode: AuthScreenProps["mode"];
+  readonly password: string;
+  readonly setPassword: (value: string) => void;
+  readonly visible: boolean;
+  readonly setVisible: (value: boolean) => void;
+};
+
+function PasswordField({ mode, password, setPassword, visible, setVisible }: PasswordFieldProps) {
+  const inputType = visible ? "text" : "password";
+  const visibilityLabel = visible ? "Hide password" : "Show password";
+  return (
+    <label>
+      <span>Password</span>
+      <div className="auth-input"><LockKeyhole size={18} /><input type={inputType} autoComplete={mode === "setup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} required minLength={mode === "setup" ? 8 : undefined} /><button type="button" onClick={() => setVisible(!visible)} aria-label={visibilityLabel}>{visible ? <EyeOff size={18} /> : <Eye size={18} />}</button></div>
+    </label>
+  );
+}
+
+type SetupPasswordFieldsProps = {
+  readonly confirmation: string;
+  readonly setConfirmation: (value: string) => void;
+  readonly visible: boolean;
+  readonly passwordLongEnough: boolean;
+  readonly passwordsMatch: boolean;
+};
+
+function SetupPasswordFields({ confirmation, setConfirmation, visible, passwordLongEnough, passwordsMatch }: SetupPasswordFieldsProps) {
+  const inputType = visible ? "text" : "password";
+  return (
+    <>
+      <label>
+        <span>Confirm password</span>
+        <div className="auth-input"><LockKeyhole size={18} /><input type={inputType} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required minLength={8} /></div>
+      </label>
+      <div className="password-requirements" aria-label="Password requirements">
+        <span className={passwordLongEnough ? "met" : ""}><Check size={13} /> 8 or more characters</span>
+        <span className={passwordsMatch ? "met" : ""}><Check size={13} /> Passwords match</span>
+      </div>
+    </>
+  );
+}
+
+function SubmitButton({ mode, busy }: Readonly<Pick<AuthLayoutProps, "mode" | "busy">>) {
+  return (
+    <button className="auth-submit" type="submit" disabled={busy}>
+      {mode === "setup" ? <ShieldCheck size={17} /> : <LogIn size={17} />}
+      <span>{authSubmitLabel(mode, busy)}</span>
+    </button>
+  );
+}
+
+function JoinExisting({ onJoinExisting }: Readonly<Pick<AuthLayoutProps, "onJoinExisting">>) {
+  return (
+    <div className="auth-join-existing">
+      <span>Already have Faro running elsewhere?</span>
+      <button type="button" className="secondary" onClick={onJoinExisting}><Network size={16} />Join an existing Faro home</button>
+    </div>
+  );
+}
+
+function authValidationError(isSetup: boolean, passwordLongEnough: boolean, passwordsMatch: boolean): string {
+  if (!isSetup) {
+    return "";
+  }
+  if (!passwordLongEnough) {
+    return "Use at least 8 characters for the administrator password.";
+  }
+  if (!passwordsMatch) {
+    return "Passwords do not match.";
+  }
+  return "";
+}
+
+function authSubmitLabel(mode: AuthScreenProps["mode"], busy: boolean): string {
+  if (busy) {
+    return "Please wait";
+  }
+  if (mode === "setup") {
+    return "Continue to DNS setup";
+  }
+  return "Sign in";
+}
+
 function LoginRail() {
-  return <aside className="auth-context login-rail"><div className="auth-brand"><BrandLogo /><strong className="brand-wordmark">Faro</strong></div><div className="auth-context-copy"><span>Local control plane</span><h1>Your network is waiting.</h1><p>Sign in to return to DNS activity, devices, and filtering controls.</p></div><div className="auth-return-state"><ShieldCheck size={20} /><div><strong>Local session authentication</strong><span>Your Faro data stays behind the administrator account.</span></div></div><footer><ShieldCheck size={15} /><span>Self-hosted and stored locally</span></footer></aside>;
+  return (
+    <aside className="auth-context login-rail">
+      <div className="auth-brand"><BrandLogo /><strong className="brand-wordmark">Faro</strong></div>
+      <div className="auth-context-copy">
+        <span>Network control</span>
+        <h1>Your network, at a glance.</h1>
+        <p>Manage DNS activity, devices, and protection from one place.</p>
+      </div>
+    </aside>
+  );
 }
 
 export function AuthLoading() {

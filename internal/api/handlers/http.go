@@ -4,14 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 )
 
+// Standard HTTP value for X-Content-Type-Options.
+// noinspection SpellCheckingInspection
+const contentTypeOptionsNoSniff = "nosniff"
+
 func decode(w http.ResponseWriter, r *http.Request, dst any) bool {
-	defer r.Body.Close()
+	defer logActionError("close request body", r.Body.Close)
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(dst); err != nil {
 		writeBadRequest(w, err)
 		return false
@@ -38,7 +43,9 @@ func boolInt(value bool) int {
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		log.Printf("encode JSON response: %v", err)
+	}
 }
 
 func writeBadRequest(w http.ResponseWriter, err error) {
@@ -55,38 +62,64 @@ func methodNotAllowed(w http.ResponseWriter) {
 
 func cors(trustProxy bool, onboardingComplete func(context.Context) bool, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Referrer-Policy", "no-referrer")
-		origin := strings.TrimSpace(r.Header.Get("Origin"))
-		crossOrigin := origin != "" && !sameOrigin(r, origin, trustProxy)
-		crossSite := strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site")
-		initializing := r.URL.Path == "/api/auth/setup"
-		localRedundancyExit := r.Method == http.MethodDelete && r.URL.Path == "/api/redundancy"
-		if !initializing && (crossOrigin || crossSite) {
-			initializing = !localRedundancyExit && !onboardingComplete(r.Context())
-		}
-		if !initializing && crossOrigin {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cross-origin requests are not allowed"})
+		setSecurityHeaders(w)
+		if !allowCORSRequest(w, r, trustProxy, onboardingComplete) {
 			return
 		}
-		if !initializing && crossSite {
-			writeJSON(w, http.StatusForbidden, map[string]any{"error": "cross-site requests are not allowed"})
-			return
-		}
-		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Faro-Timezone")
-		w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
+		setCORSHeaders(w, r)
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func setSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("X-Content-Type-Options", contentTypeOptionsNoSniff)
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+}
+
+func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Vary", "Origin")
+	}
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Faro-Timezone")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
+}
+
+func allowCORSRequest(w http.ResponseWriter, r *http.Request, trustProxy bool, onboardingComplete func(context.Context) bool) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	crossOrigin := origin != "" && !sameOrigin(r, origin, trustProxy)
+	crossSite := strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site")
+	if r.URL.Path == "/api/auth/setup" || !crossOrigin && !crossSite {
+		return true
+	}
+	if allowCrossOriginDuringOnboarding(r, onboardingComplete) {
+		return true
+	}
+	if crossOrigin {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "cross-origin requests are not allowed"})
+		return false
+	}
+	writeJSON(w, http.StatusForbidden, map[string]any{"error": "cross-site requests are not allowed"})
+	return false
+}
+
+func allowCrossOriginDuringOnboarding(r *http.Request, onboardingComplete func(context.Context) bool) bool {
+	if r.Method == http.MethodDelete && r.URL.Path == "/api/redundancy" {
+		return false
+	}
+	return !onboardingComplete(r.Context())
+}
+
+func logActionError(operation string, action func() error) {
+	if err := action(); err != nil {
+		log.Printf("%s: %v", operation, err)
+	}
 }
 
 func sameOrigin(r *http.Request, origin string, trustProxy bool) bool {

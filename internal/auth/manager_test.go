@@ -95,7 +95,7 @@ func TestConfiguredInstallationRequiresSessionToLeaveRedundancy(t *testing.T) {
 func TestHealthAndMetricsRemainPublic(t *testing.T) {
 	manager := newTestManager(t)
 	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
-	for _, path := range []string{"/healthz", "/metrics"} {
+	for _, path := range []string{"/healthz", "/metrics", "/api/version", "/api/version/check"} {
 		response := httptest.NewRecorder()
 		protected.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusNoContent {

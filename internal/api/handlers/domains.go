@@ -3,10 +3,11 @@ package handlers
 import (
 	"database/sql"
 	"errors"
-	"github.com/derek/faro/internal/db"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/derek/faro/internal/db"
 )
 
 func (s *Handler) domainSummary(w http.ResponseWriter, r *http.Request) {

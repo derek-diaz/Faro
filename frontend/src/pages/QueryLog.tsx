@@ -4,10 +4,11 @@ import { api, type ActivityPage, type FaroEvent } from "../api/client";
 import { DomainFavicon } from "../components/DomainFavicon";
 import { EmptyState } from "../components/EmptyState";
 import { ResolutionSource } from "../components/ResolutionSource";
+import { formatDate, formatTime } from "../utils/dateFormatting";
 
 type QueryLogProps = {
-  onDomainSelect: (domain: string) => void;
-  onDeviceSelect: (clientIP: string) => void;
+  readonly onDomainSelect: (domain: string) => void;
+  readonly onDeviceSelect: (clientIP: string) => void;
 };
 
 type EventFilter = "all" | "dns" | "cache" | "upstream" | "blocked" | "system";
@@ -39,7 +40,7 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
     setLoadError("");
     api.events(search, filter, page, PAGE_SIZE)
       .then((result) => { if (active) setActivity(result); })
-      .catch((caught) => { if (active) setLoadError(caught instanceof Error ? caught.message : "Activity could not be loaded."); })
+      .catch((error_) => { if (active) setLoadError(error_ instanceof Error ? error_.message : "Activity could not be loaded."); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [search, filter, page, refreshVersion]);
@@ -109,22 +110,21 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
       <section className="panel activity-results-panel">
         <div className="activity-results-toolbar">
           <div className="filter-label"><Filter size={16} /><span>Filter</span></div>
-          <div className="event-filter-tabs" role="group" aria-label="Filter activity">
+          <fieldset className="event-filter-tabs">
+            <legend className="sr-only">Filter activity</legend>
             <FilterButton active={filter === "all"} label="All" count={counts.all} onClick={() => selectFilter("all")} />
             <FilterButton active={filter === "dns"} label="DNS" count={counts.dns} onClick={() => selectFilter("dns")} />
             <FilterButton active={filter === "cache"} label="Cache" count={counts.cache} onClick={() => selectFilter("cache")} />
             <FilterButton active={filter === "upstream"} label="Upstream" count={counts.upstream} onClick={() => selectFilter("upstream")} />
             <FilterButton active={filter === "blocked"} label="Blocked" count={counts.blocked} onClick={() => selectFilter("blocked")} />
             <FilterButton active={filter === "system"} label="System" count={counts.system} onClick={() => selectFilter("system")} />
-          </div>
+          </fieldset>
           <span className="results-count">{loading ? "Loading…" : `Showing ${firstResult}–${lastResult} of ${activity.total}`}</span>
         </div>
 
-        {loadError ? (
-          <EmptyState title="Activity unavailable" body={loadError} />
-        ) : visibleEvents.length === 0 ? (
-          <EmptyState title="No matching activity" body="Try another filter or point a device at Faro to begin collecting DNS activity." />
-        ) : (
+        {loadError && <EmptyState title="Activity unavailable" body={loadError} />}
+        {!loadError && visibleEvents.length === 0 && <EmptyState title="No matching activity" body="Try another filter or point a device at Faro to begin collecting DNS activity." />}
+        {!loadError && visibleEvents.length > 0 && (
           <div className="activity-table-wrap">
             <table className="monitor-table event-table">
               <thead>
@@ -203,29 +203,29 @@ function eventUpstream(event: FaroEvent) {
   return typeof value === "string" ? value : null;
 }
 
-function ActivityStat({ icon, label, value, tone = "all" }: { icon: ReactNode; label: string; value: number; tone?: "all" | "dns" | "blocked" | "system" }) {
+function ActivityStat({ icon, label, value, tone = "all" }: { readonly icon: ReactNode; readonly label: string; readonly value: number; readonly tone?: "all" | "dns" | "blocked" | "system" }) {
   return <div className={`activity-stat ${tone}`}><span className="activity-stat-icon" aria-hidden="true">{icon}</span><div className="activity-stat-copy"><span>{label}</span><strong>{value}</strong></div></div>;
 }
 
-function FilterButton({ active, label, count, onClick }: { active: boolean; label: string; count: number; onClick: () => void }) {
+function FilterButton({ active, label, count, onClick }: { readonly active: boolean; readonly label: string; readonly count: number; readonly onClick: () => void }) {
   return <button className={active ? "active" : ""} type="button" onClick={onClick}>{label}<span>{count}</span></button>;
 }
 
-function EventResult({ event }: { event: FaroEvent }) {
+function EventResult({ event }: { readonly event: FaroEvent }) {
   if (event.type === "dns.blocked") return <span className="event-result blocked">Blocked</span>;
   if (event.type === "dns.query") return <span className="event-result allowed">Allowed</span>;
   if (event.severity === "critical") return <span className="event-result critical">Failed</span>;
   return <span className="event-result system">System</span>;
 }
 
-function EventMark({ event }: { event: FaroEvent }) {
+function EventMark({ event }: { readonly event: FaroEvent }) {
   return event.severity === "critical" ? <Ban size={16} /> : <CheckCircle2 size={16} />;
 }
 
-function EventType({ event }: { event: FaroEvent }) {
+function EventType({ event }: { readonly event: FaroEvent }) {
   const type = typeof event.metadata?.query_type === "string" ? event.metadata.query_type.toUpperCase() : "";
   if ((event.type === "dns.query" || event.type === "dns.blocked") && type) {
-    const family = type === "A" ? "IPv4" : type === "AAAA" ? "IPv6" : "DNS";
+    const family = recordFamily(type);
     return (
       <span className="event-type-chip dns-record-type" title={`${type} record request (${family})`}>
         <strong>{type}</strong>
@@ -251,12 +251,8 @@ function friendlyType(type: string) {
   return labels[type] ?? type.replace(/\./g, " ").replace(/_/g, " ");
 }
 
-function formatTime(timestamp: string) {
-  return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
-function formatDate(timestamp: string) {
-  const date = new Date(timestamp);
-  const today = new Date();
-  return date.toDateString() === today.toDateString() ? "Today" : date.toLocaleDateString([], { month: "short", day: "numeric" });
+function recordFamily(type: string) {
+  if (type === "A") return "IPv4";
+  if (type === "AAAA") return "IPv6";
+  return "DNS";
 }

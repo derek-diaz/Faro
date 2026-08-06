@@ -12,7 +12,7 @@ import (
 var gzipHeader = []byte{0x1f, 0x8b}
 
 // encodeSnapshot preserves the original JSON wire format while it fits within
-// the transport limit. Larger snapshots are compressed; hosts files compress
+// the transport limit. Larger snapshots are compressed; host files compress
 // particularly well, and decodeSnapshot remains compatible with older raw
 // snapshots already stored by Faro.
 func encodeSnapshot(snapshot ConfigSnapshot, transportLimit int) ([]byte, error) {
@@ -33,7 +33,9 @@ func encodeSnapshot(snapshot ConfigSnapshot, transportLimit int) ([]byte, error)
 		return nil, err
 	}
 	if _, err := writer.Write(raw); err != nil {
-		_ = writer.Close()
+		if closeErr := writer.Close(); closeErr != nil {
+			return nil, fmt.Errorf("compress snapshot: %w (close failed: %v)", err, closeErr)
+		}
 		return nil, err
 	}
 	if err := writer.Close(); err != nil {
@@ -50,19 +52,24 @@ func encodeSnapshot(snapshot ConfigSnapshot, transportLimit int) ([]byte, error)
 
 func decodeSnapshot(payload []byte) (ConfigSnapshot, error) {
 	reader := io.Reader(bytes.NewReader(payload))
+	var compressed *gzip.Reader
 	if bytes.HasPrefix(payload, gzipHeader) {
-		compressed, err := gzip.NewReader(reader)
+		var err error
+		compressed, err = gzip.NewReader(reader)
 		if err != nil {
 			return ConfigSnapshot{}, errors.New("controller configuration snapshot is invalid")
 		}
-		defer compressed.Close()
 		reader = compressed
 	} else if len(payload) > maxSnapshotUncompressedBytes {
 		return ConfigSnapshot{}, errors.New("controller configuration snapshot is too large")
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(reader, maxSnapshotUncompressedBytes+1))
-	if err != nil {
+	raw, readErr := io.ReadAll(io.LimitReader(reader, maxSnapshotUncompressedBytes+1))
+	var closeErr error
+	if compressed != nil {
+		closeErr = compressed.Close()
+	}
+	if readErr != nil || closeErr != nil {
 		return ConfigSnapshot{}, errors.New("controller configuration snapshot is invalid")
 	}
 	if len(raw) > maxSnapshotUncompressedBytes {

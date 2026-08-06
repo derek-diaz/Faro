@@ -118,21 +118,17 @@ func (p *Proxy) serveUDP(ctx context.Context, connection *net.UDPConn) {
 			return
 		}
 		query := append([]byte(nil), buffer[:n]...)
-		go func() {
-			if !p.acquire(ctx) {
-				return
-			}
-			defer p.release()
-			queryCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
-			defer cancel()
-			response, exchangeErr := p.exchange(queryCtx, query)
-			if exchangeErr != nil {
-				response = serverFailure(query)
-			}
-			if len(response) > 0 {
-				_, _ = connection.WriteToUDP(response, client)
-			}
-		}()
+		go p.handleUDP(ctx, connection, client, query)
+	}
+}
+
+func (p *Proxy) handleUDP(ctx context.Context, connection *net.UDPConn, client *net.UDPAddr, query []byte) {
+	response := p.response(ctx, query)
+	if len(response) == 0 {
+		return
+	}
+	if _, err := connection.WriteToUDP(response, client); err != nil && ctx.Err() == nil {
+		log.Printf("encrypted DNS UDP response failed: %v", err)
 	}
 }
 
@@ -150,43 +146,61 @@ func (p *Proxy) serveTCP(ctx context.Context, listener net.Listener) {
 }
 
 func (p *Proxy) handleTCP(ctx context.Context, connection net.Conn) {
-	defer connection.Close()
+	defer func() {
+		if err := connection.Close(); err != nil && ctx.Err() == nil {
+			log.Printf("encrypted DNS TCP connection close failed: %v", err)
+		}
+	}()
 	for {
-		_ = connection.SetDeadline(time.Now().Add(15 * time.Second))
-		var length uint16
-		if err := binary.Read(connection, binary.BigEndian, &length); err != nil {
-			if !errors.Is(err, io.EOF) {
-				return
-			}
+		if err := connection.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
 			return
 		}
-		if length < 12 {
+		query, err := readTCPQuery(connection)
+		if err != nil {
 			return
 		}
-		query := make([]byte, int(length))
-		if _, err := io.ReadFull(connection, query); err != nil {
-			return
-		}
-		if !p.acquire(ctx) {
-			return
-		}
-		queryCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
-		response, exchangeErr := p.exchange(queryCtx, query)
-		cancel()
-		p.release()
-		if exchangeErr != nil {
-			response = serverFailure(query)
-		}
-		if len(response) == 0 || len(response) > maxDNSMessageBytes {
-			return
-		}
-		if err := binary.Write(connection, binary.BigEndian, uint16(len(response))); err != nil {
-			return
-		}
-		if _, err := connection.Write(response); err != nil {
+		if err := writeTCPResponse(connection, p.response(ctx, query)); err != nil {
 			return
 		}
 	}
+}
+
+func readTCPQuery(connection net.Conn) ([]byte, error) {
+	var length uint16
+	if err := binary.Read(connection, binary.BigEndian, &length); err != nil {
+		return nil, err
+	}
+	if length < 12 {
+		return nil, errors.New("encrypted DNS TCP query is too short")
+	}
+	query := make([]byte, int(length))
+	_, err := io.ReadFull(connection, query)
+	return query, err
+}
+
+func writeTCPResponse(connection net.Conn, response []byte) error {
+	if len(response) == 0 || len(response) > maxDNSMessageBytes {
+		return errors.New("encrypted DNS response is invalid")
+	}
+	if err := binary.Write(connection, binary.BigEndian, uint16(len(response))); err != nil {
+		return err
+	}
+	_, err := connection.Write(response)
+	return err
+}
+
+func (p *Proxy) response(ctx context.Context, query []byte) []byte {
+	if !p.acquire(ctx) {
+		return nil
+	}
+	defer p.release()
+	queryCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	response, err := p.exchange(queryCtx, query)
+	if err != nil {
+		return serverFailure(query)
+	}
+	return response
 }
 
 func (p *Proxy) exchange(ctx context.Context, query []byte) ([]byte, error) {
@@ -223,13 +237,17 @@ func (p *Proxy) release() {
 	<-p.concurrent
 }
 
-func configuredTransport(ctx context.Context, store *db.Store) (string, []string, error) {
+func configuredTransport(ctx context.Context, store *db.Store) (transport string, addresses []string, err error) {
 	settings := map[string]string{}
 	rows, err := store.DB.QueryContext(ctx, `SELECT key, value FROM settings WHERE key IN ('upstream_transport', 'upstream_dns')`)
 	if err != nil {
 		return "", nil, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	for rows.Next() {
 		var key, value string
 		if err := rows.Scan(&key, &value); err != nil {
@@ -240,11 +258,11 @@ func configuredTransport(ctx context.Context, store *db.Store) (string, []string
 	if err := rows.Err(); err != nil {
 		return "", nil, err
 	}
-	transport := strings.TrimSpace(settings["upstream_transport"])
+	transport = strings.TrimSpace(settings["upstream_transport"])
 	if transport == "" {
 		transport = "standard"
 	}
-	addresses := make([]string, 0)
+	addresses = make([]string, 0)
 	for _, raw := range strings.Split(settings["upstream_dns"], ",") {
 		if value := strings.TrimSpace(raw); value != "" {
 			addresses = append(addresses, value)

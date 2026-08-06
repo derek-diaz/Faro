@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -21,7 +22,9 @@ import (
 	deviceidentity "github.com/derek/faro/internal/devices"
 )
 
-var logPattern = regexp.MustCompile(`\s(\d+\.\d+\.\d+\.\d+|\[[0-9a-fA-F:]+\]|[0-9a-fA-F:]+):\d+\s+-\s+\d+\s+"([A-Z]+)\s+IN\s+([^"\s]+).*"\s+([A-Z]+).*\s([0-9.]+)s`)
+const cursorSuffix = ".cursor"
+
+var logPattern = regexp.MustCompile(`\s(\d+\.\d+\.\d+\.\d+|\[[0-9a-fA-F:]+]|[0-9a-fA-F:]+):\d+\s+-\s+\d+\s+"([A-Z]+)\s+IN\s+([^"\s]+).*"\s+([A-Z]+).*\s([0-9.]+)s`)
 
 type logEntry struct {
 	clientIP  string
@@ -51,10 +54,10 @@ func (t *Tailer) Run(ctx context.Context) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	cursor, loaded := loadCursor(t.Path + ".cursor")
+	cursor, loaded := loadCursor(t.Path + cursorSuffix)
 	if !loaded {
 		cursor = cursorAtEnd(t.Path)
-		_ = saveCursor(t.Path+".cursor", cursor)
+		_ = saveCursor(t.Path+cursorSuffix, cursor)
 	}
 	for {
 		select {
@@ -69,7 +72,7 @@ func (t *Tailer) Run(ctx context.Context) {
 				continue
 			}
 			cursor = next
-			if err := saveCursor(t.Path+".cursor", cursor); err != nil {
+			if err := saveCursor(t.Path+cursorSuffix, cursor); err != nil {
 				log.Printf("query log cursor save failed: %v", err)
 			}
 		}
@@ -81,7 +84,11 @@ func cursorAtEnd(path string) logCursor {
 	if err != nil {
 		return logCursor{}
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Printf("query log cursor file close failed: %v", err)
+		}
+	}()
 	stat, err := file.Stat()
 	if err != nil {
 		return logCursor{}
@@ -89,12 +96,16 @@ func cursorAtEnd(path string) logCursor {
 	return logCursor{Identity: fileIdentity(file), Offset: stat.Size()}
 }
 
-func (t *Tailer) readAvailable(ctx context.Context, cursor logCursor) (logCursor, error) {
+func (t *Tailer) readAvailable(ctx context.Context, cursor logCursor) (next logCursor, err error) {
 	file, err := os.Open(t.Path)
 	if err != nil {
 		return cursor, err
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 
 	currentInfo, err := file.Stat()
 	if err != nil {
@@ -135,12 +146,16 @@ func (t *Tailer) readAvailable(ctx context.Context, cursor logCursor) (logCursor
 	return logCursor{Identity: currentIdentity, Offset: position}, nil
 }
 
-func (t *Tailer) readPath(ctx context.Context, path string, offset int64) (int64, error) {
+func (t *Tailer) readPath(ctx context.Context, path string, offset int64) (position int64, err error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return offset, err
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	return t.readOpenFile(ctx, file, offset)
 }
 
@@ -206,7 +221,11 @@ func loadCursor(path string) (logCursor, bool) {
 	if err != nil {
 		return logCursor{}, false
 	}
-	defer input.Close()
+	defer func() {
+		if err := input.Close(); err != nil {
+			log.Printf("query log cursor close failed: %v", err)
+		}
+	}()
 	var cursor logCursor
 	if json.NewDecoder(io.LimitReader(input, 4096)).Decode(&cursor) != nil || cursor.Offset < 0 {
 		return logCursor{}, false
@@ -214,7 +233,7 @@ func loadCursor(path string) (logCursor, bool) {
 	return cursor, true
 }
 
-func saveCursor(path string, cursor logCursor) error {
+func saveCursor(path string, cursor logCursor) (err error) {
 	directory := filepath.Dir(path)
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return err
@@ -224,7 +243,11 @@ func saveCursor(path string, cursor logCursor) error {
 		return err
 	}
 	tempName := temp.Name()
-	defer os.Remove(tempName)
+	defer func() {
+		if removeErr := os.Remove(tempName); removeErr != nil && !os.IsNotExist(removeErr) {
+			err = errors.Join(err, removeErr)
+		}
+	}()
 	if err := json.NewEncoder(temp).Encode(cursor); err != nil {
 		_ = temp.Close()
 		return err
@@ -250,27 +273,17 @@ func (t *Tailer) insert(ctx context.Context, line string) {
 	if !ok {
 		return
 	}
+	t.insertParsed(ctx, entry)
+}
 
+func (t *Tailer) insertParsed(ctx context.Context, entry logEntry) {
 	deviceID, identityErr := deviceidentity.ResolveAddress(ctx, t.Store, entry.clientIP, "dns")
 	if identityErr != nil {
 		log.Printf("resolve DNS client identity failed: %v", identityErr)
 	}
 	decision := coredns.ExplainDomainForClient(ctx, t.Store, entry.domain, entry.clientIP)
 	action := decision.Action
-	source := ""
-	if action == "blocked" {
-		if decision.ManualBlock != nil {
-			source = "manual"
-		} else {
-			source = "blocklist"
-		}
-	} else if isLocalRecord(ctx, t.Store, entry.domain) {
-		source = "local"
-	} else if !entry.observed || entry.upstream != "" {
-		source = "upstream"
-	} else {
-		source = "cache"
-	}
+	source := sourceForEntry(ctx, t.Store, entry, decision)
 	decision.Upstream = entry.upstream
 	decision.ResponseCode = entry.rcode
 	decision.CapturedAt = time.Now().UTC().Format(time.RFC3339)
@@ -288,6 +301,22 @@ func (t *Tailer) insert(ctx context.Context, line string) {
 	if err != nil {
 		log.Printf("insert dns query failed: %v", err)
 	}
+}
+
+func sourceForEntry(ctx context.Context, store *db.Store, entry logEntry, decision coredns.DomainDecision) string {
+	if decision.Action == "blocked" {
+		if decision.ManualBlock != nil {
+			return "manual"
+		}
+		return "blocklist"
+	}
+	if isLocalRecord(ctx, store, entry.domain) {
+		return "local"
+	}
+	if !entry.observed || entry.upstream != "" {
+		return "upstream"
+	}
+	return "cache"
 }
 
 func decisionConfidence(source, upstream string) string {
@@ -346,7 +375,10 @@ func parseLine(line string) (logEntry, bool) {
 	if len(match) == 0 {
 		return logEntry{}, false
 	}
-	latencySeconds, _ := strconv.ParseFloat(match[5], 64)
+	latencySeconds, err := strconv.ParseFloat(match[5], 64)
+	if err != nil {
+		return logEntry{}, false
+	}
 	return logEntry{
 		clientIP:  strings.Trim(match[1], "[]"),
 		queryType: match[2],

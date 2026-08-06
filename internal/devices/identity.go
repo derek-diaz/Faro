@@ -22,6 +22,12 @@ type Identifier struct {
 	Confidence string
 }
 
+type deviceFields struct {
+	name, location, notes string
+	confirmed             bool
+	protection            sql.NullInt64
+}
+
 // ResolveAddress records an address observation and returns Faro's stable local
 // device ID. It uses only strong, passive local evidence (an exact Local DNS
 // record or an ARP/neighbor MAC) to connect a new address to an existing device.
@@ -32,7 +38,7 @@ func ResolveAddress(ctx context.Context, store *db.Store, address, source string
 // ObserveAddress records an address together with strong identifiers supplied
 // by a trusted local integration. Explicit identifiers are combined with
 // Faro's passive evidence and pass through the same conflict-safe merge rules.
-func ObserveAddress(ctx context.Context, store *db.Store, address, source string, explicit []Identifier) (int64, error) {
+func ObserveAddress(ctx context.Context, store *db.Store, address, source string, explicit []Identifier) (deviceID int64, err error) {
 	address = normalizeAddress(address)
 	if address == "" {
 		return 0, ErrInvalidAddress
@@ -51,57 +57,85 @@ func ObserveAddress(ctx context.Context, store *db.Store, address, source string
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			err = errors.Join(err, rollbackErr)
+		}
+	}()
 
-	var deviceID int64
 	matchedDeviceID, conflictingIdentifiers, err := deviceForIdentifiers(ctx, tx, identifiers)
 	if err != nil {
 		return 0, err
 	}
-	if err = tx.QueryRowContext(ctx, `SELECT device_id FROM device_addresses WHERE address = ?`, address).Scan(&deviceID); err == sql.ErrNoRows {
-		deviceID = matchedDeviceID
-		if deviceID == 0 {
-			result, insertErr := tx.ExecContext(ctx, `INSERT INTO devices(first_seen_at, last_seen_at) VALUES(CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
-			if insertErr != nil {
-				return 0, insertErr
-			}
-			deviceID, err = result.LastInsertId()
-			if err != nil {
-				return 0, err
-			}
-		}
-		family := "ipv4"
-		if strings.Contains(address, ":") {
-			family = "ipv6"
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO device_addresses(device_id, address, family, source, confidence)
-			VALUES(?, ?, ?, ?, 'observed')`, deviceID, address, family, source); err != nil {
-			return 0, err
-		}
-	} else if err != nil {
+	deviceID, err = deviceForAddress(ctx, tx, address, source, matchedDeviceID)
+	if err != nil {
 		return 0, err
 	}
 
 	if !conflictingIdentifiers {
-		for _, identifier := range identifiers {
-			resolvedID, observeErr := observeIdentifier(ctx, tx, deviceID, identifier)
-			if observeErr != nil {
-				return 0, observeErr
-			}
-			deviceID = resolvedID
+		deviceID, err = observeIdentifiers(ctx, tx, deviceID, identifiers)
+		if err != nil {
+			return 0, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE device_addresses SET last_seen_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE address = ?`, address); err != nil {
+	if err = touchObservation(ctx, tx, address, deviceID); err != nil {
 		return 0, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE devices SET last_seen_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, deviceID); err != nil {
-		return 0, err
-	}
-	if err := tx.Commit(); err != nil {
+	if err = tx.Commit(); err != nil {
 		return 0, err
 	}
 	return deviceID, nil
+}
+
+func deviceForAddress(ctx context.Context, tx *sql.Tx, address, source string, matchedDeviceID int64) (int64, error) {
+	var deviceID int64
+	err := tx.QueryRowContext(ctx, `SELECT device_id FROM device_addresses WHERE address = ?`, address).Scan(&deviceID)
+	if err == nil {
+		return deviceID, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	deviceID = matchedDeviceID
+	if deviceID == 0 {
+		result, err := tx.ExecContext(ctx, `INSERT INTO devices(first_seen_at, last_seen_at) VALUES(CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`)
+		if err != nil {
+			return 0, err
+		}
+		deviceID, err = result.LastInsertId()
+		if err != nil {
+			return 0, err
+		}
+	}
+	family := "ipv4"
+	if strings.Contains(address, ":") {
+		family = "ipv6"
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO device_addresses(device_id, address, family, source, confidence)
+		VALUES(?, ?, ?, ?, 'observed')`, deviceID, address, family, source); err != nil {
+		return 0, err
+	}
+	return deviceID, nil
+}
+
+func observeIdentifiers(ctx context.Context, tx *sql.Tx, deviceID int64, identifiers []Identifier) (int64, error) {
+	for _, identifier := range identifiers {
+		resolvedID, err := observeIdentifier(ctx, tx, deviceID, identifier)
+		if err != nil {
+			return 0, err
+		}
+		deviceID = resolvedID
+	}
+	return deviceID, nil
+}
+
+func touchObservation(ctx context.Context, tx *sql.Tx, address string, deviceID int64) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE device_addresses SET last_seen_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE address = ?`, address); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE devices SET last_seen_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, deviceID)
+	return err
 }
 
 func normalizedIdentifiers(input []Identifier) []Identifier {
@@ -136,19 +170,22 @@ func DeviceIDForAddress(ctx context.Context, store *db.Store, address string) (i
 	}
 	var id int64
 	err := store.DB.QueryRowContext(ctx, `SELECT device_id FROM device_addresses WHERE address = ?`, address).Scan(&id)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
 	return id, err == nil, err
 }
 
-func Addresses(ctx context.Context, store *db.Store, deviceID int64) ([]string, error) {
+func Addresses(ctx context.Context, store *db.Store, deviceID int64) (result []string, err error) {
 	rows, err := store.DB.QueryContext(ctx, `SELECT address FROM device_addresses WHERE device_id = ? ORDER BY last_seen_at DESC, id DESC`, deviceID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var result []string
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	for rows.Next() {
 		var address string
 		if err := rows.Scan(&address); err != nil {
@@ -157,29 +194,6 @@ func Addresses(ctx context.Context, store *db.Store, deviceID int64) ([]string, 
 		result = append(result, address)
 	}
 	return result, rows.Err()
-}
-
-func AssignProtection(ctx context.Context, store *db.Store, address string, protectionID int64) (int64, error) {
-	deviceID, err := ResolveAddress(ctx, store, address, "assignment")
-	if err != nil {
-		return 0, err
-	}
-	if _, err := store.DB.ExecContext(ctx, `
-		INSERT INTO device_protection_memberships(device_id, protection_id, updated_at)
-		VALUES(?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(device_id) DO UPDATE SET protection_id = excluded.protection_id, updated_at = CURRENT_TIMESTAMP`, deviceID, protectionID); err != nil {
-		return 0, err
-	}
-	return deviceID, nil
-}
-
-func RemoveProtection(ctx context.Context, store *db.Store, address string) error {
-	deviceID, ok, err := DeviceIDForAddress(ctx, store, address)
-	if err != nil || !ok {
-		return err
-	}
-	_, err = store.DB.ExecContext(ctx, `DELETE FROM device_protection_memberships WHERE device_id = ?`, deviceID)
-	return err
 }
 
 func passiveIdentifiers(ctx context.Context, database *sql.DB, address string) ([]Identifier, error) {
@@ -217,7 +231,7 @@ func deviceForIdentifiers(ctx context.Context, tx *sql.Tx, identifiers []Identif
 	for _, identifier := range identifiers {
 		var candidate int64
 		err := tx.QueryRowContext(ctx, `SELECT device_id FROM device_identifiers WHERE kind = ? AND value = ?`, identifier.Kind, identifier.Value).Scan(&candidate)
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
 		if err != nil {
@@ -240,7 +254,7 @@ func observeIdentifier(ctx context.Context, tx *sql.Tx, deviceID int64, identifi
 	}
 	var existingID int64
 	err := tx.QueryRowContext(ctx, `SELECT device_id FROM device_identifiers WHERE kind = ? AND value = ?`, identifier.Kind, identifier.Value).Scan(&existingID)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
 	if err == nil && existingID != deviceID {
@@ -268,38 +282,54 @@ func safeMerge(ctx context.Context, tx *sql.Tx, targetID, sourceID int64) (bool,
 	if targetID == sourceID {
 		return true, nil
 	}
-	type deviceFields struct {
-		name, location, notes string
-		confirmed             bool
-		protection            sql.NullInt64
-	}
-	read := func(id int64) (deviceFields, error) {
-		var fields deviceFields
-		err := tx.QueryRowContext(ctx, `
-			SELECT d.name, COALESCE(d.location, ''), COALESCE(d.notes, ''), d.confirmed, m.protection_id
-			FROM devices d LEFT JOIN device_protection_memberships m ON m.device_id = d.id
-			WHERE d.id = ?`, id).Scan(&fields.name, &fields.location, &fields.notes, &fields.confirmed, &fields.protection)
-		return fields, err
-	}
-	target, err := read(targetID)
+	target, err := readDeviceFields(ctx, tx, targetID)
 	if err != nil {
 		return false, err
 	}
-	source, err := read(sourceID)
+	source, err := readDeviceFields(ctx, tx, sourceID)
 	if err != nil {
 		return false, err
 	}
-	if target.confirmed && source.confirmed && strings.TrimSpace(target.name) != "" && !strings.EqualFold(target.name, source.name) {
+	if !canMergeDevices(target, source) {
 		return false, nil
+	}
+	if err := mergeProtection(ctx, tx, targetID, target.protection, source.protection); err != nil {
+		return false, err
+	}
+	if err := mergeDeviceData(ctx, tx, targetID, sourceID, source); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func readDeviceFields(ctx context.Context, tx *sql.Tx, deviceID int64) (deviceFields, error) {
+	var fields deviceFields
+	err := tx.QueryRowContext(ctx, `
+		SELECT d.name, COALESCE(d.location, ''), COALESCE(d.notes, ''), d.confirmed, m.protection_id
+		FROM devices d LEFT JOIN device_protection_memberships m ON m.device_id = d.id
+		WHERE d.id = ?`, deviceID).Scan(&fields.name, &fields.location, &fields.notes, &fields.confirmed, &fields.protection)
+	return fields, err
+}
+
+func canMergeDevices(target, source deviceFields) bool {
+	if target.confirmed && source.confirmed && strings.TrimSpace(target.name) != "" && !strings.EqualFold(target.name, source.name) {
+		return false
 	}
 	if target.protection.Valid && source.protection.Valid && target.protection.Int64 != source.protection.Int64 {
-		return false, nil
+		return false
 	}
-	if !target.protection.Valid && source.protection.Valid {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO device_protection_memberships(device_id, protection_id) VALUES(?, ?)`, targetID, source.protection.Int64); err != nil {
-			return false, err
-		}
+	return true
+}
+
+func mergeProtection(ctx context.Context, tx *sql.Tx, targetID int64, target, source sql.NullInt64) error {
+	if target.Valid || !source.Valid {
+		return nil
 	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO device_protection_memberships(device_id, protection_id) VALUES(?, ?)`, targetID, source.Int64)
+	return err
+}
+
+func mergeDeviceData(ctx context.Context, tx *sql.Tx, targetID, sourceID int64, source deviceFields) error {
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE devices SET
 			name = CASE WHEN TRIM(name) = '' THEN ? ELSE name END,
@@ -310,36 +340,36 @@ func safeMerge(ctx context.Context, tx *sql.Tx, targetID, sourceID int64) (bool,
 			last_seen_at = MAX(COALESCE(last_seen_at, ''), COALESCE((SELECT last_seen_at FROM devices WHERE id = ?), '')),
 			updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`, source.name, source.location, source.notes, source.confirmed, sourceID, sourceID, targetID); err != nil {
-		return false, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE device_addresses SET device_id = ?, updated_at = CURRENT_TIMESTAMP WHERE device_id = ?`, targetID, sourceID); err != nil {
-		return false, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE dns_queries SET device_id = ? WHERE device_id = ?`, targetID, sourceID); err != nil {
-		return false, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM device_identifiers WHERE device_id = ? AND EXISTS (SELECT 1 FROM device_identifiers target WHERE target.device_id = ? AND target.kind = device_identifiers.kind AND target.value = device_identifiers.value)`, sourceID, targetID); err != nil {
-		return false, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE device_identifiers SET device_id = ?, updated_at = CURRENT_TIMESTAMP WHERE device_id = ?`, targetID, sourceID); err != nil {
-		return false, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM device_names WHERE device_id = ? AND source IN (SELECT source FROM device_names WHERE device_id = ?)`, sourceID, targetID); err != nil {
-		return false, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE device_names SET device_id = ?, updated_at = CURRENT_TIMESTAMP WHERE device_id = ?`, targetID, sourceID); err != nil {
-		return false, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE unifi_client_snapshots SET device_id = ? WHERE device_id = ?`, targetID, sourceID); err != nil {
-		return false, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM device_protection_memberships WHERE device_id = ?`, sourceID); err != nil {
-		return false, err
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE id = ?`, sourceID); err != nil {
-		return false, err
+		return err
 	}
-	return true, nil
+	return nil
 }
 
 func normalizeAddress(value string) string {
@@ -365,7 +395,7 @@ func arpMAC(address string) string {
 	if err != nil {
 		return ""
 	}
-	defer file.Close()
+	var result string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
@@ -374,8 +404,16 @@ func arpMAC(address string) string {
 		}
 		mac, err := net.ParseMAC(fields[3])
 		if err == nil && fields[3] != "00:00:00:00:00:00" {
-			return strings.ToLower(mac.String())
+			result = strings.ToLower(mac.String())
+			break
 		}
 	}
-	return ""
+	if scanner.Err() != nil {
+		_ = file.Close()
+		return ""
+	}
+	if err := file.Close(); err != nil {
+		return ""
+	}
+	return result
 }

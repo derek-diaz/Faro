@@ -31,9 +31,14 @@ const (
 	MaxUploadBytes      = maxDatabaseBytes + (64 << 20)
 	chunkSize           = 1 << 20
 	magic               = "FAROBKP1"
+	databaseFilename    = "faro.db"
 )
 
 var ErrInvalidBackup = errors.New("backup is invalid, corrupted, or protected by a different passphrase")
+
+func noopCleanup() {
+	// The operation failed before a temporary directory was created.
+}
 
 var restoreTables = []string{
 	"settings",
@@ -92,7 +97,7 @@ var rollbackDeleteTables = append([]string{
 	"device_names",
 }, deleteTables...)
 
-var rollbackRestoreTables = append(append([]string{}, restoreTables...),
+var rollbackRestoreTables = append(append([]string(nil), restoreTables...),
 	"device_names",
 	"unifi_client_snapshots",
 	"device_classifications",
@@ -130,33 +135,33 @@ func NewService(store *db.Store) *Service {
 // owns the returned cleanup function.
 func (s *Service) Create(ctx context.Context, passphrase string) (string, Manifest, func(), error) {
 	if err := validatePassphrase(passphrase); err != nil {
-		return "", Manifest{}, func() {}, err
+		return "", Manifest{}, noopCleanup, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	tempDir, err := os.MkdirTemp("", "faro-backup-")
 	if err != nil {
-		return "", Manifest{}, func() {}, err
+		return "", Manifest{}, noopCleanup, err
 	}
 	cleanup := func() { _ = os.RemoveAll(tempDir) }
-	databasePath := filepath.Join(tempDir, "faro.db")
+	databasePath := filepath.Join(tempDir, databaseFilename)
 	if err := snapshotDatabase(ctx, s.store.DB, databasePath); err != nil {
 		cleanup()
-		return "", Manifest{}, func() {}, fmt.Errorf("snapshot database: %w", err)
+		return "", Manifest{}, noopCleanup, fmt.Errorf("snapshot database: %w", err)
 	}
 	if err := scrubSnapshot(databasePath); err != nil {
 		cleanup()
-		return "", Manifest{}, func() {}, fmt.Errorf("prepare snapshot: %w", err)
+		return "", Manifest{}, noopCleanup, fmt.Errorf("prepare snapshot: %w", err)
 	}
 	info, err := os.Stat(databasePath)
 	if err != nil {
 		cleanup()
-		return "", Manifest{}, func() {}, err
+		return "", Manifest{}, noopCleanup, err
 	}
 	if info.Size() > maxDatabaseBytes {
 		cleanup()
-		return "", Manifest{}, func() {}, errors.New("database is too large for a portable Faro backup")
+		return "", Manifest{}, noopCleanup, errors.New("database is too large for a portable Faro backup")
 	}
 	manifest := Manifest{
 		FormatVersion: FormatVersion,
@@ -167,12 +172,12 @@ func (s *Service) Create(ctx context.Context, passphrase string) (string, Manife
 	archivePath := filepath.Join(tempDir, "payload.zip")
 	if err := writeArchive(archivePath, databasePath, manifest); err != nil {
 		cleanup()
-		return "", Manifest{}, func() {}, err
+		return "", Manifest{}, noopCleanup, err
 	}
 	encryptedPath := filepath.Join(tempDir, "faro-backup.faro-backup")
 	if err := encryptFile(archivePath, encryptedPath, passphrase); err != nil {
 		cleanup()
-		return "", Manifest{}, func() {}, err
+		return "", Manifest{}, noopCleanup, err
 	}
 	_ = os.Remove(archivePath)
 	_ = os.Remove(databasePath)
@@ -217,7 +222,7 @@ func (s *Service) BeginRestore(ctx context.Context, encrypted io.Reader, passphr
 	if err := decryptToFile(encrypted, archivePath, passphrase); err != nil {
 		return Manifest{}, nil, ErrInvalidBackup
 	}
-	databasePath := filepath.Join(tempDir, "faro.db")
+	databasePath := filepath.Join(tempDir, databaseFilename)
 	manifest, err := extractArchive(archivePath, databasePath)
 	if err != nil {
 		return Manifest{}, nil, ErrInvalidBackup
@@ -249,7 +254,7 @@ func (s *Service) BeginRestore(ctx context.Context, encrypted io.Reader, passphr
 // Commit accepts the restored database and releases its private rollback
 // snapshot.
 func (r *RestoreTransaction) Commit() {
-	r.finish(nil)
+	_ = r.finish(nil)
 }
 
 // Rollback replaces every table affected directly or through cascading
@@ -297,17 +302,21 @@ func snapshotDatabase(ctx context.Context, source *sql.DB, destinationPath strin
 	if err != nil {
 		return err
 	}
-	defer destination.Close()
+	defer func() { _ = destination.Close() }()
 	sourceConn, err := source.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer sourceConn.Close()
+	defer func() { _ = sourceConn.Close() }()
 	destinationConn, err := destination.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer destinationConn.Close()
+	defer func() { _ = destinationConn.Close() }()
+	return backupSQLiteConnections(sourceConn, destinationConn)
+}
+
+func backupSQLiteConnections(sourceConn, destinationConn *sql.Conn) error {
 	return sourceConn.Raw(func(sourceDriver any) error {
 		src, ok := sourceDriver.(*sqlite3.SQLiteConn)
 		if !ok {
@@ -318,24 +327,28 @@ func snapshotDatabase(ctx context.Context, source *sql.DB, destinationPath strin
 			if !ok {
 				return errors.New("unexpected SQLite destination connection")
 			}
-			backup, err := dst.Backup("main", src, "main")
-			if err != nil {
-				return err
-			}
-			done, stepErr := backup.Step(-1)
-			closeErr := backup.Finish()
-			if stepErr != nil {
-				return stepErr
-			}
-			if closeErr != nil {
-				return closeErr
-			}
-			if !done {
-				return errors.New("SQLite backup did not complete")
-			}
-			return nil
+			return runSQLiteBackup(dst, src)
 		})
 	})
+}
+
+func runSQLiteBackup(destination, source *sqlite3.SQLiteConn) error {
+	backup, err := destination.Backup("main", source, "main")
+	if err != nil {
+		return err
+	}
+	done, stepErr := backup.Step(-1)
+	closeErr := backup.Finish()
+	if stepErr != nil {
+		return stepErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if !done {
+		return errors.New("SQLite backup did not complete")
+	}
+	return nil
 }
 
 func scrubSnapshot(path string) error {
@@ -343,13 +356,13 @@ func scrubSnapshot(path string) error {
 	if err != nil {
 		return err
 	}
-	defer database.Close()
-	if _, err := database.Exec(`DELETE FROM auth_sessions`); err != nil {
+	defer func() { _ = database.Close() }()
+	if _, err := database.Exec(`DELETE FROM auth_sessions WHERE 1 = 1`); err != nil {
 		return err
 	}
 	if _, err := database.Exec(`
-		DELETE FROM redundancy_nodes;
-		DELETE FROM redundancy_snapshots;
+		DELETE FROM redundancy_nodes WHERE 1 = 1;
+		DELETE FROM redundancy_snapshots WHERE 1 = 1;
 		UPDATE redundancy_state
 		SET role = 'standalone',
 		    home_id = '',
@@ -380,13 +393,18 @@ func writeArchive(archivePath, databasePath string, manifest Manifest) error {
 	}
 	if err == nil {
 		var databaseWriter io.Writer
-		databaseWriter, err = archive.CreateHeader(&zip.FileHeader{Name: "faro.db", Method: zip.Deflate})
+		databaseWriter, err = archive.CreateHeader(&zip.FileHeader{Name: databaseFilename, Method: zip.Deflate})
 		if err == nil {
-			var database *os.File
-			database, err = os.Open(databasePath)
+			database, openErr := os.Open(databasePath)
+			err = openErr
 			if err == nil {
-				_, err = io.Copy(databaseWriter, database)
-				_ = database.Close()
+				_, copyErr := io.Copy(databaseWriter, database)
+				closeErr := database.Close()
+				if copyErr != nil {
+					err = copyErr
+				} else {
+					err = closeErr
+				}
 			}
 		}
 	}
@@ -406,48 +424,26 @@ func extractArchive(archivePath, databasePath string) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	var manifest Manifest
 	foundManifest := false
 	foundDatabase := false
 	for _, file := range reader.File {
 		switch file.Name {
 		case "manifest.json":
-			if foundManifest || file.UncompressedSize64 > 64<<10 {
+			if foundManifest {
 				return Manifest{}, ErrInvalidBackup
 			}
-			input, openErr := file.Open()
-			if openErr != nil {
-				return Manifest{}, openErr
-			}
-			err = json.NewDecoder(io.LimitReader(input, 64<<10)).Decode(&manifest)
-			_ = input.Close()
-			if err != nil {
+			if err := readManifestEntry(file, &manifest); err != nil {
 				return Manifest{}, err
 			}
 			foundManifest = true
-		case "faro.db":
-			if foundDatabase || file.UncompressedSize64 > maxDatabaseBytes {
+		case databaseFilename:
+			if foundDatabase {
 				return Manifest{}, ErrInvalidBackup
 			}
-			input, openErr := file.Open()
-			if openErr != nil {
-				return Manifest{}, openErr
-			}
-			output, createErr := os.OpenFile(databasePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-			if createErr == nil {
-				var copied int64
-				copied, createErr = io.Copy(output, io.LimitReader(input, maxDatabaseBytes+1))
-				if copied > maxDatabaseBytes {
-					createErr = ErrInvalidBackup
-				}
-			}
-			if output != nil {
-				_ = output.Close()
-			}
-			_ = input.Close()
-			if createErr != nil {
-				return Manifest{}, createErr
+			if err := extractDatabaseEntry(file, databasePath); err != nil {
+				return Manifest{}, err
 			}
 			foundDatabase = true
 		}
@@ -462,12 +458,44 @@ func extractArchive(archivePath, databasePath string) (Manifest, error) {
 	return manifest, nil
 }
 
+func readManifestEntry(file *zip.File, manifest *Manifest) error {
+	if file.UncompressedSize64 > 64<<10 {
+		return ErrInvalidBackup
+	}
+	input, err := file.Open()
+	if err != nil {
+		return err
+	}
+	decodeErr := json.NewDecoder(io.LimitReader(input, 64<<10)).Decode(manifest)
+	closeErr := input.Close()
+	return errors.Join(decodeErr, closeErr)
+}
+
+func extractDatabaseEntry(file *zip.File, databasePath string) error {
+	if file.UncompressedSize64 > maxDatabaseBytes {
+		return ErrInvalidBackup
+	}
+	input, err := file.Open()
+	if err != nil {
+		return err
+	}
+	output, err := os.OpenFile(databasePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return errors.Join(err, input.Close())
+	}
+	copied, copyErr := io.Copy(output, io.LimitReader(input, maxDatabaseBytes+1))
+	if copied > maxDatabaseBytes {
+		copyErr = ErrInvalidBackup
+	}
+	return errors.Join(copyErr, output.Close(), input.Close())
+}
+
 func prepareRestoreDatabase(path string) error {
 	store, err := db.Open(path)
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return integrityCheck(store.DB)
 }
 
@@ -491,14 +519,37 @@ func restoreDatabaseTables(ctx context.Context, live *sql.DB, sourcePath string,
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	if _, err := connection.ExecContext(ctx, `ATTACH DATABASE ? AS restore_source`, sourcePath); err != nil {
 		return err
 	}
-	defer connection.ExecContext(context.Background(), `DETACH DATABASE restore_source`)
+	defer func() {
+		_, _ = connection.ExecContext(context.Background(), `DETACH DATABASE restore_source`)
+	}()
+	if err := validateRestoreTables(ctx, connection, sourceTables); err != nil {
+		return err
+	}
+	tx, err := connection.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := clearRestoreTables(ctx, tx, tablesToDelete); err != nil {
+		return err
+	}
+	if err := copyRestoreTables(ctx, tx, sourceTables); err != nil {
+		return err
+	}
+	if err := validateForeignKeys(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func validateRestoreTables(ctx context.Context, connection *sql.Conn, sourceTables []string) error {
 	for _, table := range sourceTables {
-		var sourceType string
-		if err := connection.QueryRowContext(ctx, `SELECT type FROM restore_source.sqlite_master WHERE name = ?`, table).Scan(&sourceType); err != nil || sourceType != "table" {
+		sourceType, err := restoreTableType(ctx, connection, table)
+		if err != nil || sourceType != "table" {
 			return fmt.Errorf("backup table %s is missing or invalid", table)
 		}
 		compatible, err := compatibleColumns(ctx, connection, table)
@@ -509,33 +560,58 @@ func restoreDatabaseTables(ctx context.Context, live *sql.DB, sourcePath string,
 			return fmt.Errorf("backup table %s is incompatible with this Faro version", table)
 		}
 	}
-	tx, err := connection.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, table := range tablesToDelete {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table); err != nil {
+	return nil
+}
+
+func clearRestoreTables(ctx context.Context, tx *sql.Tx, tables []string) error {
+	for _, table := range tables {
+		if _, err := tx.ExecContext(ctx, deleteRestoreTableQuery(table)); err != nil {
 			return err
 		}
 	}
-	for _, table := range sourceTables {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO `+table+` SELECT * FROM restore_source.`+table); err != nil {
+	return nil
+}
+
+func copyRestoreTables(ctx context.Context, tx *sql.Tx, tables []string) error {
+	for _, table := range tables {
+		if _, err := tx.ExecContext(ctx, copyRestoreTableQuery(table)); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+func validateForeignKeys(ctx context.Context, tx *sql.Tx) error {
 	rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if rows.Next() {
 		return errors.New("restored database violates relational integrity")
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
+}
+
+func restoreTableType(ctx context.Context, connection *sql.Conn, table string) (string, error) {
+	query := fmt.Sprintf(`SELECT type FROM %s.sqlite_master WHERE name = ?`, quoteIdentifier("restore_source"))
+	var sourceType string
+	if err := connection.QueryRowContext(ctx, query, table).Scan(&sourceType); err != nil {
+		return "", err
+	}
+	return sourceType, nil
+}
+
+func deleteRestoreTableQuery(table string) string {
+	return fmt.Sprintf("DELETE FROM %s WHERE 1 = 1", quoteIdentifier(table))
+}
+
+func copyRestoreTableQuery(table string) string {
+	quotedTable := quoteIdentifier(table)
+	return fmt.Sprintf("INSERT INTO %s SELECT * FROM %s.%s", quotedTable, quoteIdentifier("restore_source"), quotedTable)
 }
 
 func compatibleColumns(ctx context.Context, connection *sql.Conn, table string) (bool, error) {
@@ -555,7 +631,7 @@ func tableColumns(ctx context.Context, connection *sql.Conn, schema, table strin
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var columns []string
 	for rows.Next() {
 		var cid int
@@ -575,7 +651,7 @@ func encryptFile(sourcePath, destinationPath, passphrase string) error {
 	if err != nil {
 		return err
 	}
-	defer source.Close()
+	defer func() { _ = source.Close() }()
 	destination, err := os.OpenFile(destinationPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -597,7 +673,10 @@ func encrypt(destination io.Writer, source io.Reader, passphrase string) error {
 	if _, err := rand.Read(noncePrefix); err != nil {
 		return err
 	}
-	header := append(append(append([]byte{}, []byte(magic)...), byte(FormatVersion)), salt...)
+	header := make([]byte, 0, len(magic)+1+len(salt)+len(noncePrefix))
+	header = append(header, magic...)
+	header = append(header, byte(FormatVersion))
+	header = append(header, salt...)
 	header = append(header, noncePrefix...)
 	if _, err := destination.Write(header); err != nil {
 		return err
@@ -709,4 +788,8 @@ func additionalData(counter uint32) []byte {
 	value[len(magic)] = byte(FormatVersion)
 	binary.BigEndian.PutUint32(value[len(magic)+1:], counter)
 	return value
+}
+
+func quoteIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
 }

@@ -70,7 +70,7 @@ func (r Refresher) Refresh(ctx context.Context, id int64) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	limited := &io.LimitedReader{R: body, N: maxDownloadBytes + 1}
 	domains, err := Parse(limited)
@@ -88,7 +88,7 @@ func (r Refresher) Refresh(ctx context.Context, id int64) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM blocklist_entries WHERE blocklist_id = ?`, id); err != nil {
 		return 0, err
@@ -97,7 +97,7 @@ func (r Refresher) Refresh(ctx context.Context, id int64) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer insert.Close()
+	defer func() { _ = insert.Close() }()
 	for _, domain := range domains {
 		if _, err := insert.ExecContext(ctx, id, domain); err != nil {
 			return 0, err
@@ -121,7 +121,7 @@ func (r Refresher) snapshot(ctx context.Context, id int64) (listSnapshot, error)
 	if err != nil {
 		return snapshot, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var domain string
 		if err := rows.Scan(&domain); err != nil {
@@ -137,7 +137,7 @@ func (r Refresher) restore(ctx context.Context, id int64, snapshot listSnapshot)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM blocklist_entries WHERE blocklist_id = ?`, id); err != nil {
 		return err
 	}
@@ -256,47 +256,9 @@ func Parse(reader io.Reader) ([]string, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
-			continue
+		if domain, ok := parseBlocklistLine(scanner.Text()); ok {
+			seen[domain] = struct{}{}
 		}
-		if strings.Contains(line, "##") || strings.Contains(line, "#@#") || strings.Contains(line, "#$#") || strings.Contains(line, "#?#") {
-			continue
-		}
-		if idx := strings.Index(line, "#"); idx >= 0 {
-			line = strings.TrimSpace(line[:idx])
-		}
-		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
-
-		candidate := fields[0]
-		if len(fields) > 1 && (candidate == "0.0.0.0" || candidate == "127.0.0.1" || candidate == "::1") {
-			candidate = fields[1]
-		} else if strings.HasPrefix(candidate, "@@") {
-			// Allow rules are not blocklist entries.
-			continue
-		} else if strings.HasPrefix(candidate, "||") {
-			// Adblock-style DNS rules may include an anchor and options, for
-			// example ||example.com^$important. DNS can enforce the hostname,
-			// while browser-only path, cosmetic, and scriptlet rules are ignored.
-			candidate = strings.TrimPrefix(candidate, "||")
-			end := strings.Index(candidate, "^")
-			if end <= 0 || strings.Contains(candidate[:end], "/") {
-				continue
-			}
-			candidate = candidate[:end]
-		} else if strings.ContainsAny(candidate, "|*$=~[](){}") {
-			continue
-		}
-		candidate = strings.TrimPrefix(candidate, ".")
-
-		domain, err := db.NormalizeDomain(candidate)
-		if err != nil {
-			continue
-		}
-		seen[domain] = struct{}{}
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
@@ -310,17 +272,58 @@ func Parse(reader io.Reader) ([]string, error) {
 	return domains, nil
 }
 
+func parseBlocklistLine(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
+		return "", false
+	}
+	if strings.Contains(line, "##") || strings.Contains(line, "#@#") || strings.Contains(line, "#$#") || strings.Contains(line, "#?#") {
+		return "", false
+	}
+	if idx := strings.Index(line, "#"); idx >= 0 {
+		line = strings.TrimSpace(line[:idx])
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return "", false
+	}
+
+	candidate := fields[0]
+	switch {
+	case len(fields) > 1 && (candidate == "0.0.0.0" || candidate == "127.0.0.1" || candidate == "::1"):
+		candidate = fields[1]
+	case strings.HasPrefix(candidate, "@@"):
+		// Allow rules are not blocklist entries.
+		return "", false
+	case strings.HasPrefix(candidate, "||"):
+		// Adblock-style DNS rules may include an anchor and options, for
+		// example ||example.com^$important. DNS can enforce the hostname,
+		// while browser-only path, cosmetic, and scriptlet rules are ignored.
+		candidate, _ = strings.CutPrefix(candidate, "||")
+		end := strings.Index(candidate, "^")
+		if end <= 0 || strings.Contains(candidate[:end], "/") {
+			return "", false
+		}
+		candidate = candidate[:end]
+	case strings.ContainsAny(candidate, "|*$=~[](){}"):
+		return "", false
+	}
+	candidate = strings.TrimPrefix(candidate, ".")
+	domain, err := db.NormalizeDomain(candidate)
+	return domain, err == nil
+}
+
 func (r Refresher) openSource(ctx context.Context, source string) (io.ReadCloser, error) {
-	if strings.HasPrefix(source, "file://") {
-		return os.Open(strings.TrimPrefix(source, "file://"))
+	if filePath, ok := strings.CutPrefix(source, "file://"); ok {
+		return os.Open(filePath)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, source, nil)
 	if err != nil {
 		return nil, err
 	}
-	// Resolve downloads directly through Faro's configured public upstreams.
+	// Resolve downloads directly through Faro's configured public DNS upstreams.
 	// Docker's host resolver may point back to Faro and cannot answer while the
-	// DNS container is still coming up during an install or upgrade.
+	// DNS container is still coming up during installation or upgrade.
 	resolver := newBlocklistResolver(r.blocklistDNSUpstreams(ctx))
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = blocklistDialContext(resolver)

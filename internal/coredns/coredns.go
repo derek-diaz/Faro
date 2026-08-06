@@ -30,6 +30,8 @@ var reloadTotal atomic.Uint64
 var reloadFailedTotal atomic.Uint64
 var errReloadHashUnavailable = errors.New("CoreDNS reload hash is unavailable")
 
+const coreDNSPathPrefix = "/etc/coredns/"
+
 type Manager struct {
 	Store             *db.Store
 	ConfigDir         string
@@ -230,20 +232,23 @@ func (m *Manager) applyFilesLocked(ctx context.Context, files map[string][]byte)
 	}
 	if liveErr == nil || (m.bootstrapped && hashNotInitialized && corefileChanged) {
 		if err := m.waitForLiveHash(ctx, expectedHash); err != nil {
-			names := fileNames(files)
-			rollback(m.ConfigDir, backups, names)
 			reloadFailedTotal.Add(1)
-			if previousHash == "" {
-				return fmt.Errorf("CoreDNS did not accept the new configuration; the previous files were restored but no prior reload hash was available: %w", err)
-			}
-			if rollbackErr := m.waitForLiveHash(context.WithoutCancel(ctx), previousHash); rollbackErr != nil {
-				return fmt.Errorf("CoreDNS did not accept the new configuration and rollback could not be verified: %v; rollback verification: %w", err, rollbackErr)
-			}
-			return fmt.Errorf("CoreDNS did not accept the new configuration; the previous configuration was restored: %w", err)
+			return m.handleReloadFailure(ctx, files, backups, previousHash, err)
 		}
 	}
 	m.bootstrapped = true
 	return nil
+}
+
+func (m *Manager) handleReloadFailure(ctx context.Context, files, backups map[string][]byte, previousHash string, reloadErr error) error {
+	rollback(m.ConfigDir, backups, fileNames(files))
+	if previousHash == "" {
+		return fmt.Errorf("CoreDNS did not accept the new configuration; the previous files were restored but no prior reload hash was available: %w", reloadErr)
+	}
+	if rollbackErr := m.waitForLiveHash(context.WithoutCancel(ctx), previousHash); rollbackErr != nil {
+		return fmt.Errorf("CoreDNS did not accept the new configuration and rollback could not be verified: %v; rollback verification: %w", reloadErr, rollbackErr)
+	}
+	return fmt.Errorf("CoreDNS did not accept the new configuration; the previous configuration was restored: %w", reloadErr)
 }
 
 func ReloadTotals() (uint64, uint64) {
@@ -262,43 +267,9 @@ func (m *Manager) render(ctx context.Context) (renderedFiles, error) {
 	if err != nil {
 		return renderedFiles{}, err
 	}
-	upstreams := splitCSV(settings["upstream_dns"])
-	if len(upstreams) == 0 {
-		upstreams = []string{"1.1.1.1", "9.9.9.9"}
-	}
-	if len(upstreams) > 15 {
-		return renderedFiles{}, fmt.Errorf("at most 15 upstream resolvers are supported")
-	}
-	for _, upstream := range upstreams {
-		if net.ParseIP(upstream) == nil {
-			return renderedFiles{}, fmt.Errorf("invalid upstream resolver %q", upstream)
-		}
-	}
-	upstreamTransport := strings.TrimSpace(settings["upstream_transport"])
-	if upstreamTransport == "" {
-		upstreamTransport = "standard"
-	}
-	switch upstreamTransport {
-	case "standard":
-	case "encrypted":
-		upstreams = []string{"127.0.0.1:5053"}
-	default:
-		return renderedFiles{}, fmt.Errorf("invalid upstream transport %q", upstreamTransport)
-	}
-	cacheEnabled := settings["dns_cache_enabled"] != "false"
-	cacheTTL := 300
-	if parsed, parseErr := strconv.Atoi(settings["dns_cache_ttl"]); parseErr == nil {
-		cacheTTL = max(30, min(parsed, 3600))
-	}
-	denialTTL := min(cacheTTL, 60)
-	allowedCIDRs := splitCSV(settings["allowed_client_cidrs"])
-	if len(allowedCIDRs) == 0 {
-		allowedCIDRs = []string{"127.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"}
-	}
-	for _, allowedCIDR := range allowedCIDRs {
-		if _, _, parseErr := net.ParseCIDR(allowedCIDR); parseErr != nil {
-			return renderedFiles{}, fmt.Errorf("invalid allowed client CIDR %q", allowedCIDR)
-		}
+	state, err := renderStateForSettings(settings)
+	if err != nil {
+		return renderedFiles{}, err
 	}
 
 	localHosts, err := m.localHosts(ctx)
@@ -310,7 +281,7 @@ func (m *Manager) render(ctx context.Context) (renderedFiles, error) {
 		return renderedFiles{}, err
 	}
 	if len(protections) == 0 {
-		return renderedFiles{}, errors.New("Home protection is missing")
+		return renderedFiles{}, errors.New("home protection is missing")
 	}
 
 	blockTemplate := template.Must(template.New("serverBlock").Parse(`.:53 {
@@ -329,7 +300,7 @@ func (m *Manager) render(ctx context.Context) (renderedFiles, error) {
 		allow net {{ range .AllowedCIDRs }}{{ . }} {{ end }}
 		block
 	}
-    hosts /etc/coredns/{{ .Protection.HostsFile }} {
+	    hosts ` + coreDNSPathPrefix + `{{ .Protection.HostsFile }} {
         ttl 60
         fallthrough
     }
@@ -341,8 +312,67 @@ func (m *Manager) render(ctx context.Context) (renderedFiles, error) {
 }
 `))
 	var core bytes.Buffer
-	state := renderState{Upstreams: upstreams, CacheEnabled: cacheEnabled, CacheTTL: cacheTTL, DenialTTL: denialTTL, AllowedCIDRs: allowedCIDRs}
-	protectionHosts := map[string]string{}
+	protectionHosts, defaultBlocks, err := renderProtectionBlocks(&core, blockTemplate, state, localHosts, protections)
+	if err != nil {
+		return renderedFiles{}, err
+	}
+	return renderedFiles{
+		Corefile:        core.String(),
+		LocalHosts:      localHosts,
+		BlockHosts:      defaultBlocks,
+		ProtectionHosts: protectionHosts,
+	}, nil
+}
+
+func renderStateForSettings(settings map[string]string) (renderState, error) {
+	upstreams := splitCSV(settings["upstream_dns"])
+	if len(upstreams) == 0 {
+		upstreams = []string{"1.1.1.1", "9.9.9.9"}
+	}
+	if len(upstreams) > 15 {
+		return renderState{}, fmt.Errorf("at most 15 upstream resolvers are supported")
+	}
+	for _, upstream := range upstreams {
+		if net.ParseIP(upstream) == nil {
+			return renderState{}, fmt.Errorf("invalid upstream resolver %q", upstream)
+		}
+	}
+	upstreamTransport := strings.TrimSpace(settings["upstream_transport"])
+	if upstreamTransport == "" {
+		upstreamTransport = "standard"
+	}
+	switch upstreamTransport {
+	case "standard":
+	case "encrypted":
+		upstreams = []string{"127.0.0.1:5053"}
+	default:
+		return renderState{}, fmt.Errorf("invalid upstream transport %q", upstreamTransport)
+	}
+
+	cacheTTL := 300
+	if parsed, parseErr := strconv.Atoi(settings["dns_cache_ttl"]); parseErr == nil {
+		cacheTTL = max(30, min(parsed, 3600))
+	}
+	allowedCIDRs := splitCSV(settings["allowed_client_cidrs"])
+	if len(allowedCIDRs) == 0 {
+		allowedCIDRs = []string{"127.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"}
+	}
+	for _, allowedCIDR := range allowedCIDRs {
+		if _, _, parseErr := net.ParseCIDR(allowedCIDR); parseErr != nil {
+			return renderState{}, fmt.Errorf("invalid allowed client CIDR %q", allowedCIDR)
+		}
+	}
+	return renderState{
+		Upstreams:    upstreams,
+		CacheEnabled: settings["dns_cache_enabled"] != "false",
+		CacheTTL:     cacheTTL,
+		DenialTTL:    min(cacheTTL, 60),
+		AllowedCIDRs: allowedCIDRs,
+	}, nil
+}
+
+func renderProtectionBlocks(core *bytes.Buffer, blockTemplate *template.Template, state renderState, localHosts string, protections []protectionRender) (map[string]string, string, error) {
+	protectionHosts := make(map[string]string, len(protections))
 	defaultBlocks := ""
 	for _, protection := range protections {
 		protectionHosts[protection.HostsFile] = localHosts + "\n" + protection.BlockHosts
@@ -357,16 +387,11 @@ func (m *Manager) render(ctx context.Context) (renderedFiles, error) {
 			Protection     protectionRender
 			ViewExpression string
 		}{renderState: state, Protection: protection, ViewExpression: protectionViewExpression(protection.ClientIPs)}
-		if err := blockTemplate.Execute(&core, data); err != nil {
-			return renderedFiles{}, err
+		if err := blockTemplate.Execute(core, data); err != nil {
+			return nil, "", err
 		}
 	}
-	return renderedFiles{
-		Corefile:        core.String(),
-		LocalHosts:      localHosts,
-		BlockHosts:      defaultBlocks,
-		ProtectionHosts: protectionHosts,
-	}, nil
+	return protectionHosts, defaultBlocks, nil
 }
 
 func (m *Manager) localHosts(ctx context.Context) (string, error) {
@@ -374,7 +399,7 @@ func (m *Manager) localHosts(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var b strings.Builder
 	b.WriteString("# Generated by Faro. Manual edits will be replaced.\n")
@@ -384,7 +409,9 @@ func (m *Manager) localHosts(ctx context.Context) (string, error) {
 			return "", err
 		}
 		if typ == "A" || typ == "AAAA" {
-			fmt.Fprintf(&b, "%s %s\n", value, host)
+			if _, err := fmt.Fprintf(&b, "%s %s\n", value, host); err != nil {
+				return "", err
+			}
 		}
 	}
 	return b.String(), rows.Err()
@@ -427,7 +454,9 @@ func (m *Manager) blockHostsForProtection(ctx context.Context, protectionID int6
 		if _, ok := allowed[domain]; ok {
 			continue
 		}
-		fmt.Fprintf(&b, "0.0.0.0 %s\n", domain)
+		if _, err := fmt.Fprintf(&b, "0.0.0.0 %s\n", domain); err != nil {
+			return "", err
+		}
 	}
 	return b.String(), nil
 }
@@ -486,7 +515,7 @@ func settingsMap(ctx context.Context, store *db.Store) (map[string]string, error
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	result := map[string]string{}
 	for rows.Next() {
 		var key, value string
@@ -503,7 +532,7 @@ func domains(ctx context.Context, store *db.Store, query string, args ...any) ([
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var result []string
 	for rows.Next() {
 		var domain string
@@ -536,11 +565,14 @@ func validateGeneratedFiles(files map[string][]byte) error {
 	hostsReferences := 0
 	for _, line := range strings.Split(corefile, "\n") {
 		fields := strings.Fields(strings.TrimSpace(line))
-		if len(fields) < 2 || fields[0] != "hosts" || !strings.HasPrefix(fields[1], "/etc/coredns/") {
+		if len(fields) < 2 || fields[0] != "hosts" {
+			continue
+		}
+		name, ok := strings.CutPrefix(fields[1], coreDNSPathPrefix)
+		if !ok {
 			continue
 		}
 		hostsReferences++
-		name := strings.TrimPrefix(fields[1], "/etc/coredns/")
 		if _, ok := files[name]; !ok {
 			return fmt.Errorf("generated Corefile references missing hosts file %q", name)
 		}
@@ -602,7 +634,7 @@ func writeRuntimeSettings(ctx context.Context, store *db.Store, values map[strin
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	for _, key := range []string{"upstream_dns", "upstream_transport"} {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
@@ -630,7 +662,7 @@ func (m *Manager) validateWithCoreDNS(ctx context.Context, files map[string][]by
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(stagingDir)
+	defer func() { _ = os.RemoveAll(stagingDir) }()
 
 	staged, err := validationFiles(stagingDir, files)
 	if err != nil {
@@ -687,7 +719,7 @@ func validationFiles(stagingDir string, files map[string][]byte) (map[string][]b
 	}
 	corefile := string(staged["Corefile"])
 	stagedPath := filepath.ToSlash(stagingDir) + "/"
-	corefile = strings.ReplaceAll(corefile, "/etc/coredns/", stagedPath)
+	corefile = strings.ReplaceAll(corefile, coreDNSPathPrefix, stagedPath)
 	corefile = strings.ReplaceAll(corefile, ".:53 {", ".:0 {")
 	corefile = strings.ReplaceAll(corefile, "prometheus 0.0.0.0:9153", "prometheus 127.0.0.1:0")
 	staged["Corefile"] = []byte(corefile)
@@ -743,7 +775,7 @@ func (m *Manager) liveCorefileHash(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("CoreDNS metrics returned %s", response.Status)
 	}
@@ -799,11 +831,10 @@ func reloadHashFromMetrics(reader io.Reader) (string, bool, error) {
 		if !strings.HasPrefix(line, "coredns_reload_version_info{") {
 			continue
 		}
-		labelsEnd := strings.IndexByte(line, '}')
-		if labelsEnd < 0 {
+		labels, _, found := strings.Cut(line, "}")
+		if !found {
 			continue
 		}
-		labels := line[:labelsEnd]
 		if !strings.EqualFold(metricLabel(labels, "hash"), "sha512") {
 			continue
 		}
@@ -822,11 +853,11 @@ func metricLabel(labels, name string) string {
 		return ""
 	}
 	start += len(needle)
-	end := strings.IndexByte(labels[start:], '"')
-	if end < 0 {
+	value, _, found := strings.Cut(labels[start:], `"`)
+	if !found {
 		return ""
 	}
-	return labels[start : start+end]
+	return value
 }
 
 func corefileHash(filename string, corefile []byte) (string, error) {
@@ -891,7 +922,7 @@ func replaceWithRollback(dir string, files map[string][]byte) error {
 		}
 	}
 
-	written := []string{}
+	written := make([]string, 0, len(files))
 	for name, content := range files {
 		tmp, err := os.CreateTemp(dir, "."+name+".*.tmp")
 		if err != nil {
@@ -935,20 +966,6 @@ func rollback(dir string, backups map[string][]byte, written []string) {
 			_ = os.Remove(path)
 		}
 	}
-}
-
-func IsBlocked(ctx context.Context, store *db.Store, domain string) (bool, string) {
-	decision := ExplainDomain(ctx, store, domain)
-	if decision.Action != "blocked" {
-		if decision.Allowlist != nil {
-			return false, "allowlist"
-		}
-		return false, "unknown"
-	}
-	if decision.ManualBlock != nil {
-		return true, "manual"
-	}
-	return true, "blocklist"
 }
 
 func ExplainDomain(ctx context.Context, store *db.Store, domain string) DomainDecision {
@@ -996,7 +1013,7 @@ func ExplainDomainForClient(ctx context.Context, store *db.Store, domain, client
 		ORDER BY b.name
 	`, protectionID, normalized)
 	if err == nil {
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var match RuleMatch
 			match.Kind = "blocklist"

@@ -11,8 +11,8 @@ const providerAssets: Record<string, string> = {
 };
 
 type ProviderLogoProps = {
-  providerID: string;
-  providerName: string;
+  readonly providerID: string;
+  readonly providerName: string;
 };
 
 export function ProviderLogo({ providerID, providerName }: ProviderLogoProps) {

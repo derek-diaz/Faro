@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 type DomainFaviconProps = {
-  domain: string;
+  readonly domain: string;
 };
 
 const publicDomainPattern = /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/;

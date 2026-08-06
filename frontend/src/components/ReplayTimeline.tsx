@@ -2,9 +2,9 @@ import type { PointerEvent } from "react";
 import type { ReplayBucket } from "../api/client";
 
 type ReplayTimelineProps = {
-  buckets: ReplayBucket[];
-  progress: number;
-  onSeek: (progress: number) => void;
+  readonly buckets: ReplayBucket[];
+  readonly progress: number;
+  readonly onSeek: (progress: number) => void;
 };
 
 const width = 800;

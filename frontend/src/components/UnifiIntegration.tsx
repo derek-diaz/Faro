@@ -28,8 +28,8 @@ export function UnifiIntegration({ onChanged }: { onChanged: () => Promise<void>
       const next = await api.unifiStatus();
       setStatus(next);
       if (next.base_url) setBaseURL(next.base_url);
-    } catch (caught) {
-      showError(caught);
+    } catch (error_) {
+      showError(error_);
     } finally {
       setLoading(false);
     }
@@ -59,8 +59,8 @@ export function UnifiIntegration({ onChanged }: { onChanged: () => Promise<void>
         tone: "success",
         text: result.sites.length === 1 ? "Console verified. Select Connect to finish." : `Console verified. Choose one of ${result.sites.length} sites.`
       });
-    } catch (caught) {
-      showError(caught);
+    } catch (error_) {
+      showError(error_);
     } finally {
       setPhase("idle");
     }
@@ -93,8 +93,8 @@ export function UnifiIntegration({ onChanged }: { onChanged: () => Promise<void>
         text: next.last_error || `Connected to ${next.site_name || "UniFi"} and synchronized ${next.synced_devices} devices.`
       });
       await onChanged();
-    } catch (caught) {
-      showError(caught);
+    } catch (error_) {
+      showError(error_);
     } finally {
       setPhase("idle");
     }
@@ -113,8 +113,8 @@ export function UnifiIntegration({ onChanged }: { onChanged: () => Promise<void>
           ? `Synchronized ${result.synced_devices} devices; ${result.skipped} clients lacked a usable MAC address or IP.`
           : `Synchronized ${result.synced_devices} connected devices.`
       });
-    } catch (caught) {
-      showError(caught);
+    } catch (error_) {
+      showError(error_);
       await loadStatus();
     } finally {
       setPhase("idle");
@@ -134,15 +134,15 @@ export function UnifiIntegration({ onChanged }: { onChanged: () => Promise<void>
       setConfirmDisconnect(false);
       setMessage({ tone: "success", text: "UniFi disconnected. Existing Faro devices, history, and protection assignments were kept." });
       await onChanged();
-    } catch (caught) {
-      showError(caught);
+    } catch (error_) {
+      showError(error_);
     } finally {
       setPhase("idle");
     }
   }
 
-  function showError(caught: unknown) {
-    setMessage({ tone: "error", text: caught instanceof Error ? caught.message : "The UniFi operation failed." });
+  function showError(error_: unknown) {
+    setMessage({ tone: "error", text: error_ instanceof Error ? error_.message : "The UniFi operation failed." });
   }
 
   if (loading) {

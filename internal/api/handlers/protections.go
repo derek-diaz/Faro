@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 
@@ -54,7 +55,7 @@ func (s *Handler) protections(w http.ResponseWriter, r *http.Request) {
 		s.configMu.Lock()
 		defer s.configMu.Unlock()
 		if scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM protection_profiles`) >= maxProtectionProfiles {
-			writeBadRequest(w, fmt.Errorf("Faro supports up to %d protection setups", maxProtectionProfiles))
+			writeBadRequest(w, fmt.Errorf("faro supports up to %d protection setups", maxProtectionProfiles))
 			return
 		}
 		var input protectionInput
@@ -109,25 +110,33 @@ func (s *Handler) protection(w http.ResponseWriter, r *http.Request) {
 	}
 	assignments := readDeviceProtectionAssignments(r.Context(), s.store.DB)
 	if r.Method == http.MethodDelete {
-		if previous.IsDefault {
-			writeBadRequest(w, errors.New("Home is Faro's default protection and cannot be deleted"))
-			return
-		}
-		if _, err := s.store.DB.ExecContext(r.Context(), `DELETE FROM protection_profiles WHERE id = ?`, id); err != nil {
-			writeError(w, err)
-			return
-		}
-		if err := s.reloader.Apply(r.Context()); err != nil {
-			rollbackCtx := context.WithoutCancel(r.Context())
-			_ = s.restoreProtection(rollbackCtx, previous)
-			restoreDeviceProtectionAssignments(rollbackCtx, s.store.DB, assignments)
-			_ = s.reloader.Apply(rollbackCtx)
-			writeError(w, fmt.Errorf("protection was not deleted because CoreDNS rejected the configuration: %w", err))
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		s.deleteProtection(w, r, id, previous, assignments)
 		return
 	}
+	s.updateProtection(w, r, id, previous, assignments)
+}
+
+func (s *Handler) deleteProtection(w http.ResponseWriter, r *http.Request, id int64, previous protectionSnapshot, assignments []deviceProtectionAssignment) {
+	if previous.IsDefault {
+		writeBadRequest(w, errors.New("home is Faro's default protection and cannot be deleted"))
+		return
+	}
+	if _, err := s.store.DB.ExecContext(r.Context(), `DELETE FROM protection_profiles WHERE id = ?`, id); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.reloader.Apply(r.Context()); err != nil {
+		rollbackCtx := context.WithoutCancel(r.Context())
+		_ = s.restoreProtection(rollbackCtx, previous)
+		restoreDeviceProtectionAssignments(rollbackCtx, s.store.DB, assignments)
+		_ = s.reloader.Apply(rollbackCtx)
+		writeError(w, fmt.Errorf("protection was not deleted because CoreDNS rejected the configuration: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Handler) updateProtection(w http.ResponseWriter, r *http.Request, id int64, previous protectionSnapshot, assignments []deviceProtectionAssignment) {
 	var input protectionInput
 	if !decode(w, r, &input) {
 		return
@@ -161,27 +170,27 @@ func (s *Handler) listProtections(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	defer closeRows(rows)
 	type protectionRow struct {
 		id                   int64
 		name, icon           string
 		isDefault            bool
 		createdAt, updatedAt string
 	}
-	base := []protectionRow{}
+	base := make([]protectionRow, 0)
 	for rows.Next() {
 		var item protectionRow
 		if err := rows.Scan(&item.id, &item.name, &item.icon, &item.isDefault, &item.createdAt, &item.updatedAt); err != nil {
-			_ = rows.Close()
 			writeError(w, err)
 			return
 		}
 		base = append(base, item)
 	}
-	if err := rows.Close(); err != nil {
+	if err := rows.Err(); err != nil {
 		writeError(w, err)
 		return
 	}
-	items := []map[string]any{}
+	items := make([]map[string]any, 0, len(base))
 	for _, item := range base {
 		items = append(items, map[string]any{
 			"id": item.id, "name": item.name, "icon": item.icon, "is_default": item.isDefault,
@@ -206,45 +215,68 @@ func (s *Handler) normalizeProtectionInput(ctx context.Context, input protection
 	if _, ok := protectionIcons[input.Icon]; !ok {
 		return input, errors.New("choose one of Faro's protection icons")
 	}
-	input.BlocklistIDs = uniqueInt64s(input.BlocklistIDs)
-	if len(input.BlocklistIDs) > 20 {
-		return input, errors.New("choose at most 20 blocklists")
+	var err error
+	input.BlocklistIDs, err = s.normalizeProtectionBlocklists(ctx, input.BlocklistIDs)
+	if err != nil {
+		return input, err
 	}
-	for _, id := range input.BlocklistIDs {
+	input.AllowDomains, input.BlockDomains, err = normalizeProtectionDomains(input.AllowDomains, input.BlockDomains)
+	if err != nil {
+		return input, err
+	}
+	input.DeviceIPs, err = normalizeProtectionDevices(input.DeviceIPs)
+	return input, err
+}
+
+func (s *Handler) normalizeProtectionBlocklists(ctx context.Context, values []int64) ([]int64, error) {
+	values = uniqueInt64s(values)
+	if len(values) > 20 {
+		return values, errors.New("choose at most 20 blocklists")
+	}
+	for _, id := range values {
 		var exists bool
 		if err := s.store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM blocklists WHERE id = ?)`, id).Scan(&exists); err != nil || !exists {
-			return input, fmt.Errorf("blocklist %d is not installed", id)
+			return values, fmt.Errorf("blocklist %d is not installed", id)
 		}
 	}
+	return values, nil
+}
+
+func normalizeProtectionDomains(allowed, blocked []string) ([]string, []string, error) {
 	var err error
-	if input.AllowDomains, err = normalizeDomains(input.AllowDomains); err != nil {
-		return input, fmt.Errorf("allowed domain: %w", err)
+	allowed, err = normalizeDomains(allowed)
+	if err != nil {
+		return allowed, blocked, fmt.Errorf("allowed domain: %w", err)
 	}
-	if input.BlockDomains, err = normalizeDomains(input.BlockDomains); err != nil {
-		return input, fmt.Errorf("blocked domain: %w", err)
+	blocked, err = normalizeDomains(blocked)
+	if err != nil {
+		return allowed, blocked, fmt.Errorf("blocked domain: %w", err)
 	}
-	allowed := map[string]struct{}{}
-	for _, domain := range input.AllowDomains {
-		allowed[domain] = struct{}{}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, domain := range allowed {
+		allowedSet[domain] = struct{}{}
 	}
-	for _, domain := range input.BlockDomains {
-		if _, conflict := allowed[domain]; conflict {
-			return input, fmt.Errorf("%s cannot be both allowed and blocked", domain)
+	for _, domain := range blocked {
+		if _, conflict := allowedSet[domain]; conflict {
+			return allowed, blocked, fmt.Errorf("%s cannot be both allowed and blocked", domain)
 		}
 	}
-	if len(input.DeviceIPs) > 1024 {
-		return input, errors.New("assign at most 1024 devices at once")
+	return allowed, blocked, nil
+}
+
+func normalizeProtectionDevices(values []string) ([]string, error) {
+	if len(values) > 1024 {
+		return values, errors.New("assign at most 1024 devices at once")
 	}
-	input.DeviceIPs = uniqueStrings(input.DeviceIPs)
-	for index, address := range input.DeviceIPs {
+	values = uniqueStrings(values)
+	for index, address := range values {
 		parsed := net.ParseIP(address)
 		if parsed == nil {
-			return input, fmt.Errorf("invalid device address %q", address)
+			return values, fmt.Errorf("invalid device address %q", address)
 		}
-		input.DeviceIPs[index] = parsed.String()
+		values[index] = parsed.String()
 	}
-	input.DeviceIPs = uniqueStrings(input.DeviceIPs)
-	return input, nil
+	return uniqueStrings(values), nil
 }
 
 func (s *Handler) insertProtection(ctx context.Context, input protectionInput) (int64, error) {
@@ -255,7 +287,7 @@ func (s *Handler) insertProtection(ctx context.Context, input protectionInput) (
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer rollbackTransaction(tx)
 	result, err := tx.ExecContext(ctx, `INSERT INTO protection_profiles(name, icon) VALUES(?, ?)`, input.Name, input.Icon)
 	if err != nil {
 		return 0, errors.New("a protection with that name already exists")
@@ -278,7 +310,7 @@ func (s *Handler) replaceProtection(ctx context.Context, id int64, isDefault boo
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer rollbackTransaction(tx)
 	if _, err := tx.ExecContext(ctx, `UPDATE protection_profiles SET name = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, input.Name, input.Icon, id); err != nil {
 		return errors.New("a protection with that name already exists")
 	}
@@ -313,7 +345,7 @@ func (s *Handler) restoreProtection(ctx context.Context, snapshot protectionSnap
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer rollbackTransaction(tx)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO protection_profiles(id, name, icon, is_default, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, is_default=excluded.is_default, created_at=excluded.created_at, updated_at=excluded.updated_at`, snapshot.ID, snapshot.Name, snapshot.Icon, snapshot.IsDefault, snapshot.CreatedAt, snapshot.UpdatedAt); err != nil {
 		return err
 	}
@@ -342,32 +374,50 @@ func clearProtectionChildren(ctx context.Context, tx *sql.Tx, id int64) error {
 }
 
 func writeProtectionChildren(ctx context.Context, tx *sql.Tx, id int64, isDefault bool, input protectionInput) error {
-	for _, blocklistID := range input.BlocklistIDs {
+	if err := insertProtectionBlocklists(ctx, tx, id, input.BlocklistIDs); err != nil {
+		return err
+	}
+	if err := insertProtectionDomains(ctx, tx, id, "protection_allow_entries", input.AllowDomains); err != nil {
+		return err
+	}
+	if err := insertProtectionDomains(ctx, tx, id, "protection_block_entries", input.BlockDomains); err != nil {
+		return err
+	}
+	if isDefault {
+		return nil
+	}
+	return insertProtectionDevices(ctx, tx, id, input.DeviceIPs)
+}
+
+func insertProtectionBlocklists(ctx context.Context, tx *sql.Tx, id int64, blocklistIDs []int64) error {
+	for _, blocklistID := range blocklistIDs {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO protection_blocklists(protection_id, blocklist_id) VALUES(?, ?)`, id, blocklistID); err != nil {
 			return err
 		}
 	}
-	for _, domain := range input.AllowDomains {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO protection_allow_entries(protection_id, domain) VALUES(?, ?)`, id, domain); err != nil {
+	return nil
+}
+
+func insertProtectionDomains(ctx context.Context, tx *sql.Tx, id int64, table string, domains []string) error {
+	statement := `INSERT INTO ` + table + `(protection_id, domain) VALUES(?, ?)`
+	for _, domain := range domains {
+		if _, err := tx.ExecContext(ctx, statement, id, domain); err != nil {
 			return err
 		}
 	}
-	for _, domain := range input.BlockDomains {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO protection_block_entries(protection_id, domain) VALUES(?, ?)`, id, domain); err != nil {
-			return err
-		}
-	}
-	if !isDefault {
-		for _, address := range input.DeviceIPs {
-			if _, err := tx.ExecContext(ctx, `
+	return nil
+}
+
+func insertProtectionDevices(ctx context.Context, tx *sql.Tx, id int64, addresses []string) error {
+	for _, address := range addresses {
+		if _, err := tx.ExecContext(ctx, `
 				INSERT INTO device_protection_memberships(device_id, protection_id, updated_at)
 				SELECT device_id, ?, CURRENT_TIMESTAMP FROM device_addresses WHERE address = ?
 				ON CONFLICT(device_id) DO UPDATE SET protection_id=excluded.protection_id, updated_at=CURRENT_TIMESTAMP`, id, address); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO device_protection_assignments(client_ip, protection_id) VALUES(?, ?) ON CONFLICT(client_ip) DO UPDATE SET protection_id=excluded.protection_id, updated_at=CURRENT_TIMESTAMP`, address, id); err != nil {
-				return err
-			}
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO device_protection_assignments(client_ip, protection_id) VALUES(?, ?) ON CONFLICT(client_ip) DO UPDATE SET protection_id=excluded.protection_id, updated_at=CURRENT_TIMESTAMP`, address, id); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -387,7 +437,7 @@ func normalizeDomains(values []string) ([]string, error) {
 		return nil, errors.New("use at most 500 custom domains")
 	}
 	seen := map[string]struct{}{}
-	result := []string{}
+	result := make([]string, 0, len(values))
 	for _, value := range values {
 		domain, err := db.NormalizeDomain(value)
 		if err != nil {
@@ -404,7 +454,7 @@ func normalizeDomains(values []string) ([]string, error) {
 
 func uniqueInt64s(values []int64) []int64 {
 	seen := map[int64]struct{}{}
-	result := []int64{}
+	result := make([]int64, 0, len(values))
 	for _, value := range values {
 		if value > 0 {
 			if _, exists := seen[value]; !exists {
@@ -413,13 +463,13 @@ func uniqueInt64s(values []int64) []int64 {
 			}
 		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	slices.Sort(result)
 	return result
 }
 
 func uniqueStrings(values []string) []string {
 	seen := map[string]struct{}{}
-	result := []string{}
+	result := make([]string, 0, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
 		if value != "" {
@@ -436,15 +486,16 @@ func uniqueStrings(values []string) []string {
 func protectionIDs(ctx context.Context, database *sql.DB, query string, args ...any) []int64 {
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return []int64{}
+		return make([]int64, 0)
 	}
-	defer rows.Close()
-	result := []int64{}
+	defer closeRows(rows)
+	result := make([]int64, 0)
 	for rows.Next() {
 		var value int64
-		if rows.Scan(&value) == nil {
-			result = append(result, value)
+		if err := rows.Scan(&value); err != nil {
+			continue
 		}
+		result = append(result, value)
 	}
 	return result
 }
@@ -452,15 +503,16 @@ func protectionIDs(ctx context.Context, database *sql.DB, query string, args ...
 func protectionStrings(ctx context.Context, database *sql.DB, query string, args ...any) []string {
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return []string{}
+		return make([]string, 0)
 	}
-	defer rows.Close()
-	result := []string{}
+	defer closeRows(rows)
+	result := make([]string, 0)
 	for rows.Next() {
 		var value string
-		if rows.Scan(&value) == nil {
-			result = append(result, value)
+		if err := rows.Scan(&value); err != nil {
+			continue
 		}
+		result = append(result, value)
 	}
 	return result
 }
@@ -472,16 +524,17 @@ func protectionDomainStrings(ctx context.Context, database *sql.DB, query string
 func protectionDomains(ctx context.Context, database *sql.DB, query string, args ...any) []map[string]any {
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return []map[string]any{}
+		return make([]map[string]any, 0)
 	}
-	defer rows.Close()
-	result := []map[string]any{}
+	defer closeRows(rows)
+	result := make([]map[string]any, 0)
 	for rows.Next() {
 		var id int64
 		var domain, createdAt string
-		if rows.Scan(&id, &domain, &createdAt) == nil {
-			result = append(result, map[string]any{"id": id, "domain": domain, "created_at": createdAt})
+		if err := rows.Scan(&id, &domain, &createdAt); err != nil {
+			continue
 		}
+		result = append(result, map[string]any{"id": id, "domain": domain, "created_at": createdAt})
 	}
 	return result
 }
@@ -493,13 +546,14 @@ func readDeviceProtectionAssignments(ctx context.Context, database *sql.DB) []de
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
-	result := []deviceProtectionAssignment{}
+	defer closeRows(rows)
+	result := make([]deviceProtectionAssignment, 0)
 	for rows.Next() {
 		var assignment deviceProtectionAssignment
-		if rows.Scan(&assignment.DeviceID, &assignment.ClientIP, &assignment.ProtectionID) == nil {
-			result = append(result, assignment)
+		if err := rows.Scan(&assignment.DeviceID, &assignment.ClientIP, &assignment.ProtectionID); err != nil {
+			continue
 		}
+		result = append(result, assignment)
 	}
 	return result
 }
@@ -509,8 +563,8 @@ func restoreDeviceProtectionAssignments(ctx context.Context, database *sql.DB, a
 	if err != nil {
 		return
 	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM device_protection_memberships; DELETE FROM device_protection_assignments`); err != nil {
+	defer rollbackTransaction(tx)
+	if _, err := tx.ExecContext(ctx, `DELETE FROM device_protection_memberships WHERE protection_id IS NOT NULL; DELETE FROM device_protection_assignments WHERE protection_id IS NOT NULL`); err != nil {
 		return
 	}
 	for _, assignment := range assignments {

@@ -138,10 +138,13 @@ type pairPayload struct {
 	ConfigRevision   int64  `json:"config_revision"`
 }
 
-type encryptedEnvelope struct {
+// EncryptedEnvelope is an authenticated payload exchanged between redundancy nodes.
+type EncryptedEnvelope struct {
 	Nonce      string `json:"nonce"`
 	Ciphertext string `json:"ciphertext"`
 }
+
+type encryptedEnvelope = EncryptedEnvelope
 
 type SyncAck struct {
 	Revision int64  `json:"revision"`

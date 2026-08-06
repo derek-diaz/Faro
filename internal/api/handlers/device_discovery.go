@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"net"
 	"strings"
 	"sync"
@@ -26,6 +27,9 @@ type deviceNameResolver struct {
 	lookup  func(context.Context, string) ([]string, error)
 }
 
+// noinspection SpellCheckingInspection
+const localDomainSuffix = ".localdomain"
+
 func newDeviceNameResolver() *deviceNameResolver {
 	return &deviceNameResolver{
 		entries: map[string]cachedDeviceName{},
@@ -33,63 +37,71 @@ func newDeviceNameResolver() *deviceNameResolver {
 	}
 }
 
-// discoverDeviceNames uses explicit Local DNS records first, then bounded reverse
-// DNS lookups. Reverse lookups run concurrently so a router without PTR records
-// cannot make a large inventory take one timeout per device to load.
+// discoverDeviceNames prefers explicit Local DNS and UniFi names before bounded
+// reverse-DNS lookups. Concurrent lookups keep routers without PTR records from
+// adding one timeout per device to a large inventory load.
 func (s *Handler) discoverDeviceNames(ctx context.Context, clientIPs []string) map[string]deviceIdentity {
 	identities := make(map[string]deviceIdentity, len(clientIPs))
 	requested := uniqueDeviceAddresses(clientIPs)
+	loadLocalDeviceNames(ctx, s.store.DB, requested, identities)
+	loadUniFiDeviceNames(ctx, s.store.DB, requested, identities)
+	resolveReverseDeviceNames(ctx, clientIPs, identities, s.deviceNames)
+	return identities
+}
+
+func loadLocalDeviceNames(ctx context.Context, database *sql.DB, requested []string, identities map[string]deviceIdentity) {
 	for start := 0; start < len(requested); start += 400 {
-		end := start + 400
-		if end > len(requested) {
-			end = len(requested)
-		}
+		end := min(start+400, len(requested))
 		arguments, placeholders := stringQueryArguments(requested[start:end])
-		rows, err := s.store.DB.QueryContext(ctx, `
+		rows, err := database.QueryContext(ctx, `
 			SELECT value, hostname FROM dns_records
 			WHERE type IN ('A', 'AAAA') AND value IN (`+placeholders+`)
 			ORDER BY updated_at DESC, id DESC
 		`, arguments...)
-		if err == nil {
-			for rows.Next() {
-				var clientIP, hostname string
-				if rows.Scan(&clientIP, &hostname) == nil {
-					if _, exists := identities[clientIP]; !exists {
-						identities[clientIP] = deviceIdentity{DisplayName: friendlyHostname(hostname), NameSource: "local_dns"}
-					}
-				}
+		if err != nil {
+			continue
+		}
+		for rows.Next() {
+			var clientIP, hostname string
+			if err := rows.Scan(&clientIP, &hostname); err != nil {
+				continue
 			}
-			_ = rows.Close()
+			if _, exists := identities[clientIP]; !exists {
+				identities[clientIP] = deviceIdentity{DisplayName: friendlyHostname(hostname), NameSource: "local_dns"}
+			}
 		}
+		closeRows(rows)
 	}
+}
 
+func loadUniFiDeviceNames(ctx context.Context, database *sql.DB, requested []string, identities map[string]deviceIdentity) {
 	for start := 0; start < len(requested); start += 400 {
-		end := start + 400
-		if end > len(requested) {
-			end = len(requested)
-		}
+		end := min(start+400, len(requested))
 		arguments, placeholders := stringQueryArguments(requested[start:end])
-		rows, err := s.store.DB.QueryContext(ctx, `
+		rows, err := database.QueryContext(ctx, `
 			SELECT a.address, n.name
 			FROM device_names n
 			JOIN device_addresses a ON a.device_id = n.device_id
 			WHERE n.source = 'unifi' AND TRIM(n.name) <> '' AND a.address IN (`+placeholders+`)
 			ORDER BY n.last_seen_at DESC
 		`, arguments...)
-		if err == nil {
-			for rows.Next() {
-				var clientIP, name string
-				if rows.Scan(&clientIP, &name) == nil {
-					if _, exists := identities[clientIP]; !exists && usefulHostname(name, clientIP) {
-						identities[clientIP] = deviceIdentity{DisplayName: name, NameSource: "unifi"}
-					}
-				}
-			}
-			_ = rows.Close()
+		if err != nil {
+			continue
 		}
+		for rows.Next() {
+			var clientIP, name string
+			if err := rows.Scan(&clientIP, &name); err != nil {
+				continue
+			}
+			if _, exists := identities[clientIP]; !exists && usefulHostname(name, clientIP) {
+				identities[clientIP] = deviceIdentity{DisplayName: name, NameSource: "unifi"}
+			}
+		}
+		closeRows(rows)
 	}
+}
 
-	resolver := s.deviceNames
+func resolveReverseDeviceNames(ctx context.Context, clientIPs []string, identities map[string]deviceIdentity, resolver *deviceNameResolver) {
 	if resolver == nil {
 		resolver = newDeviceNameResolver()
 	}
@@ -132,7 +144,6 @@ func (s *Handler) discoverDeviceNames(ctx context.Context, clientIPs []string) m
 			identities[resolved.clientIP] = deviceIdentity{DisplayName: resolved.name, NameSource: "reverse_dns"}
 		}
 	}
-	return identities
 }
 
 func uniqueDeviceAddresses(values []string) []string {
@@ -183,7 +194,7 @@ func (r *deviceNameResolver) store(clientIP, name string) {
 func friendlyHostname(hostname string) string {
 	name := strings.TrimSpace(strings.TrimSuffix(hostname, "."))
 	lower := strings.ToLower(name)
-	for _, suffix := range []string{".home.arpa", ".localdomain", ".local", ".lan", ".home"} {
+	for _, suffix := range []string{".home.arpa", localDomainSuffix, ".local", ".lan", ".home"} {
 		if strings.HasSuffix(lower, suffix) {
 			name = name[:len(name)-len(suffix)]
 			break

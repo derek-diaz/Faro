@@ -6,9 +6,9 @@ import { ReplayTimeline } from "./ReplayTimeline";
 import { StatusBadge } from "./StatusBadge";
 
 type DeviceReplayProps = {
-  clientIP: string;
-  deviceName: string;
-  onDomainSelect: (domain: string) => void;
+  readonly clientIP: string;
+  readonly deviceName: string;
+  readonly onDomainSelect: (domain: string) => void;
 };
 
 type ReplayRange = "1h" | "24h" | "7d" | "30d" | "all";
@@ -43,8 +43,8 @@ export function DeviceReplay({ clientIP, deviceName, onDomainSelect }: DeviceRep
           setProgress(100);
         }
       })
-      .catch((caught: unknown) => {
-        if (!cancelled) setError(caught instanceof Error ? caught.message : "Failed to load replay data.");
+      .catch((error: unknown) => {
+        if (!cancelled) setError(error instanceof Error ? error.message : "Failed to load replay data.");
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -80,6 +80,8 @@ export function DeviceReplay({ clientIP, deviceName, onDomainSelect }: DeviceRep
   const currentUniqueDomains = new Set(visibleEvents.map((event) => event.domain)).size;
   const elapsedMinutes = Math.max((cursorTime - fromTime) / 60000, 1);
   const currentRate = visibleEvents.length / elapsedMinutes;
+  const playbackIcon = getPlaybackIcon(playing, progress);
+  const playbackLabel = getPlaybackLabel(playing, progress);
 
   function togglePlayback() {
     if (!data?.events.length) return;
@@ -99,17 +101,19 @@ export function DeviceReplay({ clientIP, deviceName, onDomainSelect }: DeviceRep
   return (
     <div className="device-replay-workspace">
       <div className="replay-toolbar">
-        <div className="replay-range-control" role="group" aria-label="Replay time range">
+        <fieldset className="replay-range-control">
+          <legend className="sr-only">Replay time range</legend>
           {rangeOptions.map((option) => <button className={range === option.value ? "active" : ""} type="button" key={option.value} onClick={() => setRange(option.value)}>{option.label}</button>)}
-        </div>
+        </fieldset>
         <div className="replay-playback-controls">
           <button className="replay-play-button" type="button" onClick={togglePlayback} disabled={!data?.events.length || loading}>
-            {playing ? <Pause size={17} /> : progress >= 100 ? <RotateCcw size={17} /> : <Play size={17} />}
-            <span>{playing ? "Pause" : progress >= 100 ? "Replay" : "Play"}</span>
+            {playbackIcon}
+            <span>{playbackLabel}</span>
           </button>
-          <div className="replay-speed-control" role="group" aria-label="Playback speed">
+          <fieldset className="replay-speed-control">
+            <legend className="sr-only">Playback speed</legend>
             {([1, 5, 20] as ReplaySpeed[]).map((value) => <button className={speed === value ? "active" : ""} type="button" key={value} onClick={() => setSpeed(value)}>{value}x</button>)}
-          </div>
+          </fieldset>
         </div>
       </div>
 
@@ -183,11 +187,24 @@ export function DeviceReplay({ clientIP, deviceName, onDomainSelect }: DeviceRep
   );
 }
 
-function ReplayMetric({ label, value, detail, tone = "default" }: { label: string; value: string | number; detail: string; tone?: "default" | "blocked" }) {
+type ReplayMetricProps = {
+  readonly label: string;
+  readonly value: string | number;
+  readonly detail: string;
+  readonly tone?: "default" | "blocked";
+};
+
+function ReplayMetric({ label, value, detail, tone = "default" }: ReplayMetricProps) {
   return <div className={`replay-metric ${tone}`}><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>;
 }
 
-function ReplayRankList({ items, empty, onSelect }: { items: { label: string; count: number }[]; empty: string; onSelect?: (label: string) => void }) {
+type ReplayRankListProps = {
+  readonly items: ReadonlyArray<{ readonly label: string; readonly count: number }>;
+  readonly empty: string;
+  readonly onSelect?: (label: string) => void;
+};
+
+function ReplayRankList({ items, empty, onSelect }: ReplayRankListProps) {
   const max = Math.max(...items.map((item) => item.count), 1);
   if (!items.length) return <div className="replay-empty compact">{empty}</div>;
   return <div className="replay-rank-list">{items.map((item) => <div key={item.label}><button type="button" disabled={!onSelect} onClick={() => onSelect?.(item.label)}>{item.label}</button><strong>{item.count}</strong><span><i style={{ width: `${Math.max(5, (item.count / max) * 100)}%` }} /></span></div>)}</div>;
@@ -238,4 +255,16 @@ function formatRate(value: number) {
   if (value >= 10) return value.toFixed(0);
   if (value >= 1) return value.toFixed(1);
   return value.toFixed(2);
+}
+
+function getPlaybackIcon(playing: boolean, progress: number) {
+  if (playing) return <Pause size={17} />;
+  if (progress >= 100) return <RotateCcw size={17} />;
+  return <Play size={17} />;
+}
+
+function getPlaybackLabel(playing: boolean, progress: number) {
+  if (playing) return "Pause";
+  if (progress >= 100) return "Replay";
+  return "Play";
 }

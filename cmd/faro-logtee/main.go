@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -27,12 +28,16 @@ func main() {
 	}
 }
 
-func run(input io.Reader, output io.Writer, path string, maxBytes int64, backups int) error {
+func run(input io.Reader, output io.Writer, path string, maxBytes int64, backups int) (runErr error) {
 	writer, err := newRotatingWriter(path, maxBytes, backups)
 	if err != nil {
 		return err
 	}
-	defer writer.Close()
+	defer func() {
+		if err := writer.Close(); err != nil {
+			runErr = errors.Join(runErr, fmt.Errorf("close log writer: %w", err))
+		}
+	}()
 	destination := io.MultiWriter(output, writer)
 	reader := bufio.NewReader(input)
 	for {
@@ -81,50 +86,73 @@ func newRotatingWriter(path string, maxBytes int64, backups int) (*rotatingWrite
 }
 
 func (w *rotatingWriter) Write(data []byte) (int, error) {
+	handled, err := w.prepareForWrite(len(data))
+	if handled {
+		return len(data), nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return w.writeData(data)
+}
+
+// prepareForWrite opens the active file and rotates it when the next line
+// would exceed the configured size. It returns handled=true when the line was
+// intentionally dropped because storage is full or a retry is already paused.
+func (w *rotatingWriter) prepareForWrite(dataLength int) (handled bool, err error) {
 	if w.file == nil {
 		if time.Now().Before(w.retryAt) {
-			return len(data), nil
+			return true, nil
 		}
 		if err := w.emergencyReset(); err != nil {
-			if errors.Is(err, syscall.ENOSPC) {
-				w.pauseForFullStorage(err)
-				return len(data), nil
-			}
-			return 0, err
+			return w.handleStorageError(dataLength, err)
 		}
 	}
-	if w.size > 0 && w.size+int64(len(data)) > w.maxBytes {
+	if w.size > 0 && w.size+int64(dataLength) > w.maxBytes {
 		if err := w.rotate(); err != nil {
-			if errors.Is(err, syscall.ENOSPC) {
-				w.pauseForFullStorage(err)
-				return len(data), nil
-			}
-			return 0, err
+			return w.handleStorageError(dataLength, err)
 		}
 	}
+	return false, nil
+}
+
+func (w *rotatingWriter) handleStorageError(dataLength int, err error) (bool, error) {
+	if !errors.Is(err, syscall.ENOSPC) {
+		return false, err
+	}
+	w.pauseForFullStorage(err)
+	return true, nil
+}
+
+func (w *rotatingWriter) writeData(data []byte) (int, error) {
 	n, err := w.file.Write(data)
 	w.size += int64(n)
-	if errors.Is(err, syscall.ENOSPC) {
-		if resetErr := w.emergencyReset(); resetErr != nil {
-			if errors.Is(resetErr, syscall.ENOSPC) {
-				w.pauseForFullStorage(resetErr)
-				return len(data), nil
-			}
-			return n, errors.Join(err, resetErr)
+	if !errors.Is(err, syscall.ENOSPC) {
+		return n, err
+	}
+	return w.retryAfterStorageFull(data, n, err)
+}
+
+func (w *rotatingWriter) retryAfterStorageFull(data []byte, initialWritten int, initialErr error) (int, error) {
+	if resetErr := w.emergencyReset(); resetErr != nil {
+		handled, storageErr := w.handleStorageError(len(data), resetErr)
+		if handled {
+			return len(data), nil
 		}
-		retry, retryErr := w.file.Write(data)
-		w.size = int64(retry)
-		if retryErr != nil {
-			if errors.Is(retryErr, syscall.ENOSPC) {
-				w.pauseForFullStorage(retryErr)
-				return len(data), nil
-			}
-			return retry, retryErr
-		}
+		return initialWritten, errors.Join(initialErr, storageErr)
+	}
+
+	retry, retryErr := w.file.Write(data)
+	w.size = int64(retry)
+	if retryErr == nil {
 		log.Printf("query log storage filled; older raw log buffers were discarded so logging could continue")
 		return retry, nil
 	}
-	return n, err
+	handled, storageErr := w.handleStorageError(len(data), retryErr)
+	if handled {
+		return len(data), nil
+	}
+	return retry, storageErr
 }
 
 func (w *rotatingWriter) Close() error {
@@ -187,29 +215,48 @@ func (w *rotatingWriter) rotatedPath(index int) string {
 // the existing log has consumed all free space. Truncating the active file and
 // removing oversized backups do not require allocating another full copy.
 func (w *rotatingWriter) reclaimLegacyLogs() error {
+	if err := w.reclaimLegacyBackups(); err != nil {
+		return err
+	}
+	return w.truncateOversizedLegacyLog()
+}
+
+func (w *rotatingWriter) reclaimLegacyBackups() error {
 	matches, err := filepath.Glob(w.path + ".*")
 	if err != nil {
 		return err
 	}
 	for _, match := range matches {
-		index, parseErr := strconv.Atoi(strings.TrimPrefix(match, w.path+"."))
-		if parseErr != nil || index < 1 {
-			continue
-		}
-		stat, statErr := os.Stat(match)
-		if statErr != nil {
-			if os.IsNotExist(statErr) {
-				continue
-			}
-			return statErr
-		}
-		if index > w.backups || stat.Size() > w.maxBytes {
-			if err := os.Remove(match); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			log.Printf("removed oversized legacy query-log backup %s", filepath.Base(match))
+		if err := w.reclaimLegacyBackup(match); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+func (w *rotatingWriter) reclaimLegacyBackup(path string) error {
+	index, err := strconv.Atoi(strings.TrimPrefix(path, w.path+"."))
+	if err != nil || index < 1 {
+		return nil
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if index <= w.backups && stat.Size() <= w.maxBytes {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	log.Printf("removed obsolete legacy query-log backup %s", filepath.Base(path))
+	return nil
+}
+
+func (w *rotatingWriter) truncateOversizedLegacyLog() error {
 	stat, err := os.Stat(w.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -243,7 +290,9 @@ func (w *rotatingWriter) emergencyReset() error {
 }
 
 func (w *rotatingWriter) pauseForFullStorage(cause error) {
-	_ = w.Close()
+	if err := w.Close(); err != nil {
+		log.Printf("close query log after storage error: %v", err)
+	}
 	w.retryAt = time.Now().Add(storageRetryInterval)
 	log.Printf("raw query-log persistence paused for %s because storage is full: %v", storageRetryInterval, cause)
 }

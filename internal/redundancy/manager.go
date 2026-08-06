@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdh"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -94,97 +95,129 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 		return Status{}, err
 	}
 	result := Status{PublicStatus: publicStatus(state), Nodes: []NodeInfo{}}
-	_ = m.store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'faro_lan_ip'`).Scan(&result.LANAddress)
-	if state.Role == RoleController {
-		result.ControllerName = state.NodeName
-		result.Nodes = append(result.Nodes, NodeInfo{
-			NodeID: state.NodeID, Name: state.NodeName, LANAddress: result.LANAddress,
-			Role: RoleController, Online: true, ConfigRevision: state.ConfigRevision,
-			LastSeenAt: m.now().UTC().Format(time.RFC3339), LastSyncAt: m.now().UTC().Format(time.RFC3339),
-		})
-		rows, queryErr := m.store.DB.QueryContext(ctx, `
-			SELECT node_id, name, lan_address, config_revision,
-			       COALESCE(last_seen_at, ''), COALESCE(last_sync_at, ''), last_error
-			FROM redundancy_nodes ORDER BY name COLLATE NOCASE`)
-		if queryErr != nil {
-			return Status{}, queryErr
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var node NodeInfo
-			node.Role = RoleReplica
-			if err := rows.Scan(&node.NodeID, &node.Name, &node.LANAddress, &node.ConfigRevision, &node.LastSeenAt, &node.LastSyncAt, &node.LastError); err != nil {
-				return Status{}, err
-			}
-			node.Online = recentlySeen(node.LastSeenAt, m.now(), 3*m.syncInterval+5*time.Second)
-			result.Nodes = append(result.Nodes, node)
-		}
-		if err := rows.Err(); err != nil {
-			return Status{}, err
-		}
-		result.Healthy = len(result.Nodes) > 1
-		for _, node := range result.Nodes {
-			if !node.Online || node.ConfigRevision != state.ConfigRevision || node.LastError != "" {
-				result.Healthy = false
-			}
-		}
-	} else if state.Role == RoleReplica {
+	result.LANAddress = m.lanAddress(ctx)
+	switch state.Role {
+	case RoleController:
+		return m.controllerStatus(ctx, state, result)
+	case RoleReplica:
 		result.Healthy = state.LastError == "" && recentlySeen(state.LastSyncAt, m.now(), 3*m.syncInterval+5*time.Second)
-	} else {
+	default:
 		result.Healthy = true
 	}
 	return result, nil
 }
 
+func (m *Manager) lanAddress(ctx context.Context) string {
+	var address string
+	if err := m.store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'faro_lan_ip'`).Scan(&address); err != nil {
+		return ""
+	}
+	return address
+}
+
+func (m *Manager) controllerStatus(ctx context.Context, state localState, result Status) (Status, error) {
+	now := m.now().UTC().Format(time.RFC3339)
+	result.ControllerName = state.NodeName
+	result.Nodes = append(result.Nodes, NodeInfo{
+		NodeID: state.NodeID, Name: state.NodeName, LANAddress: result.LANAddress,
+		Role: RoleController, Online: true, ConfigRevision: state.ConfigRevision,
+		LastSeenAt: now, LastSyncAt: now,
+	})
+	rows, err := m.store.DB.QueryContext(ctx, `
+		SELECT node_id, name, lan_address, config_revision,
+		       COALESCE(last_seen_at, ''), COALESCE(last_sync_at, ''), last_error
+		FROM redundancy_nodes ORDER BY name COLLATE NOCASE`)
+	if err != nil {
+		return Status{}, err
+	}
+	defer closeRedundancyResource("close redundancy status rows", rows)
+	for rows.Next() {
+		var node NodeInfo
+		node.Role = RoleReplica
+		if err := rows.Scan(&node.NodeID, &node.Name, &node.LANAddress, &node.ConfigRevision, &node.LastSeenAt, &node.LastSyncAt, &node.LastError); err != nil {
+			return Status{}, err
+		}
+		node.Online = recentlySeen(node.LastSeenAt, m.now(), 3*m.syncInterval+5*time.Second)
+		result.Nodes = append(result.Nodes, node)
+	}
+	if err := rows.Err(); err != nil {
+		return Status{}, err
+	}
+	result.Healthy = len(result.Nodes) > 1
+	for _, node := range result.Nodes {
+		if !node.Online || node.ConfigRevision != state.ConfigRevision || node.LastError != "" {
+			result.Healthy = false
+		}
+	}
+	return result, nil
+}
+
 func (m *Manager) StartPairing(ctx context.Context, nodeName string) (PairingCode, error) {
+	nodeName, err := normalizePairingNodeName(nodeName)
+	if err != nil {
+		return PairingCode{}, err
+	}
+	state, err := m.preparePairingState(ctx, nodeName)
+	if err != nil {
+		return PairingCode{}, err
+	}
+	if state.ConfigRevision < 1 {
+		return PairingCode{}, errors.New("DNS configuration could not be prepared for synchronization")
+	}
+	return m.createPairingCode()
+}
+
+func normalizePairingNodeName(nodeName string) (string, error) {
 	nodeName = strings.TrimSpace(nodeName)
 	if nodeName == "" {
 		nodeName = "Primary Faro"
 	}
 	if len([]rune(nodeName)) > 40 {
-		return PairingCode{}, errors.New("server name must be 40 characters or fewer")
+		return "", errors.New("server name must be 40 characters or fewer")
 	}
+	return nodeName, nil
+}
+
+func (m *Manager) preparePairingState(ctx context.Context, nodeName string) (localState, error) {
 	state, err := m.readState(ctx)
 	if err != nil {
-		return PairingCode{}, err
+		return localState{}, err
 	}
 	if state.Role == RoleReplica {
-		return PairingCode{}, errors.New("a replica cannot add other Faro servers")
+		return localState{}, errors.New("a replica cannot add other Faro servers")
 	}
 	if state.Role == RoleStandalone {
 		homeID, err := randomID(16)
 		if err != nil {
-			return PairingCode{}, err
+			return localState{}, err
 		}
 		if err := m.initializeController(ctx, state, homeID, nodeName); err != nil {
-			return PairingCode{}, err
+			return localState{}, err
+		}
+		return m.readState(ctx)
+	}
+	// Faro versions before compressed snapshots could leave the role set to
+	// controller while revision 0 had never actually been captured. Repair
+	// that state before issuing another pairing code.
+	if state.ConfigRevision == 0 {
+		if err := m.captureSnapshot(ctx, state); err != nil {
+			return localState{}, err
 		}
 		state, err = m.readState(ctx)
 		if err != nil {
-			return PairingCode{}, err
-		}
-	} else {
-		// Faro versions before compressed snapshots could leave the role set to
-		// controller while revision 0 had never actually been captured. Repair
-		// that state before issuing another pairing code.
-		if state.ConfigRevision == 0 {
-			if err := m.captureSnapshot(ctx, state); err != nil {
-				return PairingCode{}, err
-			}
-			state, err = m.readState(ctx)
-			if err != nil {
-				return PairingCode{}, err
-			}
-		}
-		if state.NodeName != nodeName {
-			if _, err := m.store.DB.ExecContext(ctx, `UPDATE redundancy_state SET node_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, nodeName); err != nil {
-				return PairingCode{}, err
-			}
+			return localState{}, err
 		}
 	}
-	if state.ConfigRevision < 1 {
-		return PairingCode{}, errors.New("DNS configuration could not be prepared for synchronization")
+	if state.NodeName != nodeName {
+		if _, err := m.store.DB.ExecContext(ctx, `UPDATE redundancy_state SET node_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, nodeName); err != nil {
+			return localState{}, err
+		}
+		state.NodeName = nodeName
 	}
+	return state, nil
+}
+
+func (m *Manager) createPairingCode() (PairingCode, error) {
 	id, err := randomID(8)
 	if err != nil {
 		return PairingCode{}, err
@@ -221,7 +254,7 @@ func (m *Manager) initializeController(ctx context.Context, state localState, ho
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer rollbackRedundancyTransaction(tx)
 	result, err := tx.ExecContext(ctx, `
 		UPDATE redundancy_state
 		SET role = ?, home_id = ?, node_name = ?, config_revision = ?,
@@ -231,10 +264,14 @@ func (m *Manager) initializeController(ctx context.Context, state localState, ho
 	if err != nil {
 		return err
 	}
-	if changed, _ := result.RowsAffected(); changed != 1 {
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
 		return errors.New("redundancy mode changed while DNS configuration was being prepared")
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_snapshots`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_snapshots WHERE revision IS NOT NULL`); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO redundancy_snapshots(revision, payload) VALUES(?, ?)`, revision, payload); err != nil {
@@ -274,7 +311,7 @@ func (m *Manager) captureSnapshot(ctx context.Context, state localState) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer rollbackRedundancyTransaction(tx)
 	result, err := tx.ExecContext(ctx, `
 		UPDATE redundancy_state
 		SET config_revision = ?, last_error = '', updated_at = CURRENT_TIMESTAMP
@@ -282,7 +319,11 @@ func (m *Manager) captureSnapshot(ctx context.Context, state localState) error {
 	if err != nil {
 		return err
 	}
-	if changed, _ := result.RowsAffected(); changed != 1 {
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
 		return errors.New("redundancy configuration changed while the snapshot was being prepared")
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO redundancy_snapshots(revision, payload) VALUES(?, ?)`, revision, payload); err != nil {
@@ -343,80 +384,19 @@ func (m *Manager) Join(ctx context.Context, input JoinInput) (JoinResult, error)
 	if state.Role != RoleStandalone {
 		return JoinResult{}, errors.New("this Faro server already belongs to a redundancy setup")
 	}
-	controllerURL, err := normalizeControllerURL(ctx, input.ControllerURL)
+	parameters, err := prepareJoinParameters(ctx, input, state)
 	if err != nil {
 		return JoinResult{}, err
 	}
-	code, err := parsePairingCode(input.PairingCode)
+	pairResult, err := m.requestPairing(ctx, parameters)
 	if err != nil {
 		return JoinResult{}, err
 	}
-	nodeName := strings.TrimSpace(input.NodeName)
-	if nodeName == "" || len([]rune(nodeName)) > 40 {
-		return JoinResult{}, errors.New("choose a server name between 1 and 40 characters")
-	}
-	lanAddress := strings.TrimSpace(input.LANAddress)
-	if ip := net.ParseIP(lanAddress); ip == nil || !isPrivateAddress(ip) {
-		return JoinResult{}, errors.New("this server address must be a private LAN IP")
-	}
-	private, err := ecdh.X25519().GenerateKey(rand.Reader)
+	payload, nodeSecret, err := decodePairingResponse(pairResult, parameters.privateKey, parameters.code)
 	if err != nil {
 		return JoinResult{}, err
 	}
-	requestBody := PairRequest{
-		PairingID: code.ID, NodeID: state.NodeID, NodeName: nodeName, LANAddress: lanAddress,
-		PublicKey: base64.RawURLEncoding.EncodeToString(private.PublicKey().Bytes()),
-	}
-	requestBody.Proof = base64.RawURLEncoding.EncodeToString(pairingProof(code.Token, requestBody))
-	encoded, _ := json.Marshal(requestBody)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, controllerURL+"/api/redundancy/pair", bytes.NewReader(encoded))
-	if err != nil {
-		return JoinResult{}, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := m.client.Do(request)
-	if err != nil {
-		return JoinResult{}, fmt.Errorf("connect to the Faro controller: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return JoinResult{}, fmt.Errorf("controller rejected pairing: %s", cleanHTTPError(message, response.Status))
-	}
-	var pairResult PairResponse
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&pairResult); err != nil {
-		return JoinResult{}, errors.New("controller returned an invalid pairing response")
-	}
-	key, err := pairingKey(private.Bytes(), code.ControllerKey, code.Token)
-	if err != nil {
-		return JoinResult{}, err
-	}
-	plaintext, err := openEnvelope(key, encryptedEnvelope(pairResult), "faro-pairing-response-v1")
-	if err != nil {
-		return JoinResult{}, err
-	}
-	var payload pairPayload
-	if err := json.Unmarshal(plaintext, &payload); err != nil {
-		return JoinResult{}, errors.New("controller returned invalid pairing details")
-	}
-	nodeSecret, err := base64.RawURLEncoding.DecodeString(payload.NodeSecret)
-	if err != nil || len(nodeSecret) != 32 || payload.HomeID == "" {
-		return JoinResult{}, errors.New("controller returned invalid pairing details")
-	}
-	masterKey, err := secrets.LoadOrCreateKey(m.secretKeyPath)
-	if err != nil {
-		return JoinResult{}, err
-	}
-	ciphertext, err := secrets.Encrypt(masterKey, nodeSecret)
-	if err != nil {
-		return JoinResult{}, err
-	}
-	if _, err := m.store.DB.ExecContext(ctx, `
-		UPDATE redundancy_state
-		SET role = ?, home_id = ?, node_name = ?, controller_url = ?, secret_ciphertext = ?,
-		    config_revision = 0, last_sync_at = NULL, last_error = '', updated_at = CURRENT_TIMESTAMP
-		WHERE id = 1`,
-		RoleReplica, payload.HomeID, nodeName, controllerURL, ciphertext); err != nil {
+	if err := m.persistReplicaState(ctx, parameters, payload, nodeSecret); err != nil {
 		return JoinResult{}, err
 	}
 	if err := m.syncReplica(ctx); err != nil {
@@ -424,6 +404,110 @@ func (m *Manager) Join(ctx context.Context, input JoinInput) (JoinResult, error)
 	}
 	status, statusErr := m.PublicStatus(ctx)
 	return JoinResult{Status: status}, statusErr
+}
+
+type joinParameters struct {
+	controllerURL string
+	code          parsedPairingCode
+	nodeName      string
+	privateKey    *ecdh.PrivateKey
+	request       PairRequest
+}
+
+func prepareJoinParameters(ctx context.Context, input JoinInput, state localState) (joinParameters, error) {
+	controllerURL, err := normalizeControllerURL(ctx, input.ControllerURL)
+	if err != nil {
+		return joinParameters{}, err
+	}
+	code, err := parsePairingCode(input.PairingCode)
+	if err != nil {
+		return joinParameters{}, err
+	}
+	nodeName := strings.TrimSpace(input.NodeName)
+	if nodeName == "" || len([]rune(nodeName)) > 40 {
+		return joinParameters{}, errors.New("choose a server name between 1 and 40 characters")
+	}
+	lanAddress := strings.TrimSpace(input.LANAddress)
+	if ip := net.ParseIP(lanAddress); ip == nil || !isPrivateAddress(ip) {
+		return joinParameters{}, errors.New("this server address must be a private LAN IP")
+	}
+	private, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		return joinParameters{}, err
+	}
+	request := PairRequest{
+		PairingID: code.ID, NodeID: state.NodeID, NodeName: nodeName, LANAddress: lanAddress,
+		PublicKey: base64.RawURLEncoding.EncodeToString(private.PublicKey().Bytes()),
+	}
+	request.Proof = base64.RawURLEncoding.EncodeToString(pairingProof(code.Token, request))
+	return joinParameters{controllerURL: controllerURL, code: code, nodeName: nodeName, privateKey: private, request: request}, nil
+}
+
+func (m *Manager) requestPairing(ctx context.Context, parameters joinParameters) (PairResponse, error) {
+	encoded, err := json.Marshal(parameters.request)
+	if err != nil {
+		return PairResponse{}, fmt.Errorf("encode pairing request: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, parameters.controllerURL+"/api/redundancy/pair", bytes.NewReader(encoded))
+	if err != nil {
+		return PairResponse{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := m.client.Do(request)
+	if err != nil {
+		return PairResponse{}, fmt.Errorf("connect to the Faro controller: %w", err)
+	}
+	defer closeRedundancyResource("close pairing response body", response.Body)
+	if response.StatusCode != http.StatusOK {
+		message, readErr := io.ReadAll(io.LimitReader(response.Body, 4096))
+		if readErr != nil {
+			return PairResponse{}, fmt.Errorf("controller rejected pairing: %s", response.Status)
+		}
+		return PairResponse{}, fmt.Errorf("controller rejected pairing: %s", cleanHTTPError(message, response.Status))
+	}
+	var pairResult PairResponse
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&pairResult); err != nil {
+		return PairResponse{}, errors.New("controller returned an invalid pairing response")
+	}
+	return pairResult, nil
+}
+
+func decodePairingResponse(pairResult PairResponse, private *ecdh.PrivateKey, code parsedPairingCode) (pairPayload, []byte, error) {
+	key, err := pairingKey(private.Bytes(), code.ControllerKey, code.Token)
+	if err != nil {
+		return pairPayload{}, nil, err
+	}
+	plaintext, err := openEnvelope(key, EncryptedEnvelope(pairResult), "faro-pairing-response-v1")
+	if err != nil {
+		return pairPayload{}, nil, err
+	}
+	var payload pairPayload
+	if err := json.Unmarshal(plaintext, &payload); err != nil {
+		return pairPayload{}, nil, errors.New("controller returned invalid pairing details")
+	}
+	nodeSecret, err := base64.RawURLEncoding.DecodeString(payload.NodeSecret)
+	if err != nil || len(nodeSecret) != 32 || payload.HomeID == "" {
+		return pairPayload{}, nil, errors.New("controller returned invalid pairing details")
+	}
+	return payload, nodeSecret, nil
+}
+
+func (m *Manager) persistReplicaState(ctx context.Context, parameters joinParameters, payload pairPayload, nodeSecret []byte) error {
+	masterKey, err := secrets.LoadOrCreateKey(m.secretKeyPath)
+	if err != nil {
+		return err
+	}
+	ciphertext, err := secrets.Encrypt(masterKey, nodeSecret)
+	if err != nil {
+		return err
+	}
+	_, err = m.store.DB.ExecContext(ctx, `
+		UPDATE redundancy_state
+		SET role = ?, home_id = ?, node_name = ?, controller_url = ?, secret_ciphertext = ?,
+		    config_revision = 0, last_sync_at = NULL, last_error = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = 1`,
+		RoleReplica, payload.HomeID, parameters.nodeName, parameters.controllerURL, ciphertext)
+	return err
 }
 
 func (m *Manager) RemoveNode(ctx context.Context, nodeID string) error {
@@ -438,7 +522,11 @@ func (m *Manager) RemoveNode(ctx context.Context, nodeID string) error {
 	if err != nil {
 		return err
 	}
-	if changed, _ := result.RowsAffected(); changed == 0 {
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
 		return errors.New("replica server does not exist")
 	}
 	return nil
@@ -490,7 +578,7 @@ func (m *Manager) setStandalone(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer rollbackRedundancyTransaction(tx)
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE redundancy_state
 		SET role = ?, home_id = '', controller_url = '', secret_ciphertext = '',
@@ -499,10 +587,10 @@ func (m *Manager) setStandalone(ctx context.Context) error {
 		WHERE id = 1`, RoleStandalone); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_nodes`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_nodes WHERE node_id IS NOT NULL`); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_snapshots`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_snapshots WHERE revision IS NOT NULL`); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -633,9 +721,23 @@ func cleanHTTPError(body []byte, fallback string) string {
 }
 
 func (m *Manager) recordReplicaError(ctx context.Context, err error) {
-	_, _ = m.store.DB.ExecContext(ctx, `
+	if _, updateErr := m.store.DB.ExecContext(ctx, `
 		UPDATE redundancy_state SET last_error = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE id = 1 AND role = ?`, truncate(err.Error(), 500), RoleReplica)
+		WHERE id = 1 AND role = ?`, truncate(err.Error(), 500), RoleReplica); updateErr != nil {
+		log.Printf("record redundancy replica error: %v", updateErr)
+	}
+}
+
+func closeRedundancyResource(operation string, resource io.Closer) {
+	if err := resource.Close(); err != nil {
+		log.Printf("%s: %v", operation, err)
+	}
+}
+
+func rollbackRedundancyTransaction(tx *sql.Tx) {
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		log.Printf("rollback redundancy transaction: %v", err)
+	}
 }
 
 func truncate(value string, maximum int) string {

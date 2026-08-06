@@ -7,9 +7,11 @@ import (
 	"github.com/derek/faro/internal/integrations/unifi"
 )
 
+const unifiUnavailableMessage = "UniFi integration is unavailable"
+
 func (s *Handler) unifiIntegration(w http.ResponseWriter, r *http.Request) {
 	if s.unifi == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "UniFi integration is unavailable"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": unifiUnavailableMessage})
 		return
 	}
 	switch r.Method {
@@ -48,7 +50,7 @@ func (s *Handler) unifiTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.unifi == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "UniFi integration is unavailable"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": unifiUnavailableMessage})
 		return
 	}
 	var input unifi.TestInput
@@ -69,7 +71,7 @@ func (s *Handler) unifiSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.unifi == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "UniFi integration is unavailable"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": unifiUnavailableMessage})
 		return
 	}
 	result, err := s.unifi.Sync(r.Context())

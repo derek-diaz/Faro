@@ -2,8 +2,8 @@ import { Database, Home, LockKeyhole, Server, ShieldX } from "lucide-react";
 import { findUpstreamAddress } from "../data/upstreams";
 
 type ResolutionSourceProps = {
-  source: string;
-  upstream?: string | null;
+  readonly source: string;
+  readonly upstream?: string | null;
 };
 
 export function ResolutionSource({ source, upstream }: ResolutionSourceProps) {

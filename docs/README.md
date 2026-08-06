@@ -348,6 +348,12 @@ The production and development images supervise those responsibilities together 
 
 ## Publishing Docker releases
 
+### Application version
+
+Faro's runtime version is defined in [`internal/version/version.go`](../internal/version/version.go). Update the `Number` constant there for the next release; the API and the frontend sidebar derive their displayed version from that value. The current release is `v0.9.0`.
+
+The authenticated UI also checks the public [Faro GitHub releases](https://github.com/derek-diaz/Faro/releases) periodically. When a newer semantic-versioned release is available, Faro shows a banner with a direct release link. If GitHub cannot be reached, the check fails quietly and does not affect DNS or the rest of the interface.
+
 Repository maintainers need this Docker Hub repository in the target namespace:
 
 - `faro`

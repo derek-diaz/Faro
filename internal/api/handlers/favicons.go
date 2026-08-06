@@ -29,6 +29,9 @@ const (
 	faviconFailureCacheWindow = "-15 minutes"
 	maxFaviconBytes           = 512 * 1024
 	maxFaviconPageBytes       = 512 * 1024
+	maxDiscoveredFaviconLinks = 8
+	contentTypeHeader         = "Content-Type"
+	httpsScheme               = "https://"
 )
 
 var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
@@ -156,18 +159,18 @@ func faviconCandidates(domain string) ([]string, []string) {
 	}
 	direct := make([]string, 0, len(hosts)+1)
 	for _, host := range hosts {
-		direct = append(direct, "https://"+host+"/favicon.ico")
+		direct = append(direct, httpsScheme+host+"/favicon.ico")
 	}
 	registrable := hosts[len(hosts)-1]
 	if !strings.HasPrefix(registrable, "www.") {
-		direct = append(direct, "https://www."+registrable+"/favicon.ico")
+		direct = append(direct, httpsScheme+"www."+registrable+"/favicon.ico")
 	}
-	pages := []string{"https://" + registrable + "/"}
+	pages := []string{httpsScheme + registrable + "/"}
 	if domain != registrable {
-		pages = append(pages, "https://"+domain+"/")
+		pages = append(pages, httpsScheme+domain+"/")
 	}
 	if !strings.HasPrefix(registrable, "www.") {
-		pages = append(pages, "https://www."+registrable+"/")
+		pages = append(pages, httpsScheme+"www."+registrable+"/")
 	}
 	return uniqueStringsInOrder(direct), uniqueStringsInOrder(pages)
 }
@@ -185,7 +188,7 @@ func downloadFavicon(ctx context.Context, client *http.Client, candidate string)
 	if err != nil {
 		return nil, "", err
 	}
-	defer response.Body.Close()
+	defer logActionError("close favicon response body", response.Body.Close)
 	if response.StatusCode < http.StatusOK || response.StatusCode > 299 {
 		return nil, "", fmt.Errorf("favicon returned %s", response.Status)
 	}
@@ -196,7 +199,7 @@ func downloadFavicon(ctx context.Context, client *http.Client, candidate string)
 	if len(body) == 0 || len(body) > maxFaviconBytes {
 		return nil, "", errors.New("favicon is empty or too large")
 	}
-	if !isFaviconImage(response.Header.Get("Content-Type"), body) {
+	if !isFaviconImage(response.Header.Get(contentTypeHeader), body) {
 		return nil, "", errors.New("favicon response is not a supported image")
 	}
 	resolvedURL := candidate
@@ -219,11 +222,11 @@ func discoverFaviconCandidates(ctx context.Context, client *http.Client, page st
 	if err != nil {
 		return nil
 	}
-	defer response.Body.Close()
+	defer logActionError("close favicon page response body", response.Body.Close)
 	if response.StatusCode < http.StatusOK || response.StatusCode > 299 {
 		return nil
 	}
-	contentType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	contentType, _, _ := mime.ParseMediaType(response.Header.Get(contentTypeHeader))
 	if contentType != "text/html" && contentType != "application/xhtml+xml" {
 		return nil
 	}
@@ -246,41 +249,60 @@ func faviconLinks(baseURL *url.URL, body []byte) []string {
 		return nil
 	}
 	candidates := make([]string, 0, 4)
-	var walk func(*html.Node)
-	walk = func(node *html.Node) {
-		if node.Type == html.ElementNode && node.Data == "link" {
-			var relation, href string
-			for _, attribute := range node.Attr {
-				switch strings.ToLower(attribute.Key) {
-				case "rel":
-					relation = strings.ToLower(attribute.Val)
-				case "href":
-					href = strings.TrimSpace(attribute.Val)
-				}
-			}
-			if href != "" && slices.ContainsFunc(strings.Fields(relation), func(value string) bool {
-				return value == "icon" || value == "shortcut" || value == "apple-touch-icon" || value == "mask-icon"
-			}) {
-				if reference, parseErr := url.Parse(href); parseErr == nil {
-					resolved := baseURL.ResolveReference(reference)
-					if validDiscoveredFaviconURL(resolved) {
-						candidates = append(candidates, resolved.String())
-					}
-				}
-			}
-		}
-		if len(candidates) >= 8 {
-			return
-		}
-		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			walk(child)
-			if len(candidates) >= 8 {
-				return
-			}
+	collectFaviconLinks(baseURL, document, &candidates)
+	return uniqueStringsInOrder(candidates)
+}
+
+func collectFaviconLinks(baseURL *url.URL, node *html.Node, candidates *[]string) {
+	if len(*candidates) >= maxDiscoveredFaviconLinks {
+		return
+	}
+	if candidate, ok := faviconLinkCandidate(baseURL, node); ok {
+		*candidates = append(*candidates, candidate)
+	}
+	for child := node.FirstChild; child != nil && len(*candidates) < maxDiscoveredFaviconLinks; child = child.NextSibling {
+		collectFaviconLinks(baseURL, child, candidates)
+	}
+}
+
+func faviconLinkCandidate(baseURL *url.URL, node *html.Node) (string, bool) {
+	if node.Type != html.ElementNode || node.Data != "link" {
+		return "", false
+	}
+	relation, href := faviconLinkAttributes(node)
+	if href == "" || !isFaviconRelation(relation) {
+		return "", false
+	}
+	reference, err := url.Parse(href)
+	if err != nil {
+		return "", false
+	}
+	resolved := baseURL.ResolveReference(reference)
+	if !validDiscoveredFaviconURL(resolved) {
+		return "", false
+	}
+	return resolved.String(), true
+}
+
+func faviconLinkAttributes(node *html.Node) (string, string) {
+	var relation, href string
+	for _, attribute := range node.Attr {
+		switch strings.ToLower(attribute.Key) {
+		case "rel":
+			relation = strings.ToLower(attribute.Val)
+		case "href":
+			href = strings.TrimSpace(attribute.Val)
 		}
 	}
-	walk(document)
-	return uniqueStringsInOrder(candidates)
+	return relation, href
+}
+
+func isFaviconRelation(relation string) bool {
+	return slices.ContainsFunc(strings.Fields(relation), isFaviconRelationValue)
+}
+
+func isFaviconRelationValue(value string) bool {
+	return value == "icon" || value == "shortcut" || value == "apple-touch-icon" || value == "mask-icon"
 }
 
 func validDiscoveredFaviconURL(candidate *url.URL) bool {
@@ -403,34 +425,41 @@ func faviconDialContext(resolver *net.Resolver) func(context.Context, string, st
 			return nil, err
 		}
 		if parsed, parseErr := netip.ParseAddr(strings.Trim(host, "[]")); parseErr == nil {
-			if !isPublicFaviconIP(parsed) {
-				return nil, fmt.Errorf("favicon address %s is not public", parsed)
-			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(parsed.String(), port))
+			return dialPublicFaviconIP(ctx, dialer, network, parsed, port)
 		}
-
-		// The trailing dot makes the lookup absolute, preventing host/Docker DNS
-		// search suffixes from being appended to public domain names.
-		addresses, err := resolver.LookupNetIP(ctx, "ip", strings.TrimSuffix(host, ".")+".")
-		if err != nil {
-			return nil, err
-		}
-		var lastErr error
-		for _, candidate := range addresses {
-			if !isPublicFaviconIP(candidate) {
-				continue
-			}
-			connection, err := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.String(), port))
-			if err == nil {
-				return connection, nil
-			}
-			lastErr = err
-		}
-		if lastErr == nil {
-			lastErr = fmt.Errorf("favicon domain %s did not resolve to a public address", host)
-		}
-		return nil, lastErr
+		return dialPublicFaviconHost(ctx, resolver, dialer, network, host, port)
 	}
+}
+
+func dialPublicFaviconIP(ctx context.Context, dialer *net.Dialer, network string, address netip.Addr, port string) (net.Conn, error) {
+	if !isPublicFaviconIP(address) {
+		return nil, fmt.Errorf("favicon address %s is not public", address)
+	}
+	return dialer.DialContext(ctx, network, net.JoinHostPort(address.String(), port))
+}
+
+func dialPublicFaviconHost(ctx context.Context, resolver *net.Resolver, dialer *net.Dialer, network, host, port string) (net.Conn, error) {
+	// The trailing dot makes the lookup absolute, preventing host/Docker DNS
+	// search suffixes from being appended to public domain names.
+	addresses, err := resolver.LookupNetIP(ctx, "ip", strings.TrimSuffix(host, ".")+".")
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, address := range addresses {
+		if !isPublicFaviconIP(address) {
+			continue
+		}
+		connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(address.String(), port))
+		if dialErr == nil {
+			return connection, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("favicon domain %s did not resolve to a public address", host)
+	}
+	return nil, lastErr
 }
 
 func isPublicFaviconIP(address netip.Addr) bool {
@@ -441,32 +470,43 @@ func isPublicFaviconIP(address netip.Addr) bool {
 var publicDomainPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$`)
 
 func isSafeFaviconDomain(domain string) bool {
-	if !publicDomainPattern.MatchString(domain) {
+	if !publicDomainPattern.MatchString(domain) || len(domain) > 253 {
 		return false
 	}
-	if len(domain) > 253 {
-		return false
-	}
-	repeatedLabels := 1
 	labels := strings.Split(domain, ".")
-	for index, label := range labels {
+	if !validFaviconLabels(labels) || hasRepeatedFaviconLabels(labels) || hasUnsafeFaviconSuffix(domain) {
+		return false
+	}
+	parsed, err := url.Parse(httpsScheme + domain)
+	return err == nil && parsed.Hostname() == domain
+}
+
+func validFaviconLabels(labels []string) bool {
+	for _, label := range labels {
 		if label == "" || len(label) > 63 {
 			return false
 		}
-		if index > 0 && label == labels[index-1] {
+	}
+	return true
+}
+
+func hasRepeatedFaviconLabels(labels []string) bool {
+	repeatedLabels := 1
+	for index := 1; index < len(labels); index++ {
+		if labels[index] == labels[index-1] {
 			repeatedLabels++
 			if repeatedLabels >= 3 {
-				return false
+				return true
 			}
 		} else {
 			repeatedLabels = 1
 		}
 	}
-	if strings.HasSuffix(domain, ".home") || strings.HasSuffix(domain, ".local") || strings.HasSuffix(domain, ".lan") {
-		return false
-	}
-	parsed, err := url.Parse("https://" + domain)
-	return err == nil && parsed.Hostname() == domain
+	return false
+}
+
+func hasUnsafeFaviconSuffix(domain string) bool {
+	return strings.HasSuffix(domain, ".home") || strings.HasSuffix(domain, ".local") || strings.HasSuffix(domain, ".lan")
 }
 
 func safeFaviconFilename(domain string) string {
@@ -479,7 +519,7 @@ func serveFaviconPlaceholder(w http.ResponseWriter, domain string) {
 	if domain != "" {
 		initial = strings.ToUpper(domain[:1])
 	}
-	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set(contentTypeHeader, "image/svg+xml")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	w.Header().Set("X-Faro-Favicon", "placeholder")
 	_, _ = fmt.Fprintf(w, `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><circle cx="16" cy="16" r="16" fill="#e8eef5"/><text x="16" y="21" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#617085">%s</text></svg>`, initial)

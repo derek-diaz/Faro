@@ -1,13 +1,13 @@
 import { AlertTriangle, Cable, Check, CheckCircle2, Clock3, Cpu, Database, Download, Eye, EyeOff, FileArchive, Gauge, Globe2, HardDrive, Image, KeyRound, LockKeyhole, Network, RefreshCw, RotateCw, Save, Server, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode, type SubmitEvent } from "react";
 import { api, type MaintenanceStatus, type PruneResult, type Setting } from "../api/client";
 import { UnifiIntegration } from "../components/UnifiIntegration";
 import { RedundancySettings } from "../components/RedundancySettings";
 
 type SettingsProps = {
-  settings: Setting[];
-  refresh: () => Promise<void>;
-  onManageUpstreams: () => void;
+  readonly settings: Setting[];
+  readonly refresh: () => Promise<void>;
+  readonly onManageUpstreams: () => void;
 };
 
 type SettingsTab = "general" | "redundancy" | "integrations" | "data" | "account";
@@ -54,7 +54,7 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
     }
   }
 
-  async function saveGeneral(event: FormEvent) {
+  async function saveGeneral(event: SubmitEvent) {
     event.preventDefault();
     await runAction(async () => {
       await api.updateSettings({
@@ -107,7 +107,7 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
     });
   }
 
-  async function changePassword(event: FormEvent) {
+  async function changePassword(event: SubmitEvent) {
     event.preventDefault();
     if (newPassword.length < 8) {
       setActionState("error");
@@ -134,163 +134,134 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
     try {
       setMessage(await action());
       setActionState("done");
-    } catch (caught) {
+    } catch (error_) {
       setActionState("error");
-      setMessage(caught instanceof Error ? caught.message : "The operation failed.");
+      setMessage(error_ instanceof Error ? error_.message : "The operation failed.");
     }
   }
 
-  return (
-    <div className="settings-workspace">
-      <div className="settings-tabs" role="tablist" aria-label="Settings sections">
-        <button type="button" role="tab" aria-selected={tab === "general"} className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}>
-          <Gauge size={16} /> DNS & interface
-        </button>
-        <button type="button" role="tab" aria-selected={tab === "data"} className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}>
-          <Database size={16} /> Health & data
-        </button>
-        <button type="button" role="tab" aria-selected={tab === "redundancy"} className={tab === "redundancy" ? "active" : ""} onClick={() => setTab("redundancy")}>
-          <Network size={16} /> Redundancy
-        </button>
-        <button type="button" role="tab" aria-selected={tab === "integrations"} className={tab === "integrations" ? "active" : ""} onClick={() => setTab("integrations")}>
-          <Cable size={16} /> Integrations
-        </button>
-        <button type="button" role="tab" aria-selected={tab === "account"} className={tab === "account" ? "active" : ""} onClick={() => setTab("account")}>
-          <UserRound size={16} /> Account
-        </button>
-      </div>
-
-      {message && <div className={`settings-feedback ${actionState === "error" ? "error" : "success"}`}><CheckCircle2 size={16} /><span>{message}</span></div>}
-
-      {tab === "general" ? (
-        <div className="settings-general-grid">
-          <section className="panel settings-compact-panel">
-            <div className="panel-title with-actions">
-              <div><h2>DNS & resolution</h2><p>Core behavior for local and public lookups.</p></div>
-              <button type="button" className="secondary icon-text-button" onClick={() => void reloadDNS()} disabled={actionState === "working"}>
-                <RotateCw size={16} /><span>Reload DNS</span>
-              </button>
-            </div>
-
-            <form className="settings-rows" onSubmit={(event) => void saveGeneral(event)}>
-              <SettingRow icon={<Server size={19} />} title="Upstream providers" description={`${upstreams.length} selected: ${upstreams.join(", ") || "none"}`}>
-                <button type="button" className="secondary" onClick={onManageUpstreams}>Manage</button>
-              </SettingRow>
-
-              <SettingRow icon={<Globe2 size={19} />} title="Local domain suffix" description="Default suffix suggested for local records.">
-                <input className="settings-short-input" value={form.local_domain_suffix ?? ""} onChange={(event) => setForm({ ...form, local_domain_suffix: event.target.value })} placeholder="home" />
-              </SettingRow>
-
-              <SettingRow icon={<Network size={19} />} title="Faro LAN address" description="Fixed address distributed to devices as their DNS server.">
-                <input className="settings-short-input" value={form.faro_lan_ip ?? ""} onChange={(event) => setForm({ ...form, faro_lan_ip: event.target.value })} placeholder="192.168.1.20" required />
-              </SettingRow>
-
-              <SettingRow icon={<ShieldCheck size={19} />} title="Network access" description="Faro automatically accepts DNS requests from devices on home and private networks.">
-                <div className="settings-network-access">
-                  <div className="settings-network-access-summary">
-                    <span className="settings-access-badge"><Check size={13} /> Home networks</span>
-                    <button type="button" className="secondary" aria-expanded={advancedNetworkOpen} onClick={() => setAdvancedNetworkOpen((open) => !open)}>{advancedNetworkOpen ? "Hide advanced" : "Advanced"}</button>
-                  </div>
-                  {advancedNetworkOpen && (
-                    <label className="settings-network-advanced">
-                      <span>Custom network ranges</span>
-                      <textarea className="settings-cidr-input" rows={4} value={form.allowed_client_cidrs ?? ""} onChange={(event) => setForm({ ...form, allowed_client_cidrs: event.target.value })} aria-label="Custom allowed DNS client network ranges" />
-                      <small>Most people never need this. Only change these ranges if your network uses addresses outside standard home networks.</small>
-                    </label>
-                  )}
-                </div>
-              </SettingRow>
-
-              <SettingRow icon={<Gauge size={19} />} title="DNS response cache" description="Keep repeated answers local to reduce latency and upstream traffic.">
-                <div className="settings-inline-controls">
-                  <label className="compact-toggle"><input type="checkbox" checked={form.dns_cache_enabled !== "false"} onChange={(event) => setForm({ ...form, dns_cache_enabled: String(event.target.checked) })} /><span>Enabled</span></label>
-                  <label className="unit-input"><input type="number" min="30" max="3600" step="30" disabled={form.dns_cache_enabled === "false"} value={form.dns_cache_ttl ?? "300"} onChange={(event) => setForm({ ...form, dns_cache_ttl: event.target.value })} /><span>sec max</span></label>
-                </div>
-              </SettingRow>
-
-              <SettingRow icon={<Image size={19} />} title="Domain favicons" description="Fetch and cache icons for public domains; local names retain initials.">
-                <label className="compact-toggle"><input type="checkbox" checked={form.favicon_fetching_enabled === "true"} onChange={(event) => setForm({ ...form, favicon_fetching_enabled: String(event.target.checked) })} /><span>Enabled</span></label>
-              </SettingRow>
-
-              <div className="settings-save-row">
-                <button type="submit" className="icon-text-button" disabled={actionState === "working"}><Save size={16} /><span>{actionState === "working" ? "Saving" : "Save changes"}</span></button>
-              </div>
-            </form>
-          </section>
-
-          <aside className="settings-overview-column">
-            <section className="panel settings-summary">
-              <div className="panel-title"><h2>Current configuration</h2></div>
-              <div className="settings-summary-list">
-                <SummaryRow label="Upstreams" value={upstreams.join(", ") || "Not configured"} />
-                <SummaryRow label="Local suffix" value={form.local_domain_suffix || "home"} />
-                <SummaryRow label="LAN address" value={form.faro_lan_ip || "Not configured"} />
-                <SummaryRow label="Cache" value={form.dns_cache_enabled !== "false" ? `${form.dns_cache_ttl || "300"} seconds` : "Disabled"} />
-                <SummaryRow label="Favicons" value={form.favicon_fetching_enabled === "true" ? "Enabled" : "Disabled"} />
-              </div>
-            </section>
-          </aside>
-        </div>
-      ) : tab === "redundancy" ? (
-        <RedundancySettings />
-      ) : tab === "data" ? (
-        <DataAndHealth
-          maintenance={maintenance}
-          loading={maintenanceLoading}
-          retentionDays={form.retention_days || "30"}
-          setRetentionDays={(value) => setForm({ ...form, retention_days: value })}
-          saveRetention={() => void saveRetention()}
-          pruneDays={pruneDays}
-          setPruneDays={setPruneDays}
-          compact={compact}
-          setCompact={setCompact}
-          prune={() => void pruneNow()}
-          refresh={() => void loadMaintenance()}
-          busy={actionState === "working"}
-          result={pruneResult}
-        />
-      ) : tab === "integrations" ? (
-        <UnifiIntegration onChanged={refresh} />
-      ) : (
-        <section className="panel account-password-panel">
-          <div className="panel-title"><div><h2>Change password</h2><p>Enter your current password, then choose a new one.</p></div></div>
-          <form className="account-password-form" onSubmit={(event) => void changePassword(event)}>
-            <PasswordField label="Current password" value={currentPassword} setValue={setCurrentPassword} visible={passwordVisible} autoComplete="current-password" />
-            <PasswordField label="New password" value={newPassword} setValue={setNewPassword} visible={passwordVisible} autoComplete="new-password" />
-            <PasswordField label="Confirm new password" value={confirmPassword} setValue={setConfirmPassword} visible={passwordVisible} autoComplete="new-password" />
-            <div className="account-password-footer">
-              <div className="password-requirements" aria-label="Password requirements">
-                <span className={newPassword.length >= 8 ? "met" : ""}><Check size={13} /> 8 or more characters</span>
-                <span className={confirmPassword.length > 0 && newPassword === confirmPassword ? "met" : ""}><Check size={13} /> Passwords match</span>
-              </div>
-              <button type="button" className="secondary password-visibility" onClick={() => setPasswordVisible((visible) => !visible)}>{passwordVisible ? <EyeOff size={15} /> : <Eye size={15} />}<span>{passwordVisible ? "Hide" : "Show"}</span></button>
-            </div>
-            <div className="settings-save-row account-password-action"><span>Other sessions will be signed out.</span><button type="submit" className="icon-text-button" disabled={actionState === "working" || !currentPassword || !newPassword || !confirmPassword}><KeyRound size={16} /><span>{actionState === "working" ? "Changing password" : "Change password"}</span></button></div>
-          </form>
-        </section>
-      )}
-    </div>
-  );
+  return <SettingsWorkspace
+    tab={tab}
+    setTab={setTab}
+    message={message}
+    actionState={actionState}
+    form={form}
+    setForm={setForm}
+    upstreams={upstreams}
+    onManageUpstreams={onManageUpstreams}
+    reloadDNS={() => void reloadDNS()}
+    saveGeneral={saveGeneral}
+    advancedNetworkOpen={advancedNetworkOpen}
+    setAdvancedNetworkOpen={setAdvancedNetworkOpen}
+    maintenance={maintenance}
+    maintenanceLoading={maintenanceLoading}
+    saveRetention={() => void saveRetention()}
+    pruneDays={pruneDays}
+    setPruneDays={setPruneDays}
+    compact={compact}
+    setCompact={setCompact}
+    prune={() => void pruneNow()}
+    refreshMaintenance={() => void loadMaintenance()}
+    pruneResult={pruneResult}
+    currentPassword={currentPassword}
+    newPassword={newPassword}
+    confirmPassword={confirmPassword}
+    setCurrentPassword={setCurrentPassword}
+    setNewPassword={setNewPassword}
+    setConfirmPassword={setConfirmPassword}
+    passwordVisible={passwordVisible}
+    setPasswordVisible={setPasswordVisible}
+    changePassword={changePassword}
+    refresh={refresh}
+  />;
 }
 
-function PasswordField({ label, value, setValue, visible, autoComplete }: { label: string; value: string; setValue: (value: string) => void; visible: boolean; autoComplete: string }) {
+type SettingsWorkspaceProps = {
+  readonly tab: SettingsTab;
+  readonly setTab: (tab: SettingsTab) => void;
+  readonly message: string;
+  readonly actionState: ActionState;
+  readonly form: Record<string, string>;
+  readonly setForm: (form: Record<string, string>) => void;
+  readonly upstreams: string[];
+  readonly onManageUpstreams: () => void;
+  readonly reloadDNS: () => void;
+  readonly saveGeneral: (event: SubmitEvent) => Promise<void>;
+  readonly advancedNetworkOpen: boolean;
+  readonly setAdvancedNetworkOpen: (open: boolean) => void;
+  readonly maintenance: MaintenanceStatus | null;
+  readonly maintenanceLoading: boolean;
+  readonly saveRetention: () => void;
+  readonly pruneDays: number;
+  readonly setPruneDays: (days: number) => void;
+  readonly compact: boolean;
+  readonly setCompact: (compact: boolean) => void;
+  readonly prune: () => void;
+  readonly refreshMaintenance: () => void;
+  readonly pruneResult: PruneResult | null;
+  readonly currentPassword: string;
+  readonly newPassword: string;
+  readonly confirmPassword: string;
+  readonly setCurrentPassword: (value: string) => void;
+  readonly setNewPassword: (value: string) => void;
+  readonly setConfirmPassword: (value: string) => void;
+  readonly passwordVisible: boolean;
+  readonly setPasswordVisible: (visible: boolean) => void;
+  readonly changePassword: (event: SubmitEvent) => Promise<void>;
+  readonly refresh: () => Promise<void>;
+};
+
+function SettingsWorkspace(props: SettingsWorkspaceProps) {
+  const { tab, setTab, message, actionState } = props;
+  return <div className="settings-workspace"><div className="settings-tabs" role="tablist" aria-label="Settings sections"><button type="button" role="tab" aria-selected={tab === "general"} className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}><Gauge size={16} /> DNS & interface</button><button type="button" role="tab" aria-selected={tab === "data"} className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}><Database size={16} /> Health & data</button><button type="button" role="tab" aria-selected={tab === "redundancy"} className={tab === "redundancy" ? "active" : ""} onClick={() => setTab("redundancy")}><Network size={16} /> Redundancy</button><button type="button" role="tab" aria-selected={tab === "integrations"} className={tab === "integrations" ? "active" : ""} onClick={() => setTab("integrations")}><Cable size={16} /> Integrations</button><button type="button" role="tab" aria-selected={tab === "account"} className={tab === "account" ? "active" : ""} onClick={() => setTab("account")}><UserRound size={16} /> Account</button></div>{message && <div className={`settings-feedback ${actionState === "error" ? "error" : "success"}`}><CheckCircle2 size={16} /><span>{message}</span></div>}<SettingsTabContent {...props} /></div>;
+}
+
+function SettingsTabContent(props: SettingsWorkspaceProps) {
+  switch (props.tab) {
+    case "general":
+      return <GeneralSettings {...props} />;
+    case "redundancy":
+      return <RedundancySettings />;
+    case "data":
+      return <DataAndHealth maintenance={props.maintenance} loading={props.maintenanceLoading} retentionDays={props.form.retention_days || "30"} setRetentionDays={(value) => props.setForm({ ...props.form, retention_days: value })} saveRetention={props.saveRetention} pruneDays={props.pruneDays} setPruneDays={props.setPruneDays} compact={props.compact} setCompact={props.setCompact} prune={props.prune} refresh={props.refreshMaintenance} busy={props.actionState === "working"} result={props.pruneResult} />;
+    case "integrations":
+      return <UnifiIntegration onChanged={props.refresh} />;
+    case "account":
+      return <AccountSettings {...props} />;
+  }
+}
+
+function GeneralSettings({ form, setForm, upstreams, onManageUpstreams, reloadDNS, saveGeneral, actionState, advancedNetworkOpen, setAdvancedNetworkOpen }: SettingsWorkspaceProps) {
+  return <div className="settings-general-grid"><section className="panel settings-compact-panel"><div className="panel-title with-actions"><div><h2>DNS & resolution</h2><p>Core behavior for local and public lookups.</p></div><button type="button" className="secondary icon-text-button" onClick={reloadDNS} disabled={actionState === "working"}><RotateCw size={16} /><span>Reload DNS</span></button></div><form className="settings-rows" onSubmit={(event) => void saveGeneral(event)}><SettingRow icon={<Server size={19} />} title="Upstream providers" description={`${upstreams.length} selected: ${upstreams.join(", ") || "none"}`}><button type="button" className="secondary" onClick={onManageUpstreams}>Manage</button></SettingRow><SettingRow icon={<Globe2 size={19} />} title="Local domain suffix" description="Default suffix suggested for local records."><input className="settings-short-input" value={form.local_domain_suffix ?? ""} onChange={(event) => setForm({ ...form, local_domain_suffix: event.target.value })} placeholder="home" /></SettingRow><SettingRow icon={<Network size={19} />} title="Faro LAN address" description="Fixed address distributed to devices as their DNS server."><input className="settings-short-input" value={form.faro_lan_ip ?? ""} onChange={(event) => setForm({ ...form, faro_lan_ip: event.target.value })} placeholder="Faro LAN address" required /></SettingRow><SettingRow icon={<ShieldCheck size={19} />} title="Network access" description="Faro automatically accepts DNS requests from devices on home and private networks."><div className="settings-network-access"><div className="settings-network-access-summary"><span className="settings-access-badge"><Check size={13} /> Home networks</span><button type="button" className="secondary" aria-expanded={advancedNetworkOpen} onClick={() => setAdvancedNetworkOpen(!advancedNetworkOpen)}>{advancedNetworkOpen ? "Hide advanced" : "Advanced"}</button></div>{advancedNetworkOpen && <label className="settings-network-advanced"><span>Custom network ranges</span><textarea className="settings-cidr-input" rows={4} value={form.allowed_client_cidrs ?? ""} onChange={(event) => setForm({ ...form, allowed_client_cidrs: event.target.value })} aria-label="Custom allowed DNS client network ranges" /><small>Most people never need this. Only change these ranges if your network uses addresses outside standard home networks.</small></label>}</div></SettingRow><SettingRow icon={<Gauge size={19} />} title="DNS response cache" description="Keep repeated answers local to reduce latency and upstream traffic."><div className="settings-inline-controls"><label className="compact-toggle"><input type="checkbox" checked={form.dns_cache_enabled !== "false"} onChange={(event) => setForm({ ...form, dns_cache_enabled: String(event.target.checked) })} /><span>Enabled</span></label><label className="unit-input"><input type="number" min="30" max="3600" step="30" disabled={form.dns_cache_enabled === "false"} value={form.dns_cache_ttl ?? "300"} onChange={(event) => setForm({ ...form, dns_cache_ttl: event.target.value })} /><span>sec max</span></label></div></SettingRow><SettingRow icon={<Image size={19} />} title="Domain favicons" description="Fetch and cache icons for public domains; local names retain initials."><label className="compact-toggle"><input type="checkbox" checked={form.favicon_fetching_enabled === "true"} onChange={(event) => setForm({ ...form, favicon_fetching_enabled: String(event.target.checked) })} /><span>Enabled</span></label></SettingRow><div className="settings-save-row"><button type="submit" className="icon-text-button" disabled={actionState === "working"}><Save size={16} /><span>{actionState === "working" ? "Saving" : "Save changes"}</span></button></div></form></section><aside className="settings-overview-column"><section className="panel settings-summary"><div className="panel-title"><h2>Current configuration</h2></div><div className="settings-summary-list"><SummaryRow label="Upstreams" value={upstreams.join(", ") || "Not configured"} /><SummaryRow label="Local suffix" value={form.local_domain_suffix || "home"} /><SummaryRow label="LAN address" value={form.faro_lan_ip || "Not configured"} /><SummaryRow label="Cache" value={cacheSummary(form)} /><SummaryRow label="Favicons" value={form.favicon_fetching_enabled === "true" ? "Enabled" : "Disabled"} /></div></section></aside></div>;
+}
+
+function AccountSettings({ currentPassword, newPassword, confirmPassword, setCurrentPassword, setNewPassword, setConfirmPassword, passwordVisible, setPasswordVisible, changePassword, actionState }: SettingsWorkspaceProps) {
+  return <section className="panel account-password-panel"><div className="panel-title"><div><h2>Change password</h2><p>Enter your current password, then choose a new one.</p></div></div><form className="account-password-form" onSubmit={(event) => void changePassword(event)}><PasswordField label="Current password" value={currentPassword} setValue={setCurrentPassword} visible={passwordVisible} autoComplete="current-password" /><PasswordField label="New password" value={newPassword} setValue={setNewPassword} visible={passwordVisible} autoComplete="new-password" /><PasswordField label="Confirm new password" value={confirmPassword} setValue={setConfirmPassword} visible={passwordVisible} autoComplete="new-password" /><div className="account-password-footer"><div className="password-requirements" aria-label="Password requirements"><span className={newPassword.length >= 8 ? "met" : ""}><Check size={13} /> 8 or more characters</span><span className={confirmPassword.length > 0 && newPassword === confirmPassword ? "met" : ""}><Check size={13} /> Passwords match</span></div><button type="button" className="secondary password-visibility" onClick={() => setPasswordVisible(!passwordVisible)}>{passwordVisible ? <EyeOff size={15} /> : <Eye size={15} />}<span>{passwordVisible ? "Hide" : "Show"}</span></button></div><div className="settings-save-row account-password-action"><span>Other sessions will be signed out.</span><button type="submit" className="icon-text-button" disabled={actionState === "working" || !currentPassword || !newPassword || !confirmPassword}><KeyRound size={16} /><span>{actionState === "working" ? "Changing password" : "Change password"}</span></button></div></form></section>;
+}
+
+function cacheSummary(form: Record<string, string>) {
+  if (form.dns_cache_enabled === "false") return "Disabled";
+  return `${form.dns_cache_ttl || "300"} seconds`;
+}
+
+function PasswordField({ label, value, setValue, visible, autoComplete }: { readonly label: string; readonly value: string; readonly setValue: (value: string) => void; readonly visible: boolean; readonly autoComplete: string }) {
   return <label className="account-password-field"><span>{label}</span><div><LockKeyhole size={17} /><input type={visible ? "text" : "password"} value={value} onChange={(event) => setValue(event.target.value)} autoComplete={autoComplete} required /></div></label>;
 }
 
 function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, saveRetention, pruneDays, setPruneDays, compact, setCompact, prune, refresh, busy, result }: {
-  maintenance: MaintenanceStatus | null;
-  loading: boolean;
-  retentionDays: string;
-  setRetentionDays: (value: string) => void;
-  saveRetention: () => void;
-  pruneDays: number;
-  setPruneDays: (value: number) => void;
-  compact: boolean;
-  setCompact: (value: boolean) => void;
-  prune: () => void;
-  refresh: () => void;
-  busy: boolean;
-  result: PruneResult | null;
+  readonly maintenance: MaintenanceStatus | null;
+  readonly loading: boolean;
+  readonly retentionDays: string;
+  readonly setRetentionDays: (value: string) => void;
+  readonly saveRetention: () => void;
+  readonly pruneDays: number;
+  readonly setPruneDays: (value: number) => void;
+  readonly compact: boolean;
+  readonly setCompact: (value: boolean) => void;
+  readonly prune: () => void;
+  readonly refresh: () => void;
+  readonly busy: boolean;
+  readonly result: PruneResult | null;
 }) {
   const storage = maintenance?.storage;
   const [backupPassphrase, setBackupPassphrase] = useState("");
@@ -325,8 +296,8 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
       setBackupPassphrase("");
       setBackupConfirmation("");
       setBackupMessage({ tone: "success", text: "Encrypted backup downloaded. Keep its passphrase somewhere safe—Faro cannot recover it." });
-    } catch (caught) {
-      setBackupMessage({ tone: "error", text: caught instanceof Error ? caught.message : "The backup could not be created." });
+    } catch (error_) {
+      setBackupMessage({ tone: "error", text: error_ instanceof Error ? error_.message : "The backup could not be created." });
     } finally {
       setBackupBusy(null);
     }
@@ -351,8 +322,8 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
       const restored = await api.restoreBackup(restoreFile, restorePassphrase);
       setBackupMessage({ tone: restored.warning ? "error" : "success", text: restored.warning || "Backup restored. Sign in with the account credentials stored in that backup." });
       window.setTimeout(() => window.dispatchEvent(new Event("faro:unauthorized")), 1800);
-    } catch (caught) {
-      setBackupMessage({ tone: "error", text: caught instanceof Error ? caught.message : "The backup could not be restored." });
+    } catch (error_) {
+      setBackupMessage({ tone: "error", text: error_ instanceof Error ? error_.message : "The backup could not be restored." });
       setBackupBusy(null);
     }
   }
@@ -400,7 +371,7 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
       <section className="panel backup-panel">
         <div className="maintenance-section-heading"><ShieldCheck size={20} /><div><h2>Encrypted backup & restore</h2><p>Download a portable copy of Faro's configuration, account, rules, records, and database history.</p></div></div>
         <div className="backup-security-note"><LockKeyhole size={16} /><span>Backups use Argon2id and AES-256-GCM. Active login sessions, cached favicon files, and the raw query-log buffer are excluded.</span></div>
-        {backupMessage && <div className={`backup-message ${backupMessage.tone}`} role="status">{backupMessage.tone === "error" ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}<span>{backupMessage.text}</span></div>}
+        {backupMessage && <output className={`backup-message ${backupMessage.tone}`}>{backupMessage.tone === "error" ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}<span>{backupMessage.text}</span></output>}
         <div className="backup-actions-grid">
           <div className="backup-action-card">
             <div className="backup-card-heading"><FileArchive size={19} /><div><strong>Create encrypted backup</strong><span>Choose a unique passphrase. It is required to restore the file.</span></div></div>
@@ -422,15 +393,15 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
   );
 }
 
-function SettingRow({ icon, title, description, children }: { icon: ReactNode; title: string; description: string; children: ReactNode }) {
+function SettingRow({ icon, title, description, children }: { readonly icon: ReactNode; readonly title: string; readonly description: string; readonly children: ReactNode }) {
   return <div className="compact-setting-row"><span className="compact-setting-icon">{icon}</span><div className="compact-setting-copy"><strong>{title}</strong><span>{description}</span></div><div className="compact-setting-control">{children}</div></div>;
 }
 
-function HealthMetric({ icon, label, value, detail, tone = "default" }: { icon: ReactNode; label: string; value: string; detail: string; tone?: "default" | "healthy" }) {
+function HealthMetric({ icon, label, value, detail, tone = "default" }: { readonly icon: ReactNode; readonly label: string; readonly value: string; readonly detail: string; readonly tone?: "default" | "healthy" }) {
   return <div className={`maintenance-metric ${tone}`}><span className="maintenance-metric-icon">{icon}</span><div><small>{label}</small><strong>{value}</strong><span>{detail}</span></div></div>;
 }
 
-function SummaryRow({ label, value }: { label: string; value: string }) {
+function SummaryRow({ label, value }: { readonly label: string; readonly value: string }) {
   return <div className="summary-config-row"><span>{label}</span><strong>{value}</strong></div>;
 }
 

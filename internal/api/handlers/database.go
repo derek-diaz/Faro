@@ -4,19 +4,41 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 	_ "time/tzdata"
 )
 
+func closeRows(rows *sql.Rows) {
+	if err := rows.Close(); err != nil {
+		log.Printf("close database rows: %v", err)
+	}
+}
+
+func rollbackTransaction(tx *sql.Tx) {
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		log.Printf("rollback transaction: %v", err)
+	}
+}
+
 func writeRows(w http.ResponseWriter, rows *sql.Rows) {
-	columns, err := rows.Columns()
+	items, err := scanRows(rows)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	items := []map[string]any{}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func scanRows(rows *sql.Rows) ([]map[string]any, error) {
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	items := make([]map[string]any, 0)
 	values := make([]any, len(columns))
 	pointers := make([]any, len(columns))
 	for i := range values {
@@ -24,50 +46,45 @@ func writeRows(w http.ResponseWriter, rows *sql.Rows) {
 	}
 	for rows.Next() {
 		if err := rows.Scan(pointers...); err != nil {
-			writeError(w, err)
-			return
+			return nil, err
 		}
-		row := map[string]any{}
-		for i, column := range columns {
-			if column == "decision_metadata" {
-				raw := "{}"
-				if value, ok := values[i].([]byte); ok {
-					raw = string(value)
-				} else if value, ok := values[i].(string); ok {
-					raw = value
-				}
-				row["decision"] = metadataMap(raw)
-				continue
-			}
-			switch value := values[i].(type) {
-			case []byte:
-				row[column] = string(value)
-			case int64:
-				if column == "enabled" {
-					row[column] = value == 1
-				} else {
-					row[column] = value
-				}
-			default:
-				row[column] = value
-			}
-		}
-		items = append(items, row)
+		items = append(items, databaseRow(columns, values))
 	}
 	if err := rows.Err(); err != nil {
-		writeError(w, err)
-		return
+		return nil, err
 	}
-	writeJSON(w, http.StatusOK, items)
+	return items, nil
+}
+
+func databaseRow(columns []string, values []any) map[string]any {
+	row := make(map[string]any, len(columns))
+	for i, column := range columns {
+		if column == "decision_metadata" {
+			row["decision"] = metadataMap(decisionMetadataString(values[i]))
+			continue
+		}
+		switch value := values[i].(type) {
+		case []byte:
+			row[column] = string(value)
+		case int64:
+			row[column] = value
+			if column == "enabled" {
+				row[column] = value == 1
+			}
+		default:
+			row[column] = value
+		}
+	}
+	return row
 }
 
 func grouped(ctx context.Context, database *sql.DB, query string, args ...any) []map[string]any {
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return []map[string]any{}
+		return make([]map[string]any, 0)
 	}
-	defer rows.Close()
-	result := []map[string]any{}
+	defer closeRows(rows)
+	result := make([]map[string]any, 0)
 	for rows.Next() {
 		var label string
 		var count int
@@ -82,33 +99,12 @@ func grouped(ctx context.Context, database *sql.DB, query string, args ...any) [
 func recentQueries(ctx context.Context, database *sql.DB) []map[string]any {
 	rows, err := database.QueryContext(ctx, `SELECT timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata FROM dns_queries ORDER BY timestamp DESC LIMIT 8`)
 	if err != nil {
-		return []map[string]any{}
+		return make([]map[string]any, 0)
 	}
-	defer rows.Close()
-	columns, _ := rows.Columns()
-	items := []map[string]any{}
-	values := make([]any, len(columns))
-	pointers := make([]any, len(columns))
-	for i := range values {
-		pointers[i] = &values[i]
-	}
-	for rows.Next() {
-		if err := rows.Scan(pointers...); err != nil {
-			return items
-		}
-		item := map[string]any{}
-		for i, column := range columns {
-			if column == "decision_metadata" {
-				item["decision"] = metadataMap(decisionMetadataString(values[i]))
-				continue
-			}
-			if bytes, ok := values[i].([]byte); ok {
-				item[column] = string(bytes)
-			} else {
-				item[column] = values[i]
-			}
-		}
-		items = append(items, item)
+	defer closeRows(rows)
+	items, err := scanRows(rows)
+	if err != nil {
+		return make([]map[string]any, 0)
 	}
 	return items
 }
@@ -117,33 +113,12 @@ func recentQueriesFor(ctx context.Context, database *sql.DB, where string, args 
 	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata FROM dns_queries WHERE ` + where + ` ORDER BY timestamp DESC LIMIT 12`
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return []map[string]any{}
+		return make([]map[string]any, 0)
 	}
-	defer rows.Close()
-	columns, _ := rows.Columns()
-	items := []map[string]any{}
-	values := make([]any, len(columns))
-	pointers := make([]any, len(columns))
-	for i := range values {
-		pointers[i] = &values[i]
-	}
-	for rows.Next() {
-		if err := rows.Scan(pointers...); err != nil {
-			return items
-		}
-		item := map[string]any{}
-		for i, column := range columns {
-			if column == "decision_metadata" {
-				item["decision"] = metadataMap(decisionMetadataString(values[i]))
-				continue
-			}
-			if bytes, ok := values[i].([]byte); ok {
-				item[column] = string(bytes)
-			} else {
-				item[column] = values[i]
-			}
-		}
-		items = append(items, item)
+	defer closeRows(rows)
+	items, err := scanRows(rows)
+	if err != nil {
+		return make([]map[string]any, 0)
 	}
 	return items
 }
@@ -162,10 +137,10 @@ func decisionMetadataString(value any) string {
 func searchRows(ctx context.Context, database *sql.DB, query string, args ...any) []map[string]any {
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return []map[string]any{}
+		return make([]map[string]any, 0)
 	}
-	defer rows.Close()
-	items := []map[string]any{}
+	defer closeRows(rows)
+	items := make([]map[string]any, 0)
 	for rows.Next() {
 		var label string
 		var subtitle sql.NullString
@@ -180,10 +155,10 @@ func searchRows(ctx context.Context, database *sql.DB, query string, args ...any
 func topLabels(ctx context.Context, database *sql.DB, query string, args ...any) []string {
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return []string{}
+		return make([]string, 0)
 	}
-	defer rows.Close()
-	labels := []string{}
+	defer closeRows(rows)
+	labels := make([]string, 0)
 	for rows.Next() {
 		var label string
 		var count int

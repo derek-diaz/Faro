@@ -161,6 +161,7 @@ func (s *Handler) redundancyAck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errors.New("redundancy manager is unavailable"))
 		return
 	}
+	defer logActionError("close redundancy acknowledgement body", r.Body.Close)
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 16<<10))
 	if err != nil {
 		writeBadRequest(w, errors.New("invalid acknowledgement"))
@@ -205,7 +206,7 @@ func (s *Handler) redundancyNode(w http.ResponseWriter, r *http.Request) {
 }
 
 func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, target any, limit int64) bool {
-	defer r.Body.Close()
+	defer logActionError("close limited request body", r.Body.Close)
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	if err := decoder.Decode(target); err != nil {
 		writeBadRequest(w, errors.New("invalid request"))

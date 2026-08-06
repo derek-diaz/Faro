@@ -19,10 +19,14 @@ import (
 )
 
 const (
-	requestTimeout = 12 * time.Second
-	maxResponse    = 8 << 20
-	pageSize       = 200
+	requestTimeout           = 12 * time.Second
+	maxResponse              = 8 << 20
+	pageSize                 = 200
+	networkIntegrationPrefix = "/proxy/network/integration/v1"
+	integrationPrefix        = "/integration/v1"
 )
+
+var integrationPrefixes = [...]string{networkIntegrationPrefix, integrationPrefix}
 
 type Site struct {
 	ID                string `json:"id"`
@@ -84,49 +88,71 @@ func newAPIClient(baseURL, apiKey, fingerprint string) (*apiClient, error) {
 		return nil, errors.New("enter a UniFi API key")
 	}
 	fingerprint = normalizeFingerprint(fingerprint)
-	if fingerprint != "" {
-		if len(fingerprint) != sha256.Size*2 {
-			return nil, errors.New("the trusted UniFi certificate fingerprint is invalid")
-		}
-		if _, err := hex.DecodeString(fingerprint); err != nil {
-			return nil, errors.New("the trusted UniFi certificate fingerprint is invalid")
-		}
-	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.DialContext = dialLocalNetwork
-	transport.ResponseHeaderTimeout = 8 * time.Second
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-	if fingerprint != "" {
-		transport.TLSClientConfig.InsecureSkipVerify = true // Verification is replaced with an exact certificate pin below.
-		transport.TLSClientConfig.VerifyConnection = func(state tls.ConnectionState) error {
-			if len(state.PeerCertificates) == 0 {
-				return errors.New("UniFi did not present a TLS certificate")
-			}
-			certificate := state.PeerCertificates[0]
-			now := time.Now()
-			if now.Before(certificate.NotBefore) || now.After(certificate.NotAfter) {
-				return errors.New("the trusted UniFi certificate is expired or not valid yet")
-			}
-			actual := certificateFingerprint(certificate)
-			if actual != fingerprint {
-				return fmt.Errorf("UniFi certificate changed (expected %s, received %s)", displayFingerprint(fingerprint), displayFingerprint(actual))
-			}
-			return nil
-		}
+	if err := validateFingerprint(fingerprint); err != nil {
+		return nil, err
 	}
 	return &apiClient{
 		baseURL:     normalized,
 		apiKey:      apiKey,
 		fingerprint: fingerprint,
 		httpClient: &http.Client{
-			Transport: transport,
+			Transport: newTransport(fingerprint),
 			Timeout:   requestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
 		},
 	}, nil
+}
+
+func validateFingerprint(fingerprint string) error {
+	if fingerprint == "" {
+		return nil
+	}
+	if len(fingerprint) != sha256.Size*2 {
+		return errors.New("the trusted UniFi certificate fingerprint is invalid")
+	}
+	if _, err := hex.DecodeString(fingerprint); err != nil {
+		return errors.New("the trusted UniFi certificate fingerprint is invalid")
+	}
+	return nil
+}
+
+func newTransport(fingerprint string) *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DialContext = dialLocalNetwork
+	transport.ResponseHeaderTimeout = 8 * time.Second
+	transport.TLSClientConfig = tlsConfig(fingerprint)
+	return transport
+}
+
+func tlsConfig(fingerprint string) *tls.Config {
+	config := &tls.Config{MinVersion: tls.VersionTLS12}
+	if fingerprint == "" {
+		return config
+	}
+	config.InsecureSkipVerify = true // Verification is replaced with an exact certificate pin below.
+	config.VerifyConnection = func(state tls.ConnectionState) error {
+		return verifyPinnedCertificate(state, fingerprint)
+	}
+	return config
+}
+
+func verifyPinnedCertificate(state tls.ConnectionState, fingerprint string) error {
+	if len(state.PeerCertificates) == 0 {
+		return errors.New("UniFi did not present a TLS certificate")
+	}
+	peerCertificate := state.PeerCertificates[0]
+	now := time.Now()
+	if now.Before(peerCertificate.NotBefore) || now.After(peerCertificate.NotAfter) {
+		return errors.New("the trusted UniFi certificate is expired or not valid yet")
+	}
+	actual := certificateFingerprint(peerCertificate)
+	if actual != fingerprint {
+		return fmt.Errorf("UniFi certificate changed (expected %s, received %s)", displayFingerprint(fingerprint), displayFingerprint(actual))
+	}
+	return nil
 }
 
 func normalizeBaseURL(value string) (string, error) {
@@ -148,9 +174,9 @@ func normalizeBaseURL(value string) (string, error) {
 		return "", errors.New("the UniFi console address cannot contain credentials, a query, or a fragment")
 	}
 	path := strings.TrimSuffix(parsed.EscapedPath(), "/")
-	for _, suffix := range []string{"/proxy/network/integration/v1", "/integration/v1", "/proxy/network", "/network"} {
-		if strings.HasSuffix(path, suffix) {
-			path = strings.TrimSuffix(path, suffix)
+	for _, suffix := range []string{networkIntegrationPrefix, integrationPrefix, "/proxy/network", "/network"} {
+		if trimmed, found := strings.CutSuffix(path, suffix); found {
+			path = trimmed
 			break
 		}
 	}
@@ -163,7 +189,7 @@ func normalizeBaseURL(value string) (string, error) {
 
 func (c *apiClient) listSites(ctx context.Context) ([]Site, error) {
 	var lastErr error
-	for _, prefix := range []string{"/proxy/network/integration/v1", "/integration/v1"} {
+	for _, prefix := range integrationPrefixes {
 		var result page[Site]
 		err := c.get(ctx, prefix+"/sites?offset=0&limit=200", &result)
 		if err == nil {
@@ -184,7 +210,7 @@ func (c *apiClient) listClients(ctx context.Context, siteID string) ([]Client, e
 		return nil, errors.New("select a UniFi site")
 	}
 	var lastErr error
-	for _, prefix := range []string{"/proxy/network/integration/v1", "/integration/v1"} {
+	for _, prefix := range integrationPrefixes {
 		items, err := c.listClientsAt(ctx, prefix, siteID)
 		if err == nil {
 			return items, nil
@@ -199,7 +225,7 @@ func (c *apiClient) listClients(ctx context.Context, siteID string) ([]Client, e
 }
 
 func (c *apiClient) listClientsAt(ctx context.Context, prefix, siteID string) ([]Client, error) {
-	items := []Client{}
+	var items []Client
 	for offset := 0; ; offset += pageSize {
 		var result page[Client]
 		path := prefix + "/sites/" + url.PathEscape(siteID) + "/clients?offset=" + strconv.Itoa(offset) + "&limit=" + strconv.Itoa(pageSize)
@@ -213,7 +239,7 @@ func (c *apiClient) listClientsAt(ctx context.Context, prefix, siteID string) ([
 	}
 }
 
-func (c *apiClient) get(ctx context.Context, path string, destination any) error {
+func (c *apiClient) get(ctx context.Context, path string, destination any) (err error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return err
@@ -224,7 +250,11 @@ func (c *apiClient) get(ctx context.Context, path string, destination any) error
 	if err != nil {
 		return fmt.Errorf("connect to UniFi: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() {
+		if closeErr := response.Body.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponse))
 	if err != nil {
 		return err
@@ -247,12 +277,15 @@ func (c *apiClient) get(ctx context.Context, path string, destination any) error
 	return nil
 }
 
-func certificateForAddress(ctx context.Context, baseURL string) (*Certificate, error) {
+func certificateForAddress(ctx context.Context, baseURL string) (certificate *Certificate, err error) {
 	normalized, err := normalizeBaseURL(baseURL)
 	if err != nil {
 		return nil, err
 	}
-	parsed, _ := url.Parse(normalized)
+	parsed, err := url.Parse(normalized)
+	if err != nil {
+		return nil, err
+	}
 	host := parsed.Host
 	if !strings.Contains(host, ":") {
 		host += ":443"
@@ -266,21 +299,25 @@ func certificateForAddress(ctx context.Context, baseURL string) (*Certificate, e
 		MinVersion:         tls.VersionTLS12,
 		ServerName:         parsed.Hostname(),
 	})
+	defer func() {
+		if closeErr := connection.Close(); closeErr != nil {
+			certificate = nil
+			err = errors.Join(err, fmt.Errorf("close UniFi certificate connection: %w", closeErr))
+		}
+	}()
 	if err := connection.HandshakeContext(ctx); err != nil {
-		_ = rawConnection.Close()
 		return nil, fmt.Errorf("inspect UniFi certificate: %w", err)
 	}
-	defer connection.Close()
 	state := connection.ConnectionState()
 	if len(state.PeerCertificates) == 0 {
 		return nil, errors.New("UniFi did not present a TLS certificate")
 	}
-	certificate := state.PeerCertificates[0]
+	peerCertificate := state.PeerCertificates[0]
 	return &Certificate{
-		FingerprintSHA256: displayFingerprint(certificateFingerprint(certificate)),
-		Subject:           certificate.Subject.String(),
-		Issuer:            certificate.Issuer.String(),
-		ExpiresAt:         certificate.NotAfter.UTC().Format(time.RFC3339),
+		FingerprintSHA256: displayFingerprint(certificateFingerprint(peerCertificate)),
+		Subject:           peerCertificate.Subject.String(),
+		Issuer:            peerCertificate.Issuer.String(),
+		ExpiresAt:         peerCertificate.NotAfter.UTC().Format(time.RFC3339),
 	}, nil
 }
 

@@ -1,5 +1,5 @@
 type StatusBadgeProps = {
-  value: string;
+  readonly value: string;
 };
 
 export function StatusBadge({ value }: StatusBadgeProps) {

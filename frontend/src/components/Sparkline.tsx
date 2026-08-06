@@ -1,6 +1,6 @@
 type SparklineProps = {
-  values?: number[];
-  tone?: "accent" | "blocked";
+  readonly values?: number[];
+  readonly tone?: "accent" | "blocked";
 };
 
 export function Sparkline({ values = [], tone = "accent" }: SparklineProps) {

@@ -14,17 +14,17 @@ import type { Page } from "../App";
 import type { FaroEvent } from "../api/client";
 
 type NotificationDrawerProps = {
-  open: boolean;
-  notifications: FaroEvent[];
-  attentionCount: number;
-  unreadCount: number;
-  onClose: () => void;
-  onMarkRead: (id: string) => void;
-  onDismiss: (id: string) => void;
-  onMarkAllRead: () => void;
-  onDomainSelect: (domain: string) => void;
-  onDeviceSelect: (clientIP: string) => void;
-  setPage: (page: Page) => void;
+  readonly open: boolean;
+  readonly notifications: ReadonlyArray<FaroEvent>;
+  readonly attentionCount: number;
+  readonly unreadCount: number;
+  readonly onClose: () => void;
+  readonly onMarkRead: (id: string) => void;
+  readonly onDismiss: (id: string) => void;
+  readonly onMarkAllRead: () => void;
+  readonly onDomainSelect: (domain: string) => void;
+  readonly onDeviceSelect: (clientIP: string) => void;
+  readonly setPage: (page: Page) => void;
 };
 
 export function NotificationDrawer({ open, notifications, attentionCount, unreadCount, onClose, onMarkRead, onDismiss, onMarkAllRead, onDomainSelect, onDeviceSelect, setPage }: NotificationDrawerProps) {
@@ -32,6 +32,9 @@ export function NotificationDrawer({ open, notifications, attentionCount, unread
 
   const attention = notifications.filter((event) => event.severity === "warning" || event.severity === "critical");
   const recentChanges = notifications.filter((event) => event.severity !== "warning" && event.severity !== "critical");
+  const hasAttention = attentionCount > 0;
+  const attentionTitle = formatAttentionTitle(attentionCount);
+  const attentionMessage = hasAttention ? "Review the issue below to keep DNS healthy." : "Faro will flag failures and unusual changes here.";
 
   function openEvent(event: FaroEvent) {
     if (!event.is_read) onMarkRead(event.id);
@@ -45,8 +48,15 @@ export function NotificationDrawer({ open, notifications, attentionCount, unread
   }
 
   return (
-    <div className="drawer-backdrop" onClick={onClose}>
-      <aside className="notification-drawer network-updates-drawer" onClick={(event) => event.stopPropagation()} aria-label="Network updates">
+    <dialog
+      className="drawer-backdrop"
+      open
+      aria-label="Network updates"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <aside className="notification-drawer network-updates-drawer">
         <header className="network-updates-header">
           <div>
             <span className="notification-mark"><BellRing size={17} /></span>
@@ -58,11 +68,11 @@ export function NotificationDrawer({ open, notifications, attentionCount, unread
           </div>
         </header>
 
-        <div className={`notification-health ${attentionCount > 0 ? "attention" : "clear"}`}>
-          {attentionCount > 0 ? <AlertTriangle size={19} /> : <CheckCircle2 size={19} />}
+        <div className={`notification-health ${hasAttention ? "attention" : "clear"}`}>
+          {hasAttention ? <AlertTriangle size={19} /> : <CheckCircle2 size={19} />}
           <div>
-            <strong>{attentionCount > 0 ? `${attentionCount} ${attentionCount === 1 ? "item needs" : "items need"} attention` : "Nothing needs attention"}</strong>
-            <span>{attentionCount > 0 ? "Review the issue below to keep DNS healthy." : "Faro will flag failures and unusual changes here."}</span>
+            <strong>{attentionTitle}</strong>
+            <span>{attentionMessage}</span>
           </div>
         </div>
 
@@ -80,11 +90,19 @@ export function NotificationDrawer({ open, notifications, attentionCount, unread
           )}
         </div>
       </aside>
-    </div>
+    </dialog>
   );
 }
 
-function NotificationSection({ title, count, events, onOpen, onDismiss }: { title: string; count: number; events: FaroEvent[]; onOpen: (event: FaroEvent) => void; onDismiss: (id: string) => void }) {
+type NotificationSectionProps = {
+  readonly title: string;
+  readonly count: number;
+  readonly events: ReadonlyArray<FaroEvent>;
+  readonly onOpen: (event: FaroEvent) => void;
+  readonly onDismiss: (id: string) => void;
+};
+
+function NotificationSection({ title, count, events, onOpen, onDismiss }: NotificationSectionProps) {
   return (
     <section className="notification-section">
       <div className="notification-section-heading"><h3>{title}</h3><span>{count}</span></div>
@@ -149,6 +167,12 @@ function notificationPage(event: FaroEvent): Page | null {
     case "upstream.changed": return "upstreams";
     default: return null;
   }
+}
+
+function formatAttentionTitle(attentionCount: number) {
+  if (attentionCount === 0) return "Nothing needs attention";
+  if (attentionCount === 1) return "1 item needs attention";
+  return `${attentionCount} items need attention`;
 }
 
 function relativeTime(timestamp: string) {

@@ -1,13 +1,13 @@
 import { Ban, CheckCircle2, Database, GitBranch, Route, Server, ShieldCheck, ShieldX, X } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { api, type DNSQuery, type DomainSummary } from "../api/client";
+import { api, type DecisionRule, type DNSDecision, type DNSQuery, type DomainSummary } from "../api/client";
 import { DomainFavicon } from "./DomainFavicon";
 import { StatusBadge } from "./StatusBadge";
 
 type DomainDrawerProps = {
-  domain: string | null;
-  onClose: () => void;
-  onChanged: () => Promise<void>;
+  readonly domain: string | null;
+  readonly onClose: () => void;
+  readonly onChanged: () => Promise<void>;
 };
 
 export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) {
@@ -54,8 +54,15 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
   if (!domain) return null;
 
   return (
-    <div className="drawer-backdrop" onClick={onClose}>
-      <aside className="domain-drawer domain-inspector" onClick={(event) => event.stopPropagation()} aria-label={`${domain} details`}>
+    <dialog
+      className="drawer-backdrop"
+      open
+      aria-label={`${domain} details`}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <aside className="domain-drawer domain-inspector">
         <header className="domain-inspector-header">
           <div className="drawer-domain-title">
             <DomainFavicon domain={domain} />
@@ -138,11 +145,15 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
           </div>
         )}
       </aside>
-    </div>
+    </dialog>
   );
 }
 
-function DecisionTrace({ query }: { query: DNSQuery }) {
+type DecisionTraceProps = {
+  readonly query: DNSQuery;
+};
+
+function DecisionTrace({ query }: DecisionTraceProps) {
   const decision = query.decision;
   const hasDecision = Boolean(decision && (
     decision.captured_at || decision.reason || decision.allowlist || decision.manual_block ||
@@ -150,29 +161,11 @@ function DecisionTrace({ query }: { query: DNSQuery }) {
   ));
   const rules = decision?.blocklists ?? [];
   const protectionName = decision?.protection?.name ?? "Home";
-  const policyDetail = decision?.allowlist
-    ? `${protectionName}: an allow exception bypassed filtering.`
-    : decision?.manual_block
-      ? `${protectionName}: matched a custom domain block.`
-      : rules.length > 0
-        ? `${protectionName}: matched ${rules.map((rule) => rule.name).join(", ")}.`
-        : decision?.local_record
-          ? `Matched Local DNS ${decision.local_record.type} record ${decision.local_record.value}.`
-          : hasDecision
-            ? "No blocking rule matched when Faro handled this request."
-            : "This request predates stored rule provenance.";
+  const policyDetail = policyDetailFor(decision, rules, hasDecision, protectionName);
   const resolution = resolutionDetail(query);
   const responseCode = query.rcode || decision?.response_code || "Response recorded";
   const latency = typeof query.latency_ms === "number" ? `${formatLatency(query.latency_ms)} ms` : "Latency unavailable";
-  const confidence = !hasDecision
-    ? "Historical request with limited provenance."
-    : decision?.confidence === "inferred"
-    ? "Cache classification inferred from the absence of an upstream hop."
-    : decision?.confidence === "configuration_snapshot"
-      ? "Rule provenance captured from Faro's active configuration."
-      : decision?.confidence === "observed"
-        ? "Upstream path observed in the CoreDNS response log."
-        : "Decision captured from Faro's local data.";
+  const confidence = confidenceDetail(hasDecision, decision);
 
   return (
     <section className="inspector-section decision-trace-section">
@@ -183,7 +176,7 @@ function DecisionTrace({ query }: { query: DNSQuery }) {
       <div className="decision-trace" aria-label="DNS decision trace">
         <TraceStep icon={<Route size={15} />} label="Request received" detail={`${query.client_ip} requested ${query.query_type} ${query.domain}.`} />
         <TraceStep icon={query.action === "blocked" ? <ShieldX size={15} /> : <ShieldCheck size={15} />} label="Protection" detail={policyDetail} tone={query.action === "blocked" ? "blocked" : "allowed"} />
-        <TraceStep icon={query.source === "cache" ? <Database size={15} /> : query.source === "upstream" ? <Server size={15} /> : <GitBranch size={15} />} label="Resolution path" detail={resolution} />
+        <TraceStep icon={resolutionPathIcon(query.source)} label="Resolution path" detail={resolution} />
         <TraceStep icon={<CheckCircle2 size={15} />} label="Response" detail={`${responseCode} · ${latency}`} />
       </div>
       <span className="decision-confidence">{confidence}</span>
@@ -191,8 +184,44 @@ function DecisionTrace({ query }: { query: DNSQuery }) {
   );
 }
 
-function TraceStep({ icon, label, detail, tone = "default" }: { icon: ReactNode; label: string; detail: string; tone?: "default" | "allowed" | "blocked" }) {
+type TraceStepProps = {
+  readonly icon: ReactNode;
+  readonly label: string;
+  readonly detail: string;
+  readonly tone?: "default" | "allowed" | "blocked";
+};
+
+function TraceStep({ icon, label, detail, tone = "default" }: TraceStepProps) {
   return <div className={`decision-trace-step ${tone}`}><span className="decision-trace-icon">{icon}</span><div><strong>{label}</strong><p>{detail}</p></div></div>;
+}
+
+function policyDetailFor(decision: DNSDecision | undefined, rules: DecisionRule[], hasDecision: boolean, protectionName: string) {
+  if (decision?.allowlist) return `${protectionName}: an allow exception bypassed filtering.`;
+  if (decision?.manual_block) return `${protectionName}: matched a custom domain block.`;
+  if (rules.length > 0) return `${protectionName}: matched ${rules.map((rule) => rule.name).join(", ")}.`;
+  if (decision?.local_record) return `Matched Local DNS ${decision.local_record.type} record ${decision.local_record.value}.`;
+  if (hasDecision) return "No blocking rule matched when Faro handled this request.";
+  return "This request predates stored rule provenance.";
+}
+
+function confidenceDetail(hasDecision: boolean, decision: DNSDecision | undefined) {
+  if (!hasDecision) return "Historical request with limited provenance.";
+  switch (decision?.confidence) {
+    case "inferred":
+      return "Cache classification inferred from the absence of an upstream hop.";
+    case "configuration_snapshot":
+      return "Rule provenance captured from Faro's active configuration.";
+    case "observed":
+      return "Upstream path observed in the CoreDNS response log.";
+    default:
+      return "Decision captured from Faro's local data.";
+  }
+}
+
+function resolutionPathIcon(source: string) {
+  if (source === "cache") return <Database size={15} />;
+  if (source === "upstream") return <Server size={15} />;
+  return <GitBranch size={15} />;
 }
 
 function resolutionDetail(query: DNSQuery) {
@@ -200,7 +229,11 @@ function resolutionDetail(query: DNSQuery) {
   if (query.source === "blocklist") return "Answered locally by Faro filtering; no upstream was contacted.";
   if (query.source === "local") return "Answered by Faro Local DNS; no upstream was contacted.";
   if (query.source === "cache") return "Answered from Faro's DNS cache; no upstream was contacted.";
-  if (query.source === "upstream") return query.upstream === "doh" ? "Forwarded through Faro's encrypted DNS-over-HTTPS connection." : query.upstream ? `Forwarded to upstream resolver ${query.upstream}.` : "Forwarded to a configured upstream resolver.";
+  if (query.source === "upstream") {
+    if (query.upstream === "doh") return "Forwarded through Faro's encrypted DNS-over-HTTPS connection.";
+    if (query.upstream) return `Forwarded to upstream resolver ${query.upstream}.`;
+    return "Forwarded to a configured upstream resolver.";
+  }
   return `Handled by ${query.source || "Faro"}.`;
 }
 
@@ -208,7 +241,9 @@ function fallbackReason(query: DNSQuery) {
   if (query.action === "blocked") return "Faro filtering blocked this request.";
   if (query.source === "cache") return "Faro answered this request from its local cache.";
   if (query.source === "local") return "Faro answered this request using Local DNS.";
-  return query.upstream === "doh" ? "Faro forwarded this request through encrypted DNS." : query.upstream ? `Faro forwarded this request to ${query.upstream}.` : "Faro allowed this request.";
+  if (query.upstream === "doh") return "Faro forwarded this request through encrypted DNS.";
+  if (query.upstream) return `Faro forwarded this request to ${query.upstream}.`;
+  return "Faro allowed this request.";
 }
 
 function formatLatency(value: number) {
@@ -217,7 +252,12 @@ function formatLatency(value: number) {
   return Math.round(value).toString();
 }
 
-function OverviewItem({ label, value }: { label: string; value: string | number }) {
+type OverviewItemProps = {
+  readonly label: string;
+  readonly value: string | number;
+};
+
+function OverviewItem({ label, value }: OverviewItemProps) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 

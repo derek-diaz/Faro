@@ -64,6 +64,38 @@ func TestProtectionMigrationCreatesHomeAndCopiesExistingRules(t *testing.T) {
 	}
 }
 
+func TestBlocklistSourceMigrationUpdatesMovedHageziURLs(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	if _, err := store.DB.Exec(`
+		INSERT INTO blocklists(name, url) VALUES
+			('Pro', 'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/pro.txt'),
+			('Custom', 'https://example.test/custom.txt')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.migrateBlocklistSources(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var migrated, custom string
+	if err := store.DB.QueryRow(`SELECT url FROM blocklists WHERE name = 'Pro'`).Scan(&migrated); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.QueryRow(`SELECT url FROM blocklists WHERE name = 'Custom'`).Scan(&custom); err != nil {
+		t.Fatal(err)
+	}
+	if migrated != "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt" {
+		t.Fatalf("migrated URL = %q", migrated)
+	}
+	if custom != "https://example.test/custom.txt" {
+		t.Fatalf("custom URL changed to %q", custom)
+	}
+}
+
 func TestRemoveLegacyDemoRecordsPreservesModifiedRecords(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "faro.db"))
 	if err != nil {

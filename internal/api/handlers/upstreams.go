@@ -33,7 +33,7 @@ func (s *Handler) upstreamProbes(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &input) {
 		return
 	}
-	addresses := []string{}
+	addresses := make([]string, 0, len(input.Addresses))
 	seen := map[string]bool{}
 	for _, rawAddress := range input.Addresses {
 		address := strings.TrimSpace(rawAddress)

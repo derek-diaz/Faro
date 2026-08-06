@@ -191,10 +191,12 @@ func (m *Manager) Configure(ctx context.Context, input ConfigureInput) (Status, 
 func (m *Manager) Disconnect(ctx context.Context) error {
 	m.syncMu.Lock()
 	defer m.syncMu.Unlock()
-	if _, err := m.store.DB.ExecContext(ctx, `DELETE FROM integration_configs WHERE kind = ?`, integrationKind); err != nil {
+	if _, err := m.store.DB.ExecContext(ctx, `
+		DELETE FROM unifi_client_snapshots
+		WHERE site_id = (SELECT site_id FROM integration_configs WHERE kind = ?)`, integrationKind); err != nil {
 		return err
 	}
-	if _, err := m.store.DB.ExecContext(ctx, `DELETE FROM unifi_client_snapshots`); err != nil {
+	if _, err := m.store.DB.ExecContext(ctx, `DELETE FROM integration_configs WHERE kind = ?`, integrationKind); err != nil {
 		return err
 	}
 	if _, err := m.store.DB.ExecContext(ctx, `DELETE FROM device_names WHERE source = 'unifi'`); err != nil {
@@ -236,11 +238,14 @@ func (m *Manager) Sync(ctx context.Context) (SyncResult, error) {
 	m.syncMu.Lock()
 	defer m.syncMu.Unlock()
 	config, err := m.readConfig(ctx)
-	if errors.Is(err, sql.ErrNoRows) || !config.enabled || config.secretCiphertext == "" || config.siteID == "" {
+	if errors.Is(err, sql.ErrNoRows) {
 		return SyncResult{}, ErrNotConfigured
 	}
 	if err != nil {
 		return SyncResult{}, err
+	}
+	if !config.enabled || config.secretCiphertext == "" || config.siteID == "" {
+		return SyncResult{}, ErrNotConfigured
 	}
 	key, err := loadOrCreateKey(m.keyPath)
 	if err != nil {
@@ -248,7 +253,7 @@ func (m *Manager) Sync(ctx context.Context) (SyncResult, error) {
 	}
 	apiKey, err := decryptSecret(key, config.secretCiphertext)
 	if err != nil {
-		return SyncResult{}, m.recordSyncError(ctx, errors.New("Faro could not read the saved UniFi API key; reconnect the integration"))
+		return SyncResult{}, m.recordSyncError(ctx, errors.New("faro could not read the saved UniFi API key; reconnect the integration"))
 	}
 	client, err := newAPIClient(config.baseURL, apiKey, config.tlsFingerprint)
 	if err != nil {
@@ -397,9 +402,9 @@ func friendlyConnectionError(err error) error {
 	if errors.As(err, &urlErr) {
 		var networkErr net.Error
 		if errors.As(urlErr.Err, &networkErr) && networkErr.Timeout() {
-			return errors.New("Faro timed out while contacting the UniFi console; check its address and firewall")
+			return errors.New("faro timed out while contacting the UniFi console; check its address and firewall")
 		}
-		return fmt.Errorf("Faro could not reach the UniFi console: %v", urlErr.Err)
+		return fmt.Errorf("faro could not reach the UniFi console: %w", urlErr.Err)
 	}
 	return err
 }

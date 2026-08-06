@@ -22,10 +22,11 @@ import (
 )
 
 const (
-	cookieName      = "faro_session"
-	sessionLifetime = 7 * 24 * time.Hour
-	maxFailures     = 5
-	lockoutDuration = 5 * time.Minute
+	cookieName                    = "faro_session"
+	sessionLifetime               = 7 * 24 * time.Hour
+	maxFailures                   = 5
+	lockoutDuration               = 5 * time.Minute
+	authenticationRequiredMessage = "authentication required"
 )
 
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{3,64}$`)
@@ -211,10 +212,10 @@ func (m *Manager) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	user, authenticated := m.authenticate(r)
 	if !authenticated {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		writeError(w, http.StatusUnauthorized, authenticationRequiredMessage)
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	var input passwordChange
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 	if err := decoder.Decode(&input); err != nil {
@@ -252,7 +253,7 @@ func (m *Manager) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	cookie, err := r.Cookie(cookieName)
 	if err != nil || cookie.Value == "" {
-		writeError(w, http.StatusUnauthorized, "authentication required")
+		writeError(w, http.StatusUnauthorized, authenticationRequiredMessage)
 		return
 	}
 	tx, err := m.store.DB.BeginTx(r.Context(), nil)
@@ -260,7 +261,7 @@ func (m *Manager) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(r.Context(), `UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, string(newHash), user.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not update the password")
 		return
@@ -284,7 +285,7 @@ func (m *Manager) Require(next http.Handler) http.Handler {
 			r.URL.Path == "/api/redundancy/pair" ||
 			r.URL.Path == "/api/redundancy/replica/snapshot" ||
 			r.URL.Path == "/api/redundancy/replica/ack"
-		if r.Method == http.MethodOptions || r.URL.Path == "/healthz" || r.URL.Path == "/metrics" || strings.HasPrefix(r.URL.Path, "/api/auth/") || publicRedundancy {
+		if r.Method == http.MethodOptions || r.URL.Path == "/healthz" || r.URL.Path == "/metrics" || r.URL.Path == "/api/version" || r.URL.Path == "/api/version/check" || strings.HasPrefix(r.URL.Path, "/api/auth/") || publicRedundancy {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -301,7 +302,7 @@ func (m *Manager) Require(next http.Handler) http.Handler {
 		}
 		user, ok := m.authenticate(r)
 		if !ok {
-			writeError(w, http.StatusUnauthorized, "authentication required")
+			writeError(w, http.StatusUnauthorized, authenticationRequiredMessage)
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userContextKey, user)))
@@ -386,7 +387,7 @@ func validatePassword(password string) error {
 }
 
 func decodeCredentials(w http.ResponseWriter, r *http.Request) (credentials, bool) {
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 	var input credentials
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 	if err := decoder.Decode(&input); err != nil {
@@ -424,9 +425,7 @@ func (m *Manager) blocked(key string) (string, bool) {
 	state := m.failures[key]
 	if state.LockedUntil.After(m.now()) {
 		seconds := int(state.LockedUntil.Sub(m.now()).Seconds())
-		if seconds < 1 {
-			seconds = 1
-		}
+		seconds = max(seconds, 1)
 		return strconv.Itoa(seconds), true
 	}
 	if !state.LockedUntil.IsZero() {

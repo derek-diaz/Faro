@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -48,7 +49,7 @@ func (c *Classifier) Run(ctx context.Context) {
 }
 
 func (c *Classifier) classifyAvailable(ctx context.Context) {
-	for batch := 0; batch < 4; batch++ {
+	for range 4 {
 		count, err := c.ClassifyPending(ctx, classificationBatch)
 		if err != nil || count < classificationBatch {
 			return
@@ -58,7 +59,7 @@ func (c *Classifier) classifyAvailable(ctx context.Context) {
 
 // ClassifyPending evaluates a bounded batch and returns the number processed.
 // It is exported so startup checks and tests can run a batch synchronously.
-func (c *Classifier) ClassifyPending(ctx context.Context, limit int) (int, error) {
+func (c *Classifier) ClassifyPending(ctx context.Context, limit int) (processed int, err error) {
 	if limit < 1 {
 		return 0, nil
 	}
@@ -102,7 +103,11 @@ func (c *Classifier) ClassifyPending(ctx context.Context, limit int) (int, error
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 
 	type candidate struct {
 		deviceID int64

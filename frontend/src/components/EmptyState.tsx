@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 
 type EmptyStateProps = {
-  title: string;
-  body: string;
-  action?: ReactNode;
+  readonly title: string;
+  readonly body: string;
+  readonly action?: ReactNode;
 };
 
 export function EmptyState({ title, body, action }: EmptyStateProps) {

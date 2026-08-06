@@ -27,7 +27,7 @@ func (s *Handler) queries(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata FROM dns_queries`
-	args := []any{}
+	args := make([]any, 0, 2)
 	if search != "" {
 		query += ` WHERE domain LIKE ? OR client_ip LIKE ?`
 		like := "%" + search + "%"
@@ -40,7 +40,7 @@ func (s *Handler) queries(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	writeRows(w, rows)
 }
 
@@ -105,32 +105,7 @@ func (s *Handler) notifications(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	notifications := []map[string]any{}
-	attentionCount := 0
-	unreadCount := 0
-	for _, event := range allEvents {
-		eventType, _ := event["type"].(string)
-		severity, _ := event["severity"].(string)
-		if !isUsefulNotification(eventType, severity) {
-			continue
-		}
-		eventKey, _ := event["id"].(string)
-		state := states[eventKey]
-		if state.dismissed {
-			continue
-		}
-		isRead := state.read || eventAtOrBefore(event, readAllAt)
-		if severity == "warning" || severity == "critical" {
-			attentionCount++
-		}
-		if !isRead {
-			unreadCount++
-		}
-		if len(notifications) < 10 {
-			event["is_read"] = isRead
-			notifications = append(notifications, event)
-		}
-	}
+	notifications, attentionCount, unreadCount := collectNotifications(allEvents, states, readAllAt)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"attention_count": attentionCount,
 		"unread_count":    unreadCount,
@@ -204,6 +179,36 @@ func (s *Handler) notificationState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+func collectNotifications(events []map[string]any, states map[string]storedNotificationState, readAllAt time.Time) ([]map[string]any, int, int) {
+	notifications := make([]map[string]any, 0, 10)
+	attentionCount := 0
+	unreadCount := 0
+	for _, event := range events {
+		eventType, _ := event["type"].(string)
+		severity, _ := event["severity"].(string)
+		if !isUsefulNotification(eventType, severity) {
+			continue
+		}
+		eventKey, _ := event["id"].(string)
+		state := states[eventKey]
+		if state.dismissed {
+			continue
+		}
+		isRead := state.read || eventAtOrBefore(event, readAllAt)
+		if severity == "warning" || severity == "critical" {
+			attentionCount++
+		}
+		if !isRead {
+			unreadCount++
+		}
+		if len(notifications) < cap(notifications) {
+			event["is_read"] = isRead
+			notifications = append(notifications, event)
+		}
+	}
+	return notifications, attentionCount, unreadCount
+}
+
 func notificationCandidates(ctx context.Context, database *sql.DB, limit int) []map[string]any {
 	return activityRecordsToMaps(activityRecords(ctx, database, limit, 0, "", "system"))
 }
@@ -213,7 +218,7 @@ func loadNotificationStates(ctx context.Context, database *sql.DB, userID int64)
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 	states := map[string]storedNotificationState{}
 	var readAllAt time.Time
 	for rows.Next() {
@@ -333,14 +338,16 @@ type activityCountCacheEntry struct {
 // on every five-second refresh while keeping the UI close to current.
 const activityCountCacheTTL = 10 * time.Second
 
+const queryClientIPField = "q.client_ip"
+
 func activityRecords(ctx context.Context, database *sql.DB, limit, offset int, search, scope string) []activityRecord {
 	query, args := activityRecordsQuery(search, scope)
 	args = append(args, limit, offset)
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return []activityRecord{}
+		return make([]activityRecord, 0)
 	}
-	defer rows.Close()
+	defer closeRows(rows)
 
 	items := make([]activityRecord, 0, limit)
 	for rows.Next() {
@@ -360,14 +367,14 @@ func activityRecords(ctx context.Context, database *sql.DB, limit, offset int, s
 
 func activityRecordsQuery(search, scope string) (string, []any) {
 	parts := make([]string, 0, 3)
-	args := []any{}
+	args := make([]any, 0, 6)
 
 	if scope == "all" || scope == "system" {
 		eventPart := `
 			SELECT 'event' AS kind, e.id AS record_id, CAST(e.id AS TEXT) AS record_key, e.timestamp,
 			       e.type AS event_type, e.severity, e.title, e.description,
 			       COALESCE(e.client_ip, '') AS client_ip, COALESCE(e.domain, '') AS domain,
-			       COALESCE(e.metadata, '{}') AS metadata, COALESCE(e.source, '') AS source,
+			       e.metadata AS metadata, e.source AS source,
 			       '' AS query_type, '' AS action, '' AS upstream, '' AS rcode, NULL AS latency_ms,
 			       '' AS decision_reason, '' AS decision_metadata, '' AS device_name, '' AS location
 			FROM events e`
@@ -387,7 +394,7 @@ func activityRecordsQuery(search, scope string) (string, []any) {
 			FROM dns_queries q
 			LEFT JOIN devices a ON a.id = q.device_id
 			GROUP BY q.client_ip`
-		if clause, values := activityLikeClause(search, "q.client_ip", "COALESCE(MAX(a.name), '')", "COALESCE(MAX(a.location), '')"); clause != "" {
+		if clause, values := activityLikeClause(search, queryClientIPField, "COALESCE(MAX(a.name), '')", "COALESCE(MAX(a.location), '')"); clause != "" {
 			devicePart += ` HAVING ` + clause
 			args = append(args, values...)
 		}
@@ -399,15 +406,15 @@ func activityRecordsQuery(search, scope string) (string, []any) {
 			SELECT 'query' AS kind, q.id AS record_id, CAST(q.id AS TEXT) AS record_key, q.timestamp,
 			       '' AS event_type, '' AS severity, '' AS title, '' AS description,
 			       q.client_ip AS client_ip, q.domain AS domain,
-			       COALESCE(q.decision_metadata, '{}') AS metadata, q.source AS source,
+			       q.decision_metadata AS metadata, q.source AS source,
 			       q.query_type AS query_type, q.action AS action, q.upstream AS upstream, q.rcode AS rcode,
 			       q.latency_ms AS latency_ms, q.decision_reason AS decision_reason,
-			       COALESCE(q.decision_metadata, '{}') AS decision_metadata,
+			       q.decision_metadata AS decision_metadata,
 			       COALESCE(a.name, '') AS device_name, '' AS location
 			FROM dns_queries q
 			LEFT JOIN devices a ON a.id = q.device_id`
-		clauses := []string{}
-		if clause, values := activityLikeClause(search, "q.domain", "q.client_ip", "q.query_type", "q.action", "q.source", "a.name"); clause != "" {
+		clauses := make([]string, 0, 2)
+		if clause, values := activityLikeClause(search, "q.domain", queryClientIPField, "q.query_type", "q.action", "q.source", "a.name"); clause != "" {
 			clauses = append(clauses, clause)
 			args = append(args, values...)
 		}
@@ -454,93 +461,104 @@ func activityLikeClause(search string, fields ...string) (string, []any) {
 func activityRecordsToMaps(records []activityRecord) []map[string]any {
 	items := make([]map[string]any, 0, len(records))
 	for _, record := range records {
+		var item map[string]any
 		switch record.kind {
 		case "event":
-			items = append(items, map[string]any{
-				"id":          fmt.Sprintf("event-%d", record.recordID),
-				"timestamp":   record.timestamp,
-				"type":        record.eventType,
-				"severity":    record.severity,
-				"title":       record.title,
-				"description": record.description,
-				"client_ip":   nullableInput(record.clientIP),
-				"domain":      nullableInput(record.domain),
-				"metadata":    metadataMap(record.metadata),
-				"source":      record.source,
-			})
+			item = eventRecordMap(record)
 		case "device":
-			deviceName := record.clientIP
-			if record.deviceName != "" {
-				deviceName = record.deviceName
-			}
-			description := deviceName + " joined the network."
-			if record.location != "" {
-				description = deviceName + " joined from " + record.location + "."
-			}
-			items = append(items, map[string]any{
-				"id":          "device-first-seen-" + record.clientIP,
-				"timestamp":   record.timestamp,
-				"type":        "device.first_seen",
-				"severity":    "info",
-				"title":       "Device first seen",
-				"description": description,
-				"client_ip":   record.clientIP,
-				"domain":      nil,
-				"metadata":    map[string]any{"device_name": deviceName, "location": nullableInput(record.location)},
-				"source":      "devices",
-			})
+			item = deviceRecordMap(record)
 		default:
-			deviceName := record.clientIP
-			if record.deviceName != "" {
-				deviceName = record.deviceName
-			}
-			eventType := "dns.query"
-			severity := "info"
-			title := record.domain + " resolved"
-			description := "Requested by " + deviceName + "."
-			if record.source == "cache" {
-				description = "Served from Faro's cache for " + deviceName + "."
-			} else if record.source == "upstream" && record.upstream != "" {
-				description = "Resolved through " + record.upstream + " for " + deviceName + "."
-			} else if record.source == "local" {
-				description = "Answered by Local DNS for " + deviceName + "."
-			}
-			if record.action == "blocked" {
-				eventType = "dns.blocked"
-				severity = "warning"
-				title = "Domain blocked"
-				description = record.domain + " was blocked by " + record.source + "."
-			}
-			if record.decisionReason != "" {
-				description = record.decisionReason
-			}
-			items = append(items, map[string]any{
-				"id":          fmt.Sprintf("query-%d", record.recordID),
-				"timestamp":   record.timestamp,
-				"type":        eventType,
-				"severity":    severity,
-				"title":       title,
-				"description": description,
-				"client_ip":   record.clientIP,
-				"domain":      record.domain,
-				"metadata": map[string]any{
-					"query_type": record.queryType,
-					"action":     record.action,
-					"latency_ms": nullableFloat(record.latency),
-					"upstream":   record.upstream,
-					"rcode":      record.rcode,
-					"decision":   metadataMap(record.decisionMetadata),
-				},
-				"source": record.source,
-			})
+			item = queryRecordMap(record)
 		}
+		items = append(items, item)
 	}
 	return items
 }
 
+func eventRecordMap(record activityRecord) map[string]any {
+	return map[string]any{
+		"id":          fmt.Sprintf("event-%d", record.recordID),
+		"timestamp":   record.timestamp,
+		"type":        record.eventType,
+		"severity":    record.severity,
+		"title":       record.title,
+		"description": record.description,
+		"client_ip":   nullableInput(record.clientIP),
+		"domain":      nullableInput(record.domain),
+		"metadata":    metadataMap(record.metadata),
+		"source":      record.source,
+	}
+}
+
+func deviceRecordMap(record activityRecord) map[string]any {
+	deviceName := record.clientIP
+	if record.deviceName != "" {
+		deviceName = record.deviceName
+	}
+	description := deviceName + " joined the network."
+	if record.location != "" {
+		description = deviceName + " joined from " + record.location + "."
+	}
+	return map[string]any{
+		"id":          "device-first-seen-" + record.clientIP,
+		"timestamp":   record.timestamp,
+		"type":        "device.first_seen",
+		"severity":    "info",
+		"title":       "Device first seen",
+		"description": description,
+		"client_ip":   record.clientIP,
+		"domain":      nil,
+		"metadata":    map[string]any{"device_name": deviceName, "location": nullableInput(record.location)},
+		"source":      "devices",
+	}
+}
+
+func queryRecordMap(record activityRecord) map[string]any {
+	deviceName := record.clientIP
+	if record.deviceName != "" {
+		deviceName = record.deviceName
+	}
+	eventType, severity, title := "dns.query", "info", record.domain+" resolved"
+	description := "Requested by " + deviceName + "."
+	switch {
+	case record.source == "cache":
+		description = "Served from Faro's cache for " + deviceName + "."
+	case record.source == "upstream" && record.upstream != "":
+		description = "Resolved through " + record.upstream + " for " + deviceName + "."
+	case record.source == "local":
+		description = "Answered by Local DNS for " + deviceName + "."
+	}
+	if record.action == "blocked" {
+		eventType, severity, title = "dns.blocked", "warning", "Domain blocked"
+		description = record.domain + " was blocked by " + record.source + "."
+	}
+	if record.decisionReason != "" {
+		description = record.decisionReason
+	}
+	return map[string]any{
+		"id":          fmt.Sprintf("query-%d", record.recordID),
+		"timestamp":   record.timestamp,
+		"type":        eventType,
+		"severity":    severity,
+		"title":       title,
+		"description": description,
+		"client_ip":   record.clientIP,
+		"domain":      record.domain,
+		"metadata": map[string]any{
+			"query_type": record.queryType,
+			"action":     record.action,
+			"latency_ms": nullableFloat(record.latency),
+			"upstream":   record.upstream,
+			"rcode":      record.rcode,
+			"decision":   metadataMap(record.decisionMetadata),
+		},
+		"source": record.source,
+	}
+}
+
 func activityCounts(ctx context.Context, database *sql.DB, search string) map[string]int {
 	parts := make([]string, 0, 3)
-	args := []any{}
+	args := make([]any, 0, 6)
 
 	eventPart := `SELECT 'event' AS kind, '' AS source, '' AS action FROM events e`
 	if clause, values := activityLikeClause(search, "e.title", "e.description", "e.type", "e.domain", "e.client_ip"); clause != "" {
@@ -554,7 +572,7 @@ func activityCounts(ctx context.Context, database *sql.DB, search string) map[st
 		FROM dns_queries q
 		LEFT JOIN devices a ON a.id = q.device_id
 		GROUP BY q.client_ip`
-	if clause, values := activityLikeClause(search, "q.client_ip", "COALESCE(MAX(a.name), '')", "COALESCE(MAX(a.location), '')"); clause != "" {
+	if clause, values := activityLikeClause(search, queryClientIPField, "COALESCE(MAX(a.name), '')", "COALESCE(MAX(a.location), '')"); clause != "" {
 		devicePart += ` HAVING ` + clause
 		args = append(args, values...)
 	}
@@ -564,7 +582,7 @@ func activityCounts(ctx context.Context, database *sql.DB, search string) map[st
 		SELECT 'query' AS kind, q.source, q.action
 		FROM dns_queries q
 		LEFT JOIN devices a ON a.id = q.device_id`
-	if clause, values := activityLikeClause(search, "q.domain", "q.client_ip", "q.query_type", "q.action", "q.source", "a.name"); clause != "" {
+	if clause, values := activityLikeClause(search, "q.domain", queryClientIPField, "q.query_type", "q.action", "q.source", "a.name"); clause != "" {
 		queryPart += ` WHERE ` + clause
 		args = append(args, values...)
 	}

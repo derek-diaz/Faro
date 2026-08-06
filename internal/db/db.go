@@ -367,6 +367,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.migrateProtection(ctx); err != nil {
 		return err
 	}
+	if err := s.migrateBlocklistSources(ctx); err != nil {
+		return err
+	}
 	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE dns_queries ADD COLUMN upstream TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		return err
 	}
@@ -399,19 +402,38 @@ type legacyDeviceIdentity struct {
 	lastSeen  sql.NullString
 }
 
-// migrateDeviceIdentities moves the original IP-keyed device data into stable
-// device records. The original tables deliberately remain available so older
-// backups and clients can still be restored while the application transitions.
+// migrateDeviceIdentities moves the original IP-keyed device data into stable device records.
+// The original tables remain available so older backups and clients can be restored during the transition.
 func (s *Store) migrateDeviceIdentities(ctx context.Context) error {
 	var completed string
 	err := s.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'device_identity_migration_completed'`).Scan(&completed)
 	if err == nil && completed == "true" {
 		return nil
 	}
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	identities, err := s.loadLegacyDeviceIdentities(ctx)
+	if err != nil {
+		return err
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, identity := range identities {
+		if err := migrateLegacyDeviceIdentity(ctx, tx, identity); err != nil {
+			return err
+		}
+	}
+	if err := completeDeviceIdentityMigration(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
+func (s *Store) loadLegacyDeviceIdentities(ctx context.Context) ([]legacyDeviceIdentity, error) {
 	rows, err := s.DB.QueryContext(ctx, `
 		WITH known_addresses AS (
 			SELECT client_ip FROM dns_queries
@@ -428,58 +450,55 @@ func (s *Store) migrateDeviceIdentities(ctx context.Context) error {
 		GROUP BY k.client_ip, a.name, a.location, a.notes
 		ORDER BY k.client_ip`)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var identities []legacyDeviceIdentity
 	for rows.Next() {
 		var identity legacyDeviceIdentity
 		if err := rows.Scan(&identity.address, &identity.name, &identity.location, &identity.notes, &identity.firstSeen, &identity.lastSeen); err != nil {
 			_ = rows.Close()
-			return err
+			return nil, err
 		}
 		identities = append(identities, identity)
 	}
 	if err := rows.Close(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return identities, nil
+}
+
+func migrateLegacyDeviceIdentity(ctx context.Context, tx *sql.Tx, identity legacyDeviceIdentity) error {
+	family := "ipv4"
+	if strings.Contains(identity.address, ":") {
+		family = "ipv6"
+	}
+	var deviceID int64
+	err := tx.QueryRowContext(ctx, `SELECT device_id FROM device_addresses WHERE address = ?`, identity.address).Scan(&deviceID)
+	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-
-	tx, err := s.DB.BeginTx(ctx, nil)
+	result, err := tx.ExecContext(ctx, `
+		INSERT INTO devices(name, location, notes, confirmed, first_seen_at, last_seen_at)
+		VALUES(?, ?, ?, CASE WHEN ? <> '' THEN 1 ELSE 0 END, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))`,
+		identity.name, identity.location, identity.notes, identity.name, identity.firstSeen, identity.lastSeen)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	for _, identity := range identities {
-		family := "ipv4"
-		if strings.Contains(identity.address, ":") {
-			family = "ipv6"
-		}
-		var deviceID int64
-		err := tx.QueryRowContext(ctx, `SELECT device_id FROM device_addresses WHERE address = ?`, identity.address).Scan(&deviceID)
-		if err == sql.ErrNoRows {
-			result, insertErr := tx.ExecContext(ctx, `
-				INSERT INTO devices(name, location, notes, confirmed, first_seen_at, last_seen_at)
-				VALUES(?, ?, ?, CASE WHEN ? <> '' THEN 1 ELSE 0 END, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))`,
-				identity.name, identity.location, identity.notes, identity.name, identity.firstSeen, identity.lastSeen)
-			if insertErr != nil {
-				return insertErr
-			}
-			deviceID, err = result.LastInsertId()
-			if err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO device_addresses(device_id, address, family, source, confidence, first_seen_at, last_seen_at)
-				VALUES(?, ?, ?, 'migration', 'observed', COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))`,
-				deviceID, identity.address, family, identity.firstSeen, identity.lastSeen); err != nil {
-				return err
-			}
-		} else if err != nil {
-			return err
-		}
+	deviceID, err = result.LastInsertId()
+	if err != nil {
+		return err
 	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO device_addresses(device_id, address, family, source, confidence, first_seen_at, last_seen_at)
+		VALUES(?, ?, ?, 'migration', 'observed', COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))`,
+		deviceID, identity.address, family, identity.firstSeen, identity.lastSeen)
+	return err
+}
+
+func completeDeviceIdentityMigration(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE dns_queries
 		SET device_id = (SELECT device_id FROM device_addresses WHERE address = dns_queries.client_ip)
@@ -502,7 +521,7 @@ func (s *Store) migrateDeviceIdentities(ctx context.Context) error {
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`); err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }
 
 func (s *Store) migrateProtection(ctx context.Context) error {
@@ -514,14 +533,14 @@ func (s *Store) migrateProtection(ctx context.Context) error {
 	if err == nil && completed == "true" {
 		return nil
 	}
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var homeID int64
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM protection_profiles WHERE is_default = 1`).Scan(&homeID); err != nil {
 		return err
@@ -539,6 +558,50 @@ func (s *Store) migrateProtection(ctx context.Context) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+type blocklistSourceMigration struct {
+	from string
+	to   string
+}
+
+var movedBlocklistSources = []blocklistSourceMigration{
+	{
+		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/pro.txt",
+		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt",
+	},
+	{
+		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/light.txt",
+		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/light.txt",
+	},
+	{
+		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/multi.txt",
+		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/multi.txt",
+	},
+	{
+		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/pro.plus.txt",
+		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.plus.txt",
+	},
+	{
+		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/ultimate.txt",
+		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/ultimate.txt",
+	},
+	{
+		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/tif.txt",
+		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/tif.txt",
+	},
+}
+
+func (s *Store) migrateBlocklistSources(ctx context.Context) error {
+	for _, migration := range movedBlocklistSources {
+		if _, err := s.DB.ExecContext(ctx, `
+			UPDATE blocklists
+			SET url = ?, updated_at = CURRENT_TIMESTAMP
+			WHERE url = ?`, migration.to, migration.from); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) seed(ctx context.Context) error {
@@ -582,14 +645,14 @@ func (s *Store) removeLegacyDemoRecords(ctx context.Context) error {
 	if err == nil && marker == "true" {
 		return nil
 	}
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM dns_records
 		WHERE (hostname = 'router.home' AND type = 'A' AND value = '192.168.7.1' AND description = 'Home gateway')
@@ -610,14 +673,14 @@ func (s *Store) removeLegacyDemoRules(ctx context.Context) error {
 	if err == nil && marker == "true" {
 		return nil
 	}
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM manual_block_entries WHERE domain IN ('ads.example.com', 'tracker.example.net')`); err != nil {
 		return err
 	}
@@ -726,57 +789,21 @@ func NormalizeRecord(hostname, typ, value string) (string, string, string, error
 // migrateDNSRecords replaces the original hostname-only uniqueness constraint
 // with record-level uniqueness so a hostname can be genuinely dual-stack.
 func (s *Store) migrateDNSRecords(ctx context.Context) error {
-	rows, err := s.DB.QueryContext(ctx, `PRAGMA index_list(dns_records)`)
+	hasHostnameOnlyUnique, err := s.hasHostnameOnlyUniqueIndex(ctx)
 	if err != nil {
 		return err
-	}
-	var uniqueIndexes []string
-	for rows.Next() {
-		var sequence, unique, partial int
-		var name, origin string
-		if err := rows.Scan(&sequence, &name, &unique, &origin, &partial); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		if unique == 1 {
-			uniqueIndexes = append(uniqueIndexes, name)
-		}
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	hasHostnameOnlyUnique := false
-	for _, name := range uniqueIndexes {
-		columns, columnErr := s.DB.QueryContext(ctx, `PRAGMA index_info(`+quoteIdentifier(name)+`)`)
-		if columnErr != nil {
-			return columnErr
-		}
-		var names []string
-		for columns.Next() {
-			var rank, cid int
-			var columnName string
-			if err := columns.Scan(&rank, &cid, &columnName); err != nil {
-				_ = columns.Close()
-				return err
-			}
-			names = append(names, columnName)
-		}
-		_ = columns.Close()
-		if len(names) == 1 && names[0] == "hostname" {
-			hasHostnameOnlyUnique = true
-		}
 	}
 	if !hasHostnameOnlyUnique {
 		return nil
 	}
-
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
+	const migratedTable = "dns_records_migrated"
 	statements := []string{
-		`CREATE TABLE dns_records_migrated (
+		`CREATE TABLE ` + migratedTable + ` (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			hostname TEXT NOT NULL,
 			type TEXT NOT NULL DEFAULT 'A',
@@ -786,10 +813,10 @@ func (s *Store) migrateDNSRecords(ctx context.Context) error {
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			UNIQUE(hostname, type, value)
 		)`,
-		`INSERT INTO dns_records_migrated(id, hostname, type, value, description, created_at, updated_at)
-		 SELECT id, hostname, type, value, description, created_at, updated_at FROM dns_records`,
+		`INSERT INTO ` + migratedTable + `(id, hostname, type, value, description, created_at, updated_at)
+			SELECT id, hostname, type, value, description, created_at, updated_at FROM dns_records`,
 		`DROP TABLE dns_records`,
-		`ALTER TABLE dns_records_migrated RENAME TO dns_records`,
+		`ALTER TABLE ` + migratedTable + ` RENAME TO dns_records`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -797,6 +824,59 @@ func (s *Store) migrateDNSRecords(ctx context.Context) error {
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *Store) hasHostnameOnlyUniqueIndex(ctx context.Context) (bool, error) {
+	rows, err := s.DB.QueryContext(ctx, `PRAGMA index_list(dns_records)`)
+	if err != nil {
+		return false, err
+	}
+	var uniqueIndexes []string
+	for rows.Next() {
+		var sequence, unique, partial int
+		var name, origin string
+		if err := rows.Scan(&sequence, &name, &unique, &origin, &partial); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		if unique == 1 {
+			uniqueIndexes = append(uniqueIndexes, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, err
+	}
+	if err := rows.Close(); err != nil {
+		return false, err
+	}
+	for _, name := range uniqueIndexes {
+		columns, columnErr := s.DB.QueryContext(ctx, `PRAGMA index_info(`+quoteIdentifier(name)+`)`)
+		if columnErr != nil {
+			return false, columnErr
+		}
+		var names []string
+		for columns.Next() {
+			var rank, cid int
+			var columnName string
+			if err := columns.Scan(&rank, &cid, &columnName); err != nil {
+				_ = columns.Close()
+				return false, err
+			}
+			names = append(names, columnName)
+		}
+		if err := columns.Err(); err != nil {
+			_ = columns.Close()
+			return false, err
+		}
+		if err := columns.Close(); err != nil {
+			return false, err
+		}
+		if len(names) == 1 && names[0] == "hostname" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func quoteIdentifier(value string) string {

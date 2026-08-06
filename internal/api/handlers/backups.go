@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"time"
@@ -21,7 +22,7 @@ func (s *Handler) backupExport(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	defer r.Body.Close()
+	defer logActionError("close backup request body", r.Body.Close)
 	var input backupPassphraseInput
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
 	if err := decoder.Decode(&input); err != nil {
@@ -43,7 +44,11 @@ func (s *Handler) backupExport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Printf("close backup export file: %v", err)
+		}
+	}()
 	info, err := file.Stat()
 	if err != nil {
 		writeError(w, err)
@@ -54,7 +59,7 @@ func (s *Handler) backupExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filename))
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("X-Content-Type-Options", contentTypeOptionsNoSniff)
 	http.ServeContent(w, r, filename, info.ModTime(), file)
 }
 
@@ -71,7 +76,7 @@ func (s *Handler) backupRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.MultipartForm != nil {
-		defer r.MultipartForm.RemoveAll()
+		defer logActionError("remove temporary backup upload files", r.MultipartForm.RemoveAll)
 	}
 	passphrase := r.FormValue("passphrase")
 	if len(passphrase) < farobackup.MinPassphraseLength || len(passphrase) > farobackup.MaxPassphraseLength {
@@ -83,7 +88,11 @@ func (s *Handler) backupRestore(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, errors.New("select a Faro backup file"))
 		return
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			log.Printf("close backup upload: %v", err)
+		}
+	}()
 	manifest, restore, err := s.backups.BeginRestore(r.Context(), file, passphrase)
 	if err != nil {
 		if errors.Is(err, farobackup.ErrInvalidBackup) {
@@ -94,44 +103,11 @@ func (s *Handler) backupRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	restoreFinished := false
-	defer func() {
-		if restoreFinished {
-			return
-		}
-		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
-		defer cancel()
-		_ = restore.Rollback(rollbackCtx)
-	}()
+	defer rollbackUnfinishedRestore(r.Context(), restore, &restoreFinished)
 
 	if err := s.reloader.Apply(r.Context()); err != nil {
-		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
-		rollbackErr := restore.Rollback(rollbackCtx)
 		restoreFinished = true
-		var reapplyErr error
-		if rollbackErr == nil {
-			reapplyErr = s.reloader.Apply(rollbackCtx)
-		}
-		cancel()
-		restoreFailure := fmt.Errorf("backup restore was rolled back because DNS rejected the restored configuration: %w", err)
-		title := "Backup restore rolled back"
-		severity := "warning"
-		if rollbackErr != nil {
-			title = "Backup restore rollback failed"
-			severity = "critical"
-			restoreFailure = fmt.Errorf("DNS rejected the restored configuration (%v) and the previous database could not be recovered: %w", err, rollbackErr)
-		} else if reapplyErr != nil {
-			title = "DNS recovery after backup restore failed"
-			severity = "critical"
-			restoreFailure = fmt.Errorf("backup restore was rolled back after DNS rejected it (%v), but the previous DNS configuration could not be verified: %w", err, reapplyErr)
-		}
-		s.recordEvent(context.WithoutCancel(r.Context()), eventInput{
-			Type:        "backup.restore_rolled_back",
-			Severity:    severity,
-			Title:       title,
-			Description: restoreFailure.Error(),
-			Source:      "backup",
-		})
-		writeError(w, restoreFailure)
+		s.handleRestoreApplyFailure(w, r, restore, err)
 		return
 	}
 	restore.Commit()
@@ -155,4 +131,45 @@ func (s *Handler) backupRestore(w http.ResponseWriter, r *http.Request) {
 		"warning":        "",
 		"requires_login": true,
 	})
+}
+
+func rollbackUnfinishedRestore(ctx context.Context, restore *farobackup.RestoreTransaction, finished *bool) {
+	if *finished {
+		return
+	}
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Minute)
+	defer cancel()
+	logActionError("rollback incomplete backup restore", func() error {
+		return restore.Rollback(rollbackCtx)
+	})
+}
+
+func (s *Handler) handleRestoreApplyFailure(w http.ResponseWriter, r *http.Request, restore *farobackup.RestoreTransaction, applyErr error) {
+	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
+	defer cancel()
+	rollbackErr := restore.Rollback(rollbackCtx)
+	var reapplyErr error
+	if rollbackErr == nil {
+		reapplyErr = s.reloader.Apply(rollbackCtx)
+	}
+	restoreFailure, title, severity := backupRestoreFailure(applyErr, rollbackErr, reapplyErr)
+	s.recordEvent(context.WithoutCancel(r.Context()), eventInput{
+		Type:        "backup.restore_rolled_back",
+		Severity:    severity,
+		Title:       title,
+		Description: restoreFailure.Error(),
+		Source:      "backup",
+	})
+	writeError(w, restoreFailure)
+}
+
+func backupRestoreFailure(applyErr, rollbackErr, reapplyErr error) (error, string, string) {
+	restoreFailure := fmt.Errorf("backup restore was rolled back because DNS rejected the restored configuration: %w", applyErr)
+	if rollbackErr != nil {
+		return fmt.Errorf("DNS rejected the restored configuration (%v) and the previous database could not be recovered: %w", applyErr, rollbackErr), "Backup restore rollback failed", "critical"
+	}
+	if reapplyErr != nil {
+		return fmt.Errorf("backup restore was rolled back after DNS rejected it (%v), but the previous DNS configuration could not be verified: %w", applyErr, reapplyErr), "DNS recovery after backup restore failed", "critical"
+	}
+	return restoreFailure, "Backup restore rolled back", "warning"
 }

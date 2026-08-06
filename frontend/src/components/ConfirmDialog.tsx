@@ -2,16 +2,16 @@ import { LoaderCircle, Trash2, X } from "lucide-react";
 import { useEffect, useId, useRef, type ReactNode } from "react";
 
 type ConfirmDialogProps = {
-  title: string;
-  body: string;
-  confirmLabel: string;
-  busyLabel?: string;
-  busy?: boolean;
-  detail?: ReactNode;
-  icon?: ReactNode;
-  autoFocusCancel?: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
+  readonly title: string;
+  readonly body: string;
+  readonly confirmLabel: string;
+  readonly busyLabel?: string;
+  readonly busy?: boolean;
+  readonly detail?: ReactNode;
+  readonly icon?: ReactNode;
+  readonly autoFocusCancel?: boolean;
+  readonly onCancel: () => void;
+  readonly onConfirm: () => void;
 };
 
 export function ConfirmDialog({ title, body, confirmLabel, busyLabel = "Removing…", busy = false, detail, icon, autoFocusCancel = true, onCancel, onConfirm }: ConfirmDialogProps) {
@@ -38,8 +38,9 @@ export function ConfirmDialog({ title, body, confirmLabel, busyLabel = "Removing
   }, [autoFocusCancel]);
 
   return (
-    <div className="confirm-dialog-backdrop" role="presentation" onMouseDown={() => { if (!busy) onCancel(); }}>
-      <section className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby={titleID} aria-describedby={bodyID} onMouseDown={(event) => event.stopPropagation()}>
+    <dialog open className="confirm-dialog-backdrop" aria-modal="true" aria-labelledby={titleID} aria-describedby={bodyID}>
+      <button type="button" className="confirm-dialog-backdrop-close" aria-label="Close confirmation" disabled={busy} onClick={onCancel} />
+      <div className="confirm-dialog">
         <header>
           <span className="confirm-dialog-icon">{icon ?? <Trash2 size={20} />}</span>
           <div><h2 id={titleID}>{title}</h2><p id={bodyID}>{body}</p></div>
@@ -50,7 +51,7 @@ export function ConfirmDialog({ title, body, confirmLabel, busyLabel = "Removing
           <button ref={cancelRef} type="button" className="secondary" disabled={busy} onClick={onCancel}>Cancel</button>
           <button type="button" className="danger confirm-dialog-action" disabled={busy} onClick={onConfirm}>{busy && <LoaderCircle className="spinning" size={16} />}<span>{busy ? busyLabel : confirmLabel}</span></button>
         </footer>
-      </section>
-    </div>
+      </div>
+    </dialog>
   );
 }

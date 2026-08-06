@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -18,6 +19,8 @@ import (
 	"github.com/derek/faro/internal/secrets"
 )
 
+const faroNodeHeader = "X-Faro-Node"
+
 func (m *Manager) AcceptPair(ctx context.Context, input PairRequest) (PairResponse, error) {
 	state, err := m.readState(ctx)
 	if err != nil {
@@ -26,37 +29,24 @@ func (m *Manager) AcceptPair(ctx context.Context, input PairRequest) (PairRespon
 	if state.Role != RoleController {
 		return PairResponse{}, errors.New("this Faro server is not accepting replicas")
 	}
-	if state.ConfigRevision == 0 {
-		if err := m.captureSnapshot(ctx, state); err != nil {
-			return PairResponse{}, fmt.Errorf("prepare controller configuration: %w", err)
-		}
-		state, err = m.readState(ctx)
-		if err != nil {
-			return PairResponse{}, err
-		}
+	state, err = m.ensureControllerSnapshot(ctx, state)
+	if err != nil {
+		return PairResponse{}, err
 	}
-	input.NodeID = strings.TrimSpace(input.NodeID)
-	input.NodeName = strings.TrimSpace(input.NodeName)
-	input.LANAddress = strings.TrimSpace(input.LANAddress)
-	if len(input.NodeID) != 32 || input.NodeName == "" || len([]rune(input.NodeName)) > 40 {
-		return PairResponse{}, errors.New("replica identity is invalid")
+	input, err = normalizePairRequest(input)
+	if err != nil {
+		return PairResponse{}, err
 	}
-	if parsed := netParsePrivate(input.LANAddress); parsed == nil {
-		return PairResponse{}, errors.New("replica address must be a private LAN IP")
+	session, err := m.pairingSession(input.PairingID)
+	if err != nil {
+		return PairResponse{}, err
 	}
-	m.mu.Lock()
-	session, exists := m.pairings[input.PairingID]
-	m.mu.Unlock()
-	if !exists || !session.ExpiresAt.After(m.now()) {
-		return PairResponse{}, errors.New("pairing code has expired")
+	publicKey, err := decodePairingPublicKey(input.PublicKey)
+	if err != nil {
+		return PairResponse{}, err
 	}
-	publicKey, err := base64.RawURLEncoding.DecodeString(input.PublicKey)
-	if err != nil || len(publicKey) != 32 {
-		return PairResponse{}, errors.New("replica pairing key is invalid")
-	}
-	proof, err := base64.RawURLEncoding.DecodeString(input.Proof)
-	if err != nil || !hmac.Equal(proof, pairingProof(session.Token, input)) {
-		return PairResponse{}, errors.New("pairing code was not accepted")
+	if err := verifyPairingProof(session, input); err != nil {
+		return PairResponse{}, err
 	}
 	nodeSecret, err := randomBytes(32)
 	if err != nil {
@@ -70,7 +60,80 @@ func (m *Manager) AcceptPair(ctx context.Context, input PairRequest) (PairRespon
 	if err != nil {
 		return PairResponse{}, err
 	}
-	if _, err := m.store.DB.ExecContext(ctx, `
+	if err := m.storePairedNode(ctx, input, ciphertext); err != nil {
+		return PairResponse{}, err
+	}
+	key, err := pairingKey(session.PrivateKey, publicKey, session.Token)
+	if err != nil {
+		return PairResponse{}, err
+	}
+	payload, err := json.Marshal(pairPayload{
+		HomeID: state.HomeID, ControllerNodeID: state.NodeID,
+		NodeSecret:     base64.RawURLEncoding.EncodeToString(nodeSecret),
+		ConfigRevision: state.ConfigRevision,
+	})
+	if err != nil {
+		return PairResponse{}, fmt.Errorf("encode pairing response: %w", err)
+	}
+	envelope, err := sealEnvelope(key, payload, "faro-pairing-response-v1")
+	if err != nil {
+		return PairResponse{}, err
+	}
+	m.consumePairing(input.PairingID)
+	return PairResponse(envelope), nil
+}
+
+func (m *Manager) ensureControllerSnapshot(ctx context.Context, state localState) (localState, error) {
+	if state.ConfigRevision != 0 {
+		return state, nil
+	}
+	if err := m.captureSnapshot(ctx, state); err != nil {
+		return localState{}, fmt.Errorf("prepare controller configuration: %w", err)
+	}
+	return m.readState(ctx)
+}
+
+func normalizePairRequest(input PairRequest) (PairRequest, error) {
+	input.NodeID = strings.TrimSpace(input.NodeID)
+	input.NodeName = strings.TrimSpace(input.NodeName)
+	input.LANAddress = strings.TrimSpace(input.LANAddress)
+	if len(input.NodeID) != 32 || input.NodeName == "" || len([]rune(input.NodeName)) > 40 {
+		return PairRequest{}, errors.New("replica identity is invalid")
+	}
+	if netParsePrivate(input.LANAddress) == nil {
+		return PairRequest{}, errors.New("replica address must be a private LAN IP")
+	}
+	return input, nil
+}
+
+func (m *Manager) pairingSession(pairingID string) (pairingSession, error) {
+	m.mu.Lock()
+	session, exists := m.pairings[pairingID]
+	m.mu.Unlock()
+	if !exists || !session.ExpiresAt.After(m.now()) {
+		return pairingSession{}, errors.New("pairing code has expired")
+	}
+	return session, nil
+}
+
+func decodePairingPublicKey(encoded string) ([]byte, error) {
+	publicKey, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(publicKey) != 32 {
+		return nil, errors.New("replica pairing key is invalid")
+	}
+	return publicKey, nil
+}
+
+func verifyPairingProof(session pairingSession, input PairRequest) error {
+	proof, err := base64.RawURLEncoding.DecodeString(input.Proof)
+	if err != nil || !hmac.Equal(proof, pairingProof(session.Token, input)) {
+		return errors.New("pairing code was not accepted")
+	}
+	return nil
+}
+
+func (m *Manager) storePairedNode(ctx context.Context, input PairRequest, ciphertext string) error {
+	_, err := m.store.DB.ExecContext(ctx, `
 		INSERT INTO redundancy_nodes(node_id, name, lan_address, secret_ciphertext, config_revision, last_seen_at, updated_at)
 		VALUES(?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(node_id) DO UPDATE SET
@@ -78,26 +141,14 @@ func (m *Manager) AcceptPair(ctx context.Context, input PairRequest) (PairRespon
 			secret_ciphertext=excluded.secret_ciphertext, config_revision=0,
 			last_seen_at=excluded.last_seen_at, last_sync_at=NULL, last_error='',
 			updated_at=CURRENT_TIMESTAMP`,
-		input.NodeID, input.NodeName, input.LANAddress, ciphertext, m.now().UTC().Format(time.RFC3339)); err != nil {
-		return PairResponse{}, err
-	}
-	key, err := pairingKey(session.PrivateKey, publicKey, session.Token)
-	if err != nil {
-		return PairResponse{}, err
-	}
-	payload, _ := json.Marshal(pairPayload{
-		HomeID: state.HomeID, ControllerNodeID: state.NodeID,
-		NodeSecret:     base64.RawURLEncoding.EncodeToString(nodeSecret),
-		ConfigRevision: state.ConfigRevision,
-	})
-	envelope, err := sealEnvelope(key, payload, "faro-pairing-response-v1")
-	if err != nil {
-		return PairResponse{}, err
-	}
+		input.NodeID, input.NodeName, input.LANAddress, ciphertext, m.now().UTC().Format(time.RFC3339))
+	return err
+}
+
+func (m *Manager) consumePairing(pairingID string) {
 	m.mu.Lock()
-	delete(m.pairings, input.PairingID)
+	delete(m.pairings, pairingID)
 	m.mu.Unlock()
-	return PairResponse(envelope), nil
 }
 
 func (m *Manager) AuthenticateNodeRequest(ctx context.Context, request *http.Request, body []byte) (string, []byte, error) {
@@ -108,7 +159,7 @@ func (m *Manager) AuthenticateNodeRequest(ctx context.Context, request *http.Req
 	if state.Role != RoleController {
 		return "", nil, errors.New("this Faro server is not a redundancy controller")
 	}
-	nodeID := strings.TrimSpace(request.Header.Get("X-Faro-Node"))
+	nodeID := strings.TrimSpace(request.Header.Get(faroNodeHeader))
 	timestampText := request.Header.Get("X-Faro-Timestamp")
 	nonce := request.Header.Get("X-Faro-Nonce")
 	signature, err := decodeSignature(request.Header.Get("X-Faro-Signature"))
@@ -149,13 +200,15 @@ func (m *Manager) AuthenticateNodeRequest(ctx context.Context, request *http.Req
 	}
 	m.replays[nodeID][nonce] = m.now()
 	m.mu.Unlock()
-	_, _ = m.store.DB.ExecContext(ctx, `
+	if _, err := m.store.DB.ExecContext(ctx, `
 		UPDATE redundancy_nodes SET last_seen_at = ?, updated_at = CURRENT_TIMESTAMP WHERE node_id = ?`,
-		m.now().UTC().Format(time.RFC3339), nodeID)
+		m.now().UTC().Format(time.RFC3339), nodeID); err != nil {
+		log.Printf("record redundancy node activity: %v", err)
+	}
 	return nodeID, secret, nil
 }
 
-func (m *Manager) SnapshotEnvelope(ctx context.Context, since int64, secret []byte) (*encryptedEnvelope, int64, error) {
+func (m *Manager) SnapshotEnvelope(ctx context.Context, since int64, secret []byte) (*EncryptedEnvelope, int64, error) {
 	state, err := m.readState(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -198,68 +251,111 @@ func (m *Manager) syncReplica(ctx context.Context) error {
 	if state.Role != RoleReplica {
 		return nil
 	}
+	nodeSecret, err := m.loadReplicaSecret(state)
+	if err != nil {
+		return err
+	}
+	response, err := m.requestReplicaSnapshot(ctx, state, nodeSecret)
+	if err != nil {
+		return err
+	}
+	defer closeRedundancyResource("close redundancy snapshot response body", response.Body)
+	if response.StatusCode == http.StatusNoContent {
+		return m.markReplicaSynchronized(ctx)
+	}
+	if response.StatusCode != http.StatusOK {
+		return controllerSyncError(response)
+	}
+	snapshot, err := decodeReplicaSnapshot(response, nodeSecret, state)
+	if err != nil {
+		return err
+	}
+	files, err := snapshotFiles(snapshot.Files)
+	if err != nil {
+		return err
+	}
+	return m.applyReplicaSnapshot(ctx, state, nodeSecret, snapshot, files)
+}
+
+func (m *Manager) loadReplicaSecret(state localState) ([]byte, error) {
 	masterKey, err := secrets.LoadOrCreateKey(m.secretKeyPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	nodeSecret, err := secrets.Decrypt(masterKey, state.SecretCiphertext)
-	if err != nil {
-		return err
-	}
+	return secrets.Decrypt(masterKey, state.SecretCiphertext)
+}
+
+func (m *Manager) requestReplicaSnapshot(ctx context.Context, state localState, secret []byte) (*http.Response, error) {
 	target := state.ControllerURL + "/api/redundancy/replica/snapshot?since=" + strconv.FormatInt(state.ConfigRevision, 10)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	request.Header.Set("X-Faro-Node", state.NodeID)
-	if err := signRequest(request, nil, nodeSecret, m.now()); err != nil {
-		return err
+	request.Header.Set(faroNodeHeader, state.NodeID)
+	if err := signRequest(request, nil, secret, m.now()); err != nil {
+		return nil, err
 	}
 	response, err := m.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("reach controller: %w", err)
+		return nil, fmt.Errorf("reach controller: %w", err)
 	}
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusNoContent {
-		_, err := m.store.DB.ExecContext(ctx, `
-			UPDATE redundancy_state SET last_sync_at = ?, last_error = '', updated_at = CURRENT_TIMESTAMP
-			WHERE id = 1 AND role = ?`,
-			m.now().UTC().Format(time.RFC3339), RoleReplica)
-		return err
-	}
-	if response.StatusCode != http.StatusOK {
-		message, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-		return fmt.Errorf("controller sync failed: %s", cleanHTTPError(message, response.Status))
-	}
-	var envelope encryptedEnvelope
-	if err := json.NewDecoder(io.LimitReader(response.Body, maxSnapshotEnvelopeBytes+1)).Decode(&envelope); err != nil {
-		return errors.New("controller returned an invalid encrypted snapshot")
-	}
-	plaintext, err := openEnvelope(nodeSecret, envelope, "faro-configuration-snapshot-v1")
+	return response, nil
+}
+
+func (m *Manager) markReplicaSynchronized(ctx context.Context) error {
+	_, err := m.store.DB.ExecContext(ctx, `
+		UPDATE redundancy_state SET last_sync_at = ?, last_error = '', updated_at = CURRENT_TIMESTAMP
+		WHERE id = 1 AND role = ?`,
+		m.now().UTC().Format(time.RFC3339), RoleReplica)
+	return err
+}
+
+func controllerSyncError(response *http.Response) error {
+	message, err := io.ReadAll(io.LimitReader(response.Body, 4096))
 	if err != nil {
-		return err
+		return fmt.Errorf("controller sync failed: %s", response.Status)
+	}
+	return fmt.Errorf("controller sync failed: %s", cleanHTTPError(message, response.Status))
+}
+
+func decodeReplicaSnapshot(response *http.Response, secret []byte, state localState) (ConfigSnapshot, error) {
+	var envelope EncryptedEnvelope
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxSnapshotEnvelopeBytes+1)).Decode(&envelope); err != nil {
+		return ConfigSnapshot{}, errors.New("controller returned an invalid encrypted snapshot")
+	}
+	plaintext, err := openEnvelope(secret, envelope, "faro-configuration-snapshot-v1")
+	if err != nil {
+		return ConfigSnapshot{}, err
 	}
 	if len(plaintext) > maxSnapshotTransportBytes {
-		return errors.New("controller configuration snapshot is too large")
+		return ConfigSnapshot{}, errors.New("controller configuration snapshot is too large")
 	}
 	snapshot, err := decodeSnapshot(plaintext)
 	if err != nil {
-		return err
+		return ConfigSnapshot{}, err
 	}
 	if snapshot.SchemaVersion != snapshotSchemaVersion || snapshot.HomeID != state.HomeID || snapshot.Revision <= state.ConfigRevision {
-		return errors.New("controller configuration snapshot has invalid identity or revision")
+		return ConfigSnapshot{}, errors.New("controller configuration snapshot has invalid identity or revision")
 	}
-	files := make(map[string][]byte, len(snapshot.Files))
+	return snapshot, nil
+}
+
+func snapshotFiles(snapshot map[string]string) (map[string][]byte, error) {
+	files := make(map[string][]byte, len(snapshot))
 	var total int
-	for name, content := range snapshot.Files {
+	for name, content := range snapshot {
 		total += len(content)
 		if total > maxSnapshotUncompressedBytes {
-			return errors.New("controller configuration snapshot is too large")
+			return nil, errors.New("controller configuration snapshot is too large")
 		}
 		files[name] = []byte(content)
 	}
+	return files, nil
+}
+
+func (m *Manager) applyReplicaSnapshot(ctx context.Context, state localState, secret []byte, snapshot ConfigSnapshot, files map[string][]byte) error {
 	if err := m.applier.ApplyReplica(ctx, files, snapshot.RuntimeSettings); err != nil {
-		_ = m.sendAcknowledgement(context.WithoutCancel(ctx), state, nodeSecret, SyncAck{Revision: snapshot.Revision, Error: truncate(err.Error(), 500)})
+		m.acknowledgeReplica(context.WithoutCancel(ctx), state, secret, SyncAck{Revision: snapshot.Revision, Error: truncate(err.Error(), 500)})
 		return fmt.Errorf("apply controller configuration: %w", err)
 	}
 	now := m.now().UTC().Format(time.RFC3339)
@@ -269,18 +365,27 @@ func (m *Manager) syncReplica(ctx context.Context) error {
 		WHERE id = 1 AND role = ?`, snapshot.Revision, now, RoleReplica); err != nil {
 		return err
 	}
-	_ = m.sendAcknowledgement(context.WithoutCancel(ctx), state, nodeSecret, SyncAck{Revision: snapshot.Revision})
+	m.acknowledgeReplica(context.WithoutCancel(ctx), state, secret, SyncAck{Revision: snapshot.Revision})
 	return nil
 }
 
+func (m *Manager) acknowledgeReplica(ctx context.Context, state localState, secret []byte, ack SyncAck) {
+	if err := m.sendAcknowledgement(ctx, state, secret, ack); err != nil {
+		log.Printf("send redundancy acknowledgement: %v", err)
+	}
+}
+
 func (m *Manager) sendAcknowledgement(ctx context.Context, state localState, secret []byte, ack SyncAck) error {
-	body, _ := json.Marshal(ack)
+	body, err := json.Marshal(ack)
+	if err != nil {
+		return fmt.Errorf("encode sync acknowledgement: %w", err)
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, state.ControllerURL+"/api/redundancy/replica/ack", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Faro-Node", state.NodeID)
+	request.Header.Set(faroNodeHeader, state.NodeID)
 	if err := signRequest(request, body, secret, m.now()); err != nil {
 		return err
 	}
@@ -288,7 +393,7 @@ func (m *Manager) sendAcknowledgement(ctx context.Context, state localState, sec
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer closeRedundancyResource("close redundancy acknowledgement response body", response.Body)
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("controller rejected sync acknowledgement: %s", response.Status)
 	}

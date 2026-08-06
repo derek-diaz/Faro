@@ -2,12 +2,43 @@ package handlers
 
 import (
 	"fmt"
-	"github.com/derek/faro/internal/coredns"
 	"net/http"
+
+	"github.com/derek/faro/internal/coredns"
+	faroversion "github.com/derek/faro/internal/version"
 )
 
-func (s *Handler) health(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "faro-api"})
+func (s *Handler) health(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "service": "faro-api", "version": faroversion.Display})
+}
+
+func (s *Handler) version(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"name":    "Faro",
+		"version": faroversion.Number,
+		"display": faroversion.Display,
+	})
+}
+
+func (s *Handler) versionCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	var latest *faroversion.Release
+	if s.releaseChecker != nil {
+		latest = s.releaseChecker.Latest(r.Context())
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"name":    "Faro",
+		"version": faroversion.Number,
+		"display": faroversion.Display,
+		"latest":  latest,
+	})
 }
 
 func (s *Handler) reload(w http.ResponseWriter, r *http.Request) {

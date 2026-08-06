@@ -36,7 +36,7 @@ export const blocklistCatalog: CatalogBlocklist[] = [
     compatibility: "Balanced",
     bestFor: "Most home networks",
     tags: ["Ads", "Tracking", "Scams"],
-    url: hagezi("hosts/pro.txt"),
+    url: hagezi("adblock/pro.txt"),
     recommended: true,
   },
   {
@@ -60,7 +60,7 @@ export const blocklistCatalog: CatalogBlocklist[] = [
     compatibility: "Easy",
     bestFor: "Shared networks and first-time users",
     tags: ["Ads", "Tracking"],
-    url: hagezi("hosts/light.txt"),
+    url: hagezi("adblock/light.txt"),
   },
   {
     id: "hagezi-normal",
@@ -71,7 +71,7 @@ export const blocklistCatalog: CatalogBlocklist[] = [
     compatibility: "Easy",
     bestFor: "Everyday browsing and streaming",
     tags: ["Ads", "Tracking", "Telemetry"],
-    url: hagezi("hosts/multi.txt"),
+    url: hagezi("adblock/multi.txt"),
   },
   {
     id: "oisd-big",
@@ -93,7 +93,7 @@ export const blocklistCatalog: CatalogBlocklist[] = [
     compatibility: "Advanced",
     bestFor: "Experienced users comfortable with exceptions",
     tags: ["Ads", "Tracking", "Badware"],
-    url: hagezi("hosts/pro.plus.txt"),
+    url: hagezi("adblock/pro.plus.txt"),
     caution: "May restrict some app and device features.",
   },
   {
@@ -105,7 +105,7 @@ export const blocklistCatalog: CatalogBlocklist[] = [
     compatibility: "Advanced",
     bestFor: "Maximum control and active troubleshooting",
     tags: ["Ads", "Malware", "Scams"],
-    url: hagezi("hosts/ultimate.txt"),
+    url: hagezi("adblock/ultimate.txt"),
     caution: "Likely to require allowlist exceptions.",
   },
   {
@@ -150,7 +150,7 @@ export const blocklistCatalog: CatalogBlocklist[] = [
     compatibility: "Balanced",
     bestFor: "Adding security to an everyday list",
     tags: ["Malware", "Phishing", "Threats"],
-    url: hagezi("hosts/tif.txt"),
+    url: hagezi("adblock/tif.txt"),
     recommended: true,
   },
   {

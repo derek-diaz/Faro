@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -18,7 +19,7 @@ func (s *Handler) dnsRecords(w http.ResponseWriter, r *http.Request) {
 			writeError(w, err)
 			return
 		}
-		defer rows.Close()
+		defer logActionError("close DNS record rows", rows.Close)
 		writeRows(w, rows)
 	case http.MethodPost:
 		s.configMu.Lock()
@@ -58,57 +59,65 @@ func (s *Handler) dnsRecord(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPut:
-		s.configMu.Lock()
-		defer s.configMu.Unlock()
-		var input dnsRecordInput
-		if !decode(w, r, &input) {
-			return
-		}
-		host, typ, value, err := s.normalizeLocalRecord(r, input)
-		if err != nil {
-			writeBadRequest(w, err)
-			return
-		}
-		previous, err := s.readDNSRecord(r.Context(), id)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		if _, err := s.store.DB.ExecContext(r.Context(), `UPDATE dns_records SET hostname = ?, type = ?, value = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, host, typ, value, strings.TrimSpace(input.Description), id); err != nil {
-			writeError(w, err)
-			return
-		}
-		if err := s.reloader.Apply(r.Context()); err != nil {
-			rollbackCtx := context.WithoutCancel(r.Context())
-			s.restoreDNSRecord(rollbackCtx, previous)
-			_ = s.reloader.Apply(rollbackCtx)
-			writeError(w, fmt.Errorf("record was not changed because CoreDNS rejected the configuration: %w", err))
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		s.updateDNSRecord(w, r, id)
 	case http.MethodDelete:
-		s.configMu.Lock()
-		defer s.configMu.Unlock()
-		previous, err := s.readDNSRecord(r.Context(), id)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-		if _, err := s.store.DB.ExecContext(r.Context(), `DELETE FROM dns_records WHERE id = ?`, id); err != nil {
-			writeError(w, err)
-			return
-		}
-		if err := s.reloader.Apply(r.Context()); err != nil {
-			rollbackCtx := context.WithoutCancel(r.Context())
-			s.restoreDNSRecord(rollbackCtx, previous)
-			_ = s.reloader.Apply(rollbackCtx)
-			writeError(w, fmt.Errorf("record was not deleted because CoreDNS rejected the configuration: %w", err))
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		s.deleteDNSRecord(w, r, id)
 	default:
 		methodNotAllowed(w)
 	}
+}
+
+func (s *Handler) updateDNSRecord(w http.ResponseWriter, r *http.Request, id int64) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	var input dnsRecordInput
+	if !decode(w, r, &input) {
+		return
+	}
+	host, typ, value, err := s.normalizeLocalRecord(r, input)
+	if err != nil {
+		writeBadRequest(w, err)
+		return
+	}
+	previous, err := s.readDNSRecord(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if _, err := s.store.DB.ExecContext(r.Context(), `UPDATE dns_records SET hostname = ?, type = ?, value = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, host, typ, value, strings.TrimSpace(input.Description), id); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.reloader.Apply(r.Context()); err != nil {
+		rollbackCtx := context.WithoutCancel(r.Context())
+		s.restoreDNSRecord(rollbackCtx, previous)
+		_ = s.reloader.Apply(rollbackCtx)
+		writeError(w, fmt.Errorf("record was not changed because CoreDNS rejected the configuration: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Handler) deleteDNSRecord(w http.ResponseWriter, r *http.Request, id int64) {
+	s.configMu.Lock()
+	defer s.configMu.Unlock()
+	previous, err := s.readDNSRecord(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if _, err := s.store.DB.ExecContext(r.Context(), `DELETE FROM dns_records WHERE id = ?`, id); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.reloader.Apply(r.Context()); err != nil {
+		rollbackCtx := context.WithoutCancel(r.Context())
+		s.restoreDNSRecord(rollbackCtx, previous)
+		_ = s.reloader.Apply(rollbackCtx)
+		writeError(w, fmt.Errorf("record was not deleted because CoreDNS rejected the configuration: %w", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 type storedDNSRecord struct {
@@ -136,7 +145,7 @@ func (s *Handler) readDNSRecord(ctx context.Context, id int64) (storedDNSRecord,
 	var record storedDNSRecord
 	err := s.store.DB.QueryRowContext(ctx, `SELECT id, hostname, type, value, description, created_at, updated_at FROM dns_records WHERE id = ?`, id).
 		Scan(&record.ID, &record.Hostname, &record.Type, &record.Value, &record.Description, &record.CreatedAt, &record.UpdatedAt)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return record, fmt.Errorf("DNS record %d does not exist", id)
 	}
 	return record, err

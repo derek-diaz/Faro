@@ -1,5 +1,5 @@
 type BrandLogoProps = {
-  className?: string;
+  readonly className?: string;
 };
 
 export function BrandLogo({ className = "" }: BrandLogoProps) {

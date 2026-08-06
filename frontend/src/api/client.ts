@@ -1,3 +1,23 @@
+type OpenString<T extends string> = T | (string & {});
+
+export type AppVersion = {
+  name: string;
+  version: string;
+  display: string;
+};
+
+export type ReleaseInfo = {
+  version: string;
+  display: string;
+  url: string;
+  name?: string;
+  published_at?: string;
+};
+
+export type VersionCheck = AppVersion & {
+  latest: ReleaseInfo | null;
+};
+
 export type DNSRecord = {
   id: number;
   hostname: string;
@@ -66,7 +86,7 @@ export type DNSQuery = {
 };
 
 export type DecisionRule = {
-  kind: "allowlist" | "manual_block" | "blocklist" | string;
+  kind: OpenString<"allowlist" | "manual_block" | "blocklist">;
   id: number;
   name: string;
 };
@@ -85,7 +105,7 @@ export type DNSDecision = {
   manual_block?: DecisionRule;
   blocklists?: DecisionRule[];
   local_record?: DecisionLocalRecord;
-  confidence?: "observed" | "inferred" | "configuration_snapshot" | string;
+  confidence?: OpenString<"observed" | "inferred" | "configuration_snapshot">;
   captured_at?: string;
   upstream?: string;
   response_code?: string;
@@ -97,7 +117,7 @@ export type DeviceSummary = {
   addresses?: string[];
   address_history?: Array<{
     address: string;
-    family: "ipv4" | "ipv6" | string;
+    family: OpenString<"ipv4" | "ipv6">;
     source: string;
     confidence: string;
     first_seen: string;
@@ -106,25 +126,25 @@ export type DeviceSummary = {
   identity_source?: string;
   name: string;
   display_name?: string;
-  name_source?: "manual" | "local_dns" | "reverse_dns" | string;
+  name_source?: OpenString<"manual" | "local_dns" | "reverse_dns">;
   location?: string | null;
   notes?: string | null;
   device_type: string;
   device_icon?: string;
   type_category?: string;
-  type_confidence?: "high" | "medium" | "unknown" | string;
-  type_source?: "manual" | "automatic" | string;
+  type_confidence?: OpenString<"high" | "medium" | "unknown">;
+  type_source?: OpenString<"manual" | "automatic">;
   classification?: {
-    source: "manual" | "automatic" | string;
+    source: OpenString<"manual" | "automatic">;
     definition_id: string;
     predicted_type: string;
     category: string;
     icon: string;
-    confidence: "high" | "medium" | "unknown" | string;
+    confidence: OpenString<"high" | "medium" | "unknown">;
     score: number;
     catalog_version: string;
     evidence: Array<{
-      kind: "hostname" | "domain" | "address" | "conflict" | string;
+      kind: OpenString<"hostname" | "domain" | "address" | "conflict">;
       value: string;
       description: string;
       weight: number;
@@ -213,7 +233,7 @@ export type NetworkSummary = {
 export type FaroEvent = {
   id: string;
   timestamp: string;
-  type:
+  type: OpenString<
     | "dns.query"
     | "dns.blocked"
     | "device.first_seen"
@@ -223,8 +243,8 @@ export type FaroEvent = {
     | "dns.reload"
     | "dns.reload_failed"
     | "upstream.changed"
-    | string;
-  severity: "info" | "success" | "warning" | "critical" | string;
+  >;
+  severity: OpenString<"info" | "success" | "warning" | "critical">;
   title: string;
   description: string;
   client_ip?: string | null;
@@ -256,13 +276,13 @@ export type HealthCard = {
   label: string;
   value: string;
   detail: string;
-  status: "healthy" | "info" | "warning" | "critical" | string;
+  status: OpenString<"healthy" | "info" | "warning" | "critical">;
 };
 
 export type DashboardStory = {
   title: string;
   body: string;
-  tone: "success" | "info" | "warning" | "critical" | string;
+  tone: OpenString<"success" | "info" | "warning" | "critical">;
 };
 
 export type WhatsNewItem = {
@@ -384,7 +404,7 @@ export type MaintenanceStorage = {
 };
 
 export type MaintenanceStatus = {
-  status: "healthy" | "degraded" | string;
+  status: OpenString<"healthy" | "degraded">;
   process_memory_bytes: number;
   uptime_seconds: number;
   storage: MaintenanceStorage;
@@ -438,7 +458,7 @@ export type UnifiStatus = {
   site_id: string;
   site_name: string;
   api_key_configured: boolean;
-  tls_mode: "verified" | "pinned" | string;
+  tls_mode: OpenString<"verified" | "pinned">;
   tls_fingerprint?: string;
   last_sync_at?: string;
   last_error?: string;
@@ -564,7 +584,9 @@ async function backupRequest(path: string, init: RequestInit): Promise<Response>
 }
 
 export const api = {
-  authStatus: () => request<AuthStatus>("/api/auth/status"),
+	version: () => request<AppVersion>("/api/version"),
+	versionCheck: () => request<VersionCheck>("/api/version/check"),
+	authStatus: () => request<AuthStatus>("/api/auth/status"),
   setupAuth: (username: string, password: string) => request<{ ok: boolean; username: string }>("/api/auth/setup", { method: "POST", body: JSON.stringify({ username, password }) }),
   login: (username: string, password: string) => request<{ ok: boolean; username: string }>("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) }),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),

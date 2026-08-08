@@ -13,70 +13,70 @@ import (
 	"github.com/derek/faro/internal/db"
 )
 
-func (s *Handler) settings(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
+func (handler *Handler) settings(responseWriter http.ResponseWriter, request *http.Request) {
+	switch request.Method {
 	case http.MethodGet:
-		s.readSettings(w, r)
+		handler.readSettings(responseWriter, request)
 	case http.MethodPut:
-		s.updateSettings(w, r)
+		handler.updateSettings(responseWriter, request)
 	default:
-		methodNotAllowed(w)
+		methodNotAllowed(responseWriter)
 	}
 }
 
-func (s *Handler) readSettings(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.store.DB.QueryContext(r.Context(), `SELECT key, value, updated_at FROM settings ORDER BY key`)
+func (handler *Handler) readSettings(responseWriter http.ResponseWriter, request *http.Request) {
+	rows, err := handler.store.DB.QueryContext(request.Context(), `SELECT key, value, updated_at FROM settings ORDER BY key`)
 	if err != nil {
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return
 	}
 	defer logActionError("close settings rows", rows.Close)
-	writeRows(w, rows)
+	writeRows(responseWriter, rows)
 }
 
-func (s *Handler) updateSettings(w http.ResponseWriter, r *http.Request) {
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
+func (handler *Handler) updateSettings(responseWriter http.ResponseWriter, request *http.Request) {
+	handler.configMu.Lock()
+	defer handler.configMu.Unlock()
 	var input map[string]string
-	if !decode(w, r, &input) {
+	if !decode(responseWriter, request, &input) {
 		return
 	}
-	oldUpstream := settingValue(r.Context(), s.store.DB, "upstream_dns")
-	oldTransport := settingValue(r.Context(), s.store.DB, "upstream_transport")
+	oldUpstream := settingValue(request.Context(), handler.store.DB, "upstream_dns")
+	oldTransport := settingValue(request.Context(), handler.store.DB, "upstream_transport")
 	previous := make(map[string]*string, len(input))
-	tx, err := s.store.DB.BeginTx(r.Context(), nil)
+	tx, err := handler.store.DB.BeginTx(request.Context(), nil)
 	if err != nil {
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
 	requiresReload := false
 	for key, rawValue := range input {
-		previous[key], err = previousSetting(r.Context(), tx, key)
+		previous[key], err = previousSetting(request.Context(), tx, key)
 		if err != nil {
-			writeError(w, err)
+			writeError(responseWriter, err)
 			return
 		}
 		value, normalizeErr := normalizeSettingValue(key, rawValue)
 		if normalizeErr != nil {
-			writeBadRequest(w, normalizeErr)
+			writeBadRequest(responseWriter, normalizeErr)
 			return
 		}
 		requiresReload = requiresReload || settingRequiresReload(key)
-		if _, err := tx.ExecContext(r.Context(), `INSERT INTO settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, key, value); err != nil {
-			writeError(w, err)
+		if _, err := tx.ExecContext(request.Context(), `INSERT INTO settings(key, value, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`, key, value); err != nil {
+			writeError(responseWriter, err)
 			return
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return
 	}
-	if requiresReload && !s.applySettingsReload(w, r, previous) {
+	if requiresReload && !handler.applySettingsReload(responseWriter, request, previous) {
 		return
 	}
-	s.recordUpstreamChange(r.Context(), input, oldUpstream, oldTransport)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	handler.recordUpstreamChange(request.Context(), input, oldUpstream, oldTransport)
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true})
 }
 
 func previousSetting(ctx context.Context, tx *sql.Tx, key string) (*string, error) {
@@ -148,22 +148,22 @@ func settingRequiresReload(key string) bool {
 	}
 }
 
-func (s *Handler) applySettingsReload(w http.ResponseWriter, r *http.Request, previous map[string]*string) bool {
-	if err := s.reloader.Apply(r.Context()); err != nil {
-		rollbackCtx := context.WithoutCancel(r.Context())
-		s.restoreSettings(rollbackCtx, previous)
-		_ = s.reloader.Apply(rollbackCtx)
-		s.recordEvent(r.Context(), eventInput{
+func (handler *Handler) applySettingsReload(responseWriter http.ResponseWriter, request *http.Request, previous map[string]*string) bool {
+	if err := handler.reloader.Apply(request.Context()); err != nil {
+		rollbackCtx := context.WithoutCancel(request.Context())
+		handler.restoreSettings(rollbackCtx, previous)
+		_ = handler.reloader.Apply(rollbackCtx)
+		handler.recordEvent(request.Context(), eventInput{
 			Type:        "dns.reload_failed",
 			Severity:    "critical",
 			Title:       "DNS reload failed",
 			Description: err.Error(),
 			Source:      "settings",
 		})
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return false
 	}
-	s.recordEvent(r.Context(), eventInput{
+	handler.recordEvent(request.Context(), eventInput{
 		Type:        "dns.reload",
 		Severity:    "success",
 		Title:       "DNS reloaded",
@@ -173,7 +173,7 @@ func (s *Handler) applySettingsReload(w http.ResponseWriter, r *http.Request, pr
 	return true
 }
 
-func (s *Handler) recordUpstreamChange(ctx context.Context, input map[string]string, oldUpstream, oldTransport string) {
+func (handler *Handler) recordUpstreamChange(ctx context.Context, input map[string]string, oldUpstream, oldTransport string) {
 	nextUpstream, upstreamChanged := input["upstream_dns"]
 	nextTransport, transportChanged := input["upstream_transport"]
 	upstreamChanged = upstreamChanged && strings.TrimSpace(nextUpstream) != strings.TrimSpace(oldUpstream)
@@ -187,7 +187,7 @@ func (s *Handler) recordUpstreamChange(ctx context.Context, input map[string]str
 	if !transportChanged {
 		nextTransport = oldTransport
 	}
-	s.recordEvent(ctx, eventInput{
+	handler.recordEvent(ctx, eventInput{
 		Type:        "upstream.changed",
 		Severity:    "info",
 		Title:       "Upstreams changed",
@@ -200,8 +200,8 @@ func (s *Handler) recordUpstreamChange(ctx context.Context, input map[string]str
 		},
 		Source: "settings",
 	})
-	if s.upstreams != nil {
-		s.upstreams.Trigger()
+	if handler.upstreams != nil {
+		handler.upstreams.Trigger()
 	}
 }
 
@@ -249,8 +249,8 @@ func normalizeUpstreamAddresses(value string) (string, error) {
 	return strings.Join(normalized, ","), nil
 }
 
-func (s *Handler) restoreSettings(ctx context.Context, previous map[string]*string) {
-	tx, err := s.store.DB.BeginTx(ctx, nil)
+func (handler *Handler) restoreSettings(ctx context.Context, previous map[string]*string) {
+	tx, err := handler.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return
 	}

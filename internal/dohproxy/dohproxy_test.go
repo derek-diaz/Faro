@@ -48,14 +48,14 @@ func TestCatalogReturnsIndependentCopy(t *testing.T) {
 
 func TestExchangeUsesRFC8484WireFormat(t *testing.T) {
 	query := probeQuery(0x1234)
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Errorf("method = %s, want POST", r.Method)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", request.Method)
 		}
-		if r.Header.Get("Content-Type") != dnsMessageContentType || r.Header.Get("Accept") != dnsMessageContentType {
-			t.Errorf("unexpected DoH headers: %#v", r.Header)
+		if request.Header.Get("Content-Type") != dnsMessageContentType || request.Header.Get("Accept") != dnsMessageContentType {
+			t.Errorf("unexpected DoH headers: %#v", request.Header)
 		}
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(request.Body)
 		if err != nil {
 			t.Error(err)
 			return
@@ -63,8 +63,8 @@ func TestExchangeUsesRFC8484WireFormat(t *testing.T) {
 		response := append([]byte(nil), body...)
 		response[2] |= 0x80
 		response[3] |= 0x80
-		w.Header().Set("Content-Type", dnsMessageContentType)
-		_, _ = w.Write(response)
+		responseWriter.Header().Set("Content-Type", dnsMessageContentType)
+		_, _ = responseWriter.Write(response)
 	}))
 	defer server.Close()
 
@@ -78,9 +78,9 @@ func TestExchangeUsesRFC8484WireFormat(t *testing.T) {
 }
 
 func TestExchangeRejectsNonDNSResponse(t *testing.T) {
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = w.Write([]byte("<html></html>"))
+	server := httptest.NewTLSServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.Header().Set("Content-Type", "text/html")
+		_, _ = responseWriter.Write([]byte("<html></html>"))
 	}))
 	defer server.Close()
 	if _, err := exchangeWithClient(context.Background(), server.URL, probeQuery(1), server.Client()); err == nil {
@@ -114,5 +114,63 @@ func TestReloadRejectsEncryptedCustomResolverWithoutReplacingState(t *testing.T)
 	}
 	if got := len(proxy.state.Load().clients); got != 1 {
 		t.Fatalf("failed reload replaced working state: clients = %d", got)
+	}
+}
+
+func TestReloadRejectsUnknownTransportWithoutReplacingState(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB.Exec(`
+		UPDATE settings SET value = 'encrypted' WHERE key = 'upstream_transport';
+		UPDATE settings SET value = '1.1.1.1' WHERE key = 'upstream_dns'`); err != nil {
+		t.Fatal(err)
+	}
+	proxy := New(store, "127.0.0.1:0")
+	if err := proxy.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`UPDATE settings SET value = 'invalid' WHERE key = 'upstream_transport'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := proxy.Reload(context.Background()); err == nil {
+		t.Fatal("unknown upstream transport was accepted")
+	}
+	if got := len(proxy.state.Load().clients); got != 1 {
+		t.Fatalf("invalid reload replaced working encrypted state: clients = %d", got)
+	}
+}
+
+func TestAllSelectedDoHFailuresReturnVisibleSERVFAIL(t *testing.T) {
+	servers := make([]*httptest.Server, 0, 2)
+	clients := make([]*endpointClient, 0, 2)
+	for serverIndex := 0; serverIndex < 2; serverIndex++ {
+		server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+			http.Error(responseWriter, "upstream unavailable", http.StatusServiceUnavailable)
+		}))
+		servers = append(servers, server)
+		clients = append(clients, &endpointClient{
+			endpoint: Endpoint{URL: server.URL},
+			client:   server.Client(),
+		})
+	}
+	for _, server := range servers {
+		defer server.Close()
+	}
+
+	proxy := &Proxy{concurrent: make(chan struct{}, 1)}
+	proxy.state.Store(&resolverState{clients: clients})
+	query := probeQuery(0x4321)
+	response := proxy.response(context.Background(), query)
+	if len(response) < 12 {
+		t.Fatalf("all-provider failure returned no DNS response: %x", response)
+	}
+	if binary.BigEndian.Uint16(response[:2]) != 0x4321 {
+		t.Fatalf("SERVFAIL changed the query ID: %x", response[:12])
+	}
+	if response[2]&0x80 == 0 || response[3]&0x0f != 2 {
+		t.Fatalf("all-provider failure was not visible as SERVFAIL: %x", response[:12])
 	}
 }

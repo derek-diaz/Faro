@@ -50,21 +50,21 @@ func NewTailer(store *db.Store, path string) *Tailer {
 	return &Tailer{Store: store, Path: path}
 }
 
-func (t *Tailer) Run(ctx context.Context) {
+func (tailer *Tailer) Run(ctx context.Context) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	cursor, loaded := loadCursor(t.Path + cursorSuffix)
+	cursor, loaded := loadCursor(tailer.Path + cursorSuffix)
 	if !loaded {
-		cursor = cursorAtEnd(t.Path)
-		_ = saveCursor(t.Path+cursorSuffix, cursor)
+		cursor = cursorAtEnd(tailer.Path)
+		_ = saveCursor(tailer.Path+cursorSuffix, cursor)
 	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			next, err := t.readAvailable(ctx, cursor)
+			next, err := tailer.readAvailable(ctx, cursor)
 			if err != nil {
 				if !os.IsNotExist(err) {
 					log.Printf("query log read failed: %v", err)
@@ -72,7 +72,7 @@ func (t *Tailer) Run(ctx context.Context) {
 				continue
 			}
 			cursor = next
-			if err := saveCursor(t.Path+cursorSuffix, cursor); err != nil {
+			if err := saveCursor(tailer.Path+cursorSuffix, cursor); err != nil {
 				log.Printf("query log cursor save failed: %v", err)
 			}
 		}
@@ -96,8 +96,8 @@ func cursorAtEnd(path string) logCursor {
 	return logCursor{Identity: fileIdentity(file), Offset: stat.Size()}
 }
 
-func (t *Tailer) readAvailable(ctx context.Context, cursor logCursor) (next logCursor, err error) {
-	file, err := os.Open(t.Path)
+func (tailer *Tailer) readAvailable(ctx context.Context, cursor logCursor) (next logCursor, err error) {
+	file, err := os.Open(tailer.Path)
 	if err != nil {
 		return cursor, err
 	}
@@ -118,20 +118,20 @@ func (t *Tailer) readAvailable(ctx context.Context, cursor logCursor) (next logC
 		if currentInfo.Size() < offset {
 			offset = 0
 		}
-		position, err := t.readOpenFile(ctx, file, offset)
+		position, err := tailer.readOpenFile(ctx, file, offset)
 		if err != nil {
 			return cursor, err
 		}
 		return logCursor{Identity: currentIdentity, Offset: position}, nil
 	}
 
-	rotatedIndex := findRotatedIndex(t.Path, cursor.Identity)
+	rotatedIndex := findRotatedIndex(tailer.Path, cursor.Identity)
 	if rotatedIndex > 0 {
-		if _, err := t.readPath(ctx, rotatedPath(t.Path, rotatedIndex), cursor.Offset); err != nil {
+		if _, err := tailer.readPath(ctx, rotatedPath(tailer.Path, rotatedIndex), cursor.Offset); err != nil {
 			return cursor, err
 		}
 		for index := rotatedIndex - 1; index >= 1; index-- {
-			if _, err := t.readPath(ctx, rotatedPath(t.Path, index), 0); err != nil {
+			if _, err := tailer.readPath(ctx, rotatedPath(tailer.Path, index), 0); err != nil {
 				return cursor, err
 			}
 		}
@@ -139,14 +139,14 @@ func (t *Tailer) readAvailable(ctx context.Context, cursor logCursor) (next logC
 		log.Printf("query log rotated beyond retained backups; some raw entries may have been skipped")
 	}
 
-	position, err := t.readOpenFile(ctx, file, 0)
+	position, err := tailer.readOpenFile(ctx, file, 0)
 	if err != nil {
 		return cursor, err
 	}
 	return logCursor{Identity: currentIdentity, Offset: position}, nil
 }
 
-func (t *Tailer) readPath(ctx context.Context, path string, offset int64) (position int64, err error) {
+func (tailer *Tailer) readPath(ctx context.Context, path string, offset int64) (position int64, err error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return offset, err
@@ -156,17 +156,17 @@ func (t *Tailer) readPath(ctx context.Context, path string, offset int64) (posit
 			err = errors.Join(err, closeErr)
 		}
 	}()
-	return t.readOpenFile(ctx, file, offset)
+	return tailer.readOpenFile(ctx, file, offset)
 }
 
-func (t *Tailer) readOpenFile(ctx context.Context, file *os.File, offset int64) (int64, error) {
+func (tailer *Tailer) readOpenFile(ctx context.Context, file *os.File, offset int64) (int64, error) {
 	if _, err := file.Seek(offset, 0); err != nil {
 		return offset, err
 	}
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		t.insert(ctx, scanner.Text())
+		tailer.insert(ctx, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {
 		return offset, err
@@ -268,22 +268,26 @@ func rotatedPath(path string, index int) string {
 	return path + "." + strconv.Itoa(index)
 }
 
-func (t *Tailer) insert(ctx context.Context, line string) {
+func (tailer *Tailer) insert(ctx context.Context, line string) {
 	entry, ok := parseLine(line)
 	if !ok {
 		return
 	}
-	t.insertParsed(ctx, entry)
+	tailer.insertParsed(ctx, entry)
 }
 
-func (t *Tailer) insertParsed(ctx context.Context, entry logEntry) {
-	deviceID, identityErr := deviceidentity.ResolveAddress(ctx, t.Store, entry.clientIP, "dns")
+func (tailer *Tailer) insertParsed(ctx context.Context, entry logEntry) {
+	if !tailer.Store.ActivityStorageWriteAllowed() {
+		return
+	}
+	deviceID, identityErr := deviceidentity.ResolveAddress(ctx, tailer.Store, entry.clientIP, "dns")
 	if identityErr != nil {
+		tailer.Store.ReportActivityWriteFailure(identityErr)
 		log.Printf("resolve DNS client identity failed: %v", identityErr)
 	}
-	decision := coredns.ExplainDomainForClient(ctx, t.Store, entry.domain, entry.clientIP)
+	decision := coredns.ExplainDomainForClient(ctx, tailer.Store, entry.domain, entry.clientIP)
 	action := decision.Action
-	source := sourceForEntry(ctx, t.Store, entry, decision)
+	source := sourceForEntry(ctx, tailer.Store, entry, decision)
 	decision.Upstream = entry.upstream
 	decision.ResponseCode = entry.rcode
 	decision.CapturedAt = time.Now().UTC().Format(time.RFC3339)
@@ -294,13 +298,16 @@ func (t *Tailer) insertParsed(ctx context.Context, entry logEntry) {
 		metadata = []byte("{}")
 	}
 
-	_, err = t.Store.DB.ExecContext(ctx, `
+	_, err = tailer.Store.DB.ExecContext(ctx, `
 		INSERT INTO dns_queries(timestamp, client_ip, device_id, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata)
 		VALUES(?, ?, NULLIF(?, 0), ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, time.Now().UTC().Format(time.RFC3339), entry.clientIP, deviceID, entry.domain, entry.queryType, action, source, entry.upstream, entry.latencyMS, entry.rcode, decision.Reason, string(metadata))
 	if err != nil {
+		tailer.Store.ReportActivityWriteFailure(err)
 		log.Printf("insert dns query failed: %v", err)
+		return
 	}
+	tailer.Store.ReportActivityWriteSuccess()
 }
 
 func sourceForEntry(ctx context.Context, store *db.Store, entry logEntry, decision coredns.DomainDecision) string {

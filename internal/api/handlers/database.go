@@ -24,13 +24,13 @@ func rollbackTransaction(tx *sql.Tx) {
 	}
 }
 
-func writeRows(w http.ResponseWriter, rows *sql.Rows) {
+func writeRows(responseWriter http.ResponseWriter, rows *sql.Rows) {
 	items, err := scanRows(rows)
 	if err != nil {
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, items)
+	writeJSON(responseWriter, http.StatusOK, items)
 }
 
 func scanRows(rows *sql.Rows) ([]map[string]any, error) {
@@ -41,8 +41,8 @@ func scanRows(rows *sql.Rows) ([]map[string]any, error) {
 	items := make([]map[string]any, 0)
 	values := make([]any, len(columns))
 	pointers := make([]any, len(columns))
-	for i := range values {
-		pointers[i] = &values[i]
+	for index := range values {
+		pointers[index] = &values[index]
 	}
 	for rows.Next() {
 		if err := rows.Scan(pointers...); err != nil {
@@ -58,12 +58,12 @@ func scanRows(rows *sql.Rows) ([]map[string]any, error) {
 
 func databaseRow(columns []string, values []any) map[string]any {
 	row := make(map[string]any, len(columns))
-	for i, column := range columns {
+	for index, column := range columns {
 		if column == "decision_metadata" {
-			row["decision"] = metadataMap(decisionMetadataString(values[i]))
+			row["decision"] = metadataMap(decisionMetadataString(values[index]))
 			continue
 		}
-		switch value := values[i].(type) {
+		switch value := values[index].(type) {
 		case []byte:
 			row[column] = string(value)
 		case int64:
@@ -202,10 +202,10 @@ func percentage64(part, total float64) float64 {
 	return float64(int(part/total*1000+0.5)) / 10
 }
 
-func todayStart(r *http.Request) string {
+func todayStart(request *http.Request) string {
 	timezone := ""
-	if r != nil {
-		timezone = r.Header.Get("X-Faro-Timezone")
+	if request != nil {
+		timezone = request.Header.Get("X-Faro-Timezone")
 	}
 	return localDayStart(time.Now(), timezone)
 }

@@ -1,10 +1,18 @@
 import { Activity, Ban, CheckCircle2, ChevronLeft, ChevronRight, Filter, Globe2, Search, Settings2, ShieldCheck, ShieldX, X } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { tableFeatures, useTable } from "@tanstack/react-table";
+import type { ColumnDef } from "@tanstack/react-table";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, type ActivityPage, type FaroEvent } from "../api/client";
+import { ActivityTimePicker, activityTimeRangeLabel, type ActivityTimeRange } from "../components/ActivityTimePicker";
 import { DomainFavicon } from "../components/DomainFavicon";
 import { EmptyState } from "../components/EmptyState";
 import { ResolutionSource } from "../components/ResolutionSource";
 import { formatDate, formatTime } from "../utils/dateFormatting";
+
+const ActivityTimeline = lazy(async () => {
+  const module = await import("../components/ActivityTimeline");
+  return { default: module.ActivityTimeline };
+});
 
 type QueryLogProps = {
   readonly onDomainSelect: (domain: string) => void;
@@ -20,8 +28,11 @@ const emptyActivity: ActivityPage = {
   page_size: PAGE_SIZE,
   total: 0,
   total_pages: 0,
-  counts: { all: 0, dns: 0, cache: 0, upstream: 0, blocked: 0, system: 0 }
+  counts: { all: 0, dns: 0, cache: 0, upstream: 0, blocked: 0, system: 0 },
+  timeline: null
 };
+
+const queryLogFeatures = tableFeatures({});
 
 export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
   const [searchInput, setSearchInput] = useState("");
@@ -31,6 +42,7 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
   const [activity, setActivity] = useState<ActivityPage>(emptyActivity);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
+  const [timeRange, setTimeRange] = useState<ActivityTimeRange>({ preset: "24h" });
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -38,27 +50,27 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
     let active = true;
     setLoading(true);
     setLoadError("");
-    api.events(search, filter, page, PAGE_SIZE)
+    api.events(search, filter, page, PAGE_SIZE, timeRange.preset, timeRange.from, timeRange.to)
       .then((result) => { if (active) setActivity(result); })
       .catch((error_) => { if (active) setLoadError(error_ instanceof Error ? error_.message : "Activity could not be loaded."); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [search, filter, page, refreshVersion]);
+  }, [search, filter, page, refreshVersion, timeRange]);
 
   useEffect(() => {
     if (page !== 1) return undefined;
     const timer = window.setInterval(() => {
-      void api.events(search, filter, 1, PAGE_SIZE).then(setActivity).catch(() => undefined);
+      void api.events(search, filter, 1, PAGE_SIZE, timeRange.preset, timeRange.from, timeRange.to).then(setActivity).catch(() => undefined);
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [search, filter, page]);
+  }, [search, filter, page, timeRange]);
 
   const counts = activity.counts;
   const visibleEvents = activity.items;
   const firstResult = activity.total === 0 ? 0 : (activity.page - 1) * activity.page_size + 1;
   const lastResult = Math.min(activity.page * activity.page_size, activity.total);
 
-  async function addRule(domain: string, action: "allow" | "block") {
+  const addRule = useCallback(async (domain: string, action: "allow" | "block") => {
     setBusy(`${action}:${domain}`);
     try {
       if (action === "allow") await api.addAllow(domain);
@@ -67,7 +79,7 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
     } finally {
       setBusy(null);
     }
-  }
+  }, []);
 
   function clearSearch() {
     setSearchInput("");
@@ -80,6 +92,81 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
     setFilter(nextFilter);
     setPage(1);
   }
+
+  const eventColumns = useMemo<ColumnDef<typeof queryLogFeatures, FaroEvent>[]>(() => [
+    {
+      accessorKey: "timestamp",
+      header: "Time",
+      cell: ({ row }) => <><strong>{formatTime(row.original.timestamp)}</strong><span>{formatDate(row.original.timestamp)}</span></>
+    },
+    {
+      id: "result",
+      header: "Result",
+      cell: ({ row }) => <EventResult event={row.original} />
+    },
+    {
+      id: "domain",
+      header: "Domain or event",
+      cell: ({ row }) => {
+        const event = row.original;
+        const isDNS = event.type === "dns.query" || event.type === "dns.blocked";
+        const domain = event.domain ?? "";
+        return domain ? (
+          <>
+            <button className="table-domain-link" type="button" onClick={() => onDomainSelect(domain)}>
+              <DomainFavicon domain={domain} />
+              <span>{domain}</span>
+            </button>
+            <small>{isDNS ? event.description : event.description || event.title}</small>
+          </>
+        ) : (
+          <span className="system-event-title"><EventMark event={event} /><strong>{event.title}</strong></span>
+        );
+      }
+    },
+    {
+      id: "device",
+      header: "Device",
+      cell: ({ row }) => row.original.client_ip
+        ? <button className="device-link" type="button" onClick={() => onDeviceSelect(row.original.client_ip!)}>{row.original.client_ip}</button>
+        : <span className="empty-cell">—</span>
+    },
+    {
+      id: "type",
+      header: "Type",
+      cell: ({ row }) => <EventType event={row.original} />
+    },
+    {
+      id: "source",
+      header: "Source",
+      cell: ({ row }) => <ResolutionSource source={row.original.source} upstream={eventUpstream(row.original)} />
+    },
+    {
+      id: "actions",
+      header: () => <span className="sr-only">Actions</span>,
+      enableSorting: false,
+      cell: ({ row }) => {
+        const event = row.original;
+        const domain = event.domain ?? "";
+        const isBlocked = event.type === "dns.blocked";
+        return domain ? (
+          <div className="table-icon-actions">
+            <button type="button" title={`Block ${domain}`} aria-label={`Block ${domain}`} disabled={busy !== null || isBlocked} onClick={() => void addRule(domain, "block")}><Ban size={16} /></button>
+            <button type="button" title={`Allow ${domain}`} aria-label={`Allow ${domain}`} disabled={busy !== null} onClick={() => void addRule(domain, "allow")}><ShieldCheck size={16} /></button>
+          </div>
+        ) : null;
+      }
+    }
+  ], [addRule, busy, onDeviceSelect, onDomainSelect]);
+
+  const eventTable = useTable({
+    features: queryLogFeatures,
+    data: visibleEvents,
+    columns: eventColumns,
+    getRowId: (event) => event.id
+  });
+
+  const rangeLabel = activityTimeRangeLabel(timeRange);
 
   return (
     <div className="activity-explorer">
@@ -98,6 +185,20 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
           <button className="clear-search" type="button" disabled={!searchInput && !search} onClick={clearSearch} aria-label="Clear search"><X size={16} /></button>
           <button className="search-submit" type="submit">Search</button>
         </form>
+      </section>
+
+      <section className="panel activity-timeline-panel" aria-label="Activity timeline" aria-busy={loading}>
+        <div className="activity-timeline-header">
+          <div>
+            <span className="activity-timeline-kicker">Activity timeline</span>
+            <h2>Queries and events over time</h2>
+            <p>See when activity happened, then narrow the table to the same window.</p>
+          </div>
+          <ActivityTimePicker value={timeRange} onChange={(nextRange) => { setTimeRange(nextRange); setPage(1); }} />
+        </div>
+        <Suspense fallback={<div className="activity-timeline-chart" data-loading="true"><div className="activity-timeline-empty">Loading timeline…</div></div>}>
+          <ActivityTimeline timeline={activity.timeline} rangeLabel={rangeLabel} loading={loading} />
+        </Suspense>
       </section>
 
       <section className="activity-summary" aria-label="Activity summary">
@@ -128,57 +229,26 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
           <div className="activity-table-wrap">
             <table className="monitor-table event-table">
               <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Result</th>
-                  <th>Domain or event</th>
-                  <th>Device</th>
-                  <th>Type</th>
-                  <th>Source</th>
-                  <th><span className="sr-only">Actions</span></th>
-                </tr>
+                {eventTable.getHeaderGroups().map((headerGroup) => (
+                  <tr key={headerGroup.id}>
+                    {headerGroup.headers.map((header) => (
+                      <th key={header.id}>
+                        {header.isPlaceholder ? null : <eventTable.FlexRender header={header} />}
+                      </th>
+                    ))}
+                  </tr>
+                ))}
               </thead>
               <tbody>
-                {visibleEvents.map((event) => {
-                  const isDNS = event.type === "dns.query" || event.type === "dns.blocked";
-                  const isBlocked = event.type === "dns.blocked";
-                  const domain = event.domain ?? "";
-                  return (
-                    <tr key={event.id}>
-                      <td className="time-cell">
-                        <strong>{formatTime(event.timestamp)}</strong>
-                        <span>{formatDate(event.timestamp)}</span>
+                {eventTable.getRowModel().rows.map((row) => (
+                  <tr key={row.id}>
+                    {row.getAllCells().map((cell) => (
+                      <td key={cell.id} className={eventCellClass(cell.column.id)}>
+                        <eventTable.FlexRender cell={cell} />
                       </td>
-                      <td><EventResult event={event} /></td>
-                      <td className="event-subject-cell">
-                        {domain ? (
-                          <button className="table-domain-link" type="button" onClick={() => onDomainSelect(domain)}>
-                            <DomainFavicon domain={domain} />
-                            <span>{domain}</span>
-                          </button>
-                        ) : (
-                          <span className="system-event-title"><EventMark event={event} /><strong>{event.title}</strong></span>
-                        )}
-                        <small>{isDNS ? event.description : event.description || event.title}</small>
-                      </td>
-                      <td>
-                        {event.client_ip ? (
-                          <button className="device-link" type="button" onClick={() => onDeviceSelect(event.client_ip!)}>{event.client_ip}</button>
-                        ) : <span className="empty-cell">—</span>}
-                      </td>
-                      <td><EventType event={event} /></td>
-                      <td><ResolutionSource source={event.source} upstream={eventUpstream(event)} /></td>
-                      <td className="event-actions-cell">
-                        {domain && (
-                          <div className="table-icon-actions">
-                            <button type="button" title={`Block ${domain}`} aria-label={`Block ${domain}`} disabled={busy !== null || isBlocked} onClick={() => void addRule(domain, "block")}><Ban size={16} /></button>
-                            <button type="button" title={`Allow ${domain}`} aria-label={`Allow ${domain}`} disabled={busy !== null} onClick={() => void addRule(domain, "allow")}><ShieldCheck size={16} /></button>
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
+                    ))}
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -196,6 +266,13 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
       </section>
     </div>
   );
+}
+
+function eventCellClass(columnID: string) {
+  if (columnID === "timestamp") return "time-cell";
+  if (columnID === "domain") return "event-subject-cell";
+  if (columnID === "actions") return "event-actions-cell";
+  return undefined;
 }
 
 function eventUpstream(event: FaroEvent) {

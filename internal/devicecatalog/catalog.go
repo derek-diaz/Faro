@@ -265,25 +265,25 @@ func validateAddressSignals(definition Definition) error {
 	return nil
 }
 
-func (m *Manager) Predict(name, address string, domains []string) Prediction {
-	m.refresh(false)
-	m.mu.Lock()
-	catalog := m.current
-	m.mu.Unlock()
+func (manager *Manager) Predict(name, address string, domains []string) Prediction {
+	manager.refresh(false)
+	manager.mu.Lock()
+	catalog := manager.current
+	manager.mu.Unlock()
 	return catalog.Predict(name, address, domains)
 }
 
-func (m *Manager) Info() Info {
-	m.refresh(false)
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (manager *Manager) Info() Info {
+	manager.refresh(false)
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
 	return Info{
-		SchemaVersion:  m.current.SchemaVersion,
-		CatalogVersion: m.current.CatalogVersion,
-		Source:         m.source,
-		Definitions:    len(m.current.Definitions),
-		LastError:      m.lastError,
-		ExternalPath:   m.path,
+		SchemaVersion:  manager.current.SchemaVersion,
+		CatalogVersion: manager.current.CatalogVersion,
+		Source:         manager.source,
+		Definitions:    len(manager.current.Definitions),
+		LastError:      manager.lastError,
+		ExternalPath:   manager.path,
 	}
 }
 
@@ -298,11 +298,11 @@ func (catalog Catalog) Predict(name, address string, domains []string) Predictio
 	if len(candidates) == 0 {
 		return unknownPrediction(catalog.CatalogVersion, inputHash, now, nil)
 	}
-	sort.SliceStable(candidates, func(i, j int) bool {
-		if candidates[i].score == candidates[j].score {
-			return candidates[i].definition.ID < candidates[j].definition.ID
+	sort.SliceStable(candidates, func(leftIndex, rightIndex int) bool {
+		if candidates[leftIndex].score == candidates[rightIndex].score {
+			return candidates[leftIndex].definition.ID < candidates[rightIndex].definition.ID
 		}
-		return candidates[i].score > candidates[j].score
+		return candidates[leftIndex].score > candidates[rightIndex].score
 	})
 	if len(candidates) > 1 && candidates[0].score == candidates[1].score {
 		return unknownPrediction(catalog.CatalogVersion, inputHash, now, []Evidence{{
@@ -422,54 +422,54 @@ func unknownPrediction(catalogVersion, signalHashValue, evaluatedAt string, evid
 	}
 }
 
-func (m *Manager) refresh(force bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.path == "" {
+func (manager *Manager) refresh(force bool) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.path == "" {
 		return
 	}
 	now := time.Now()
-	if !force && now.Sub(m.lastChecked) < m.checkInterval {
+	if !force && now.Sub(manager.lastChecked) < manager.checkInterval {
 		return
 	}
-	m.lastChecked = now
-	info, err := os.Stat(m.path)
+	manager.lastChecked = now
+	info, err := os.Stat(manager.path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if m.source == "external" {
-				m.current = m.embedded
-				m.source = "embedded"
-				m.lastModified = time.Time{}
-				m.lastSize = 0
+			if manager.source == "external" {
+				manager.current = manager.embedded
+				manager.source = "embedded"
+				manager.lastModified = time.Time{}
+				manager.lastSize = 0
 			}
-			m.lastError = ""
+			manager.lastError = ""
 			return
 		}
-		m.lastError = err.Error()
+		manager.lastError = err.Error()
 		return
 	}
 	if info.Size() > maxCatalogBytes {
-		m.lastError = fmt.Sprintf("device catalog exceeds the %d byte limit", maxCatalogBytes)
+		manager.lastError = fmt.Sprintf("device catalog exceeds the %d byte limit", maxCatalogBytes)
 		return
 	}
-	if !force && m.source == "external" && info.ModTime().Equal(m.lastModified) && info.Size() == m.lastSize {
+	if !force && manager.source == "external" && info.ModTime().Equal(manager.lastModified) && info.Size() == manager.lastSize {
 		return
 	}
-	data, err := os.ReadFile(m.path)
+	data, err := os.ReadFile(manager.path)
 	if err != nil {
-		m.lastError = err.Error()
+		manager.lastError = err.Error()
 		return
 	}
 	catalog, err := Parse(data)
 	if err != nil {
-		m.lastError = err.Error()
+		manager.lastError = err.Error()
 		return
 	}
-	m.current = catalog
-	m.source = "external"
-	m.lastModified = info.ModTime()
-	m.lastSize = info.Size()
-	m.lastError = ""
+	manager.current = catalog
+	manager.source = "external"
+	manager.lastModified = info.ModTime()
+	manager.lastSize = info.Size()
+	manager.lastError = ""
 }
 
 func ensureJSONEOF(decoder *json.Decoder) error {
@@ -510,8 +510,8 @@ func matchNameSignal(tokens map[string]bool, signal NameSignal) (bool, string) {
 
 func signalTokens(value string) map[string]bool {
 	tokens := map[string]bool{}
-	for _, token := range strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
-		return (r < 'a' || r > 'z') && (r < '0' || r > '9')
+	for _, token := range strings.FieldsFunc(strings.ToLower(value), func(runeValue rune) bool {
+		return (runeValue < 'a' || runeValue > 'z') && (runeValue < '0' || runeValue > '9')
 	}) {
 		if token != "" {
 			tokens[token] = true

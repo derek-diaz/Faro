@@ -1,4 +1,6 @@
-import { useState, type SubmitEvent } from "react";
+import { tableFeatures, useTable } from "@tanstack/react-table";
+import type { ColumnDef } from "@tanstack/react-table";
+import { useCallback, useMemo, useState, type SubmitEvent } from "react";
 import { api, type DNSRecord, type Setting } from "../api/client";
 import { EmptyState } from "../components/EmptyState";
 
@@ -14,6 +16,8 @@ const blankRecord: Omit<DNSRecord, "id"> = {
   value: "",
   description: ""
 };
+
+const localDnsFeatures = tableFeatures({});
 
 export function LocalDns({ records, settings, refresh }: LocalDnsProps) {
   const [form, setForm] = useState<Omit<DNSRecord, "id">>(blankRecord);
@@ -32,10 +36,51 @@ export function LocalDns({ records, settings, refresh }: LocalDnsProps) {
     await refresh();
   }
 
-  function startEdit(record: DNSRecord) {
+  const startEdit = useCallback((record: DNSRecord) => {
     setEditing(record);
     setForm({ hostname: record.hostname, type: record.type, value: record.value, description: record.description });
-  }
+  }, []);
+
+  const deleteRecord = useCallback(async (recordID: number) => {
+    await api.deleteRecord(recordID);
+    await refresh();
+  }, [refresh]);
+
+  const recordColumns = useMemo<ColumnDef<typeof localDnsFeatures, DNSRecord>[]>(() => [
+    {
+      accessorKey: "hostname",
+      header: "Hostname",
+      cell: ({ row }) => row.original.hostname
+    },
+    {
+      accessorKey: "type",
+      header: "Type",
+      cell: ({ row }) => row.original.type
+    },
+    {
+      accessorKey: "value",
+      header: "Value",
+      cell: ({ row }) => row.original.value
+    },
+    {
+      accessorKey: "description",
+      header: "Description",
+      cell: ({ row }) => row.original.description
+    },
+    {
+      id: "actions",
+      header: () => <span className="sr-only">Actions</span>,
+      enableSorting: false,
+      cell: ({ row }) => <div className="row-actions"><button type="button" className="secondary" onClick={() => startEdit(row.original)}>Edit</button><button type="button" className="danger" onClick={() => void deleteRecord(row.original.id)}>Delete</button></div>
+    }
+  ], [deleteRecord, startEdit]);
+
+  const recordTable = useTable({
+    features: localDnsFeatures,
+    data: records,
+    columns: recordColumns,
+    getRowId: (record) => String(record.id)
+  });
 
   return (
     <div className="two-column">
@@ -49,38 +94,14 @@ export function LocalDns({ records, settings, refresh }: LocalDnsProps) {
         <div className="table-wrap">
           <table>
             <thead>
-              <tr>
-                <th>Hostname</th>
-                <th>Type</th>
-                <th>Value</th>
-                <th>Description</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {records.map((record) => (
-                <tr key={record.id}>
-                  <td>{record.hostname}</td>
-                  <td>{record.type}</td>
-                  <td>{record.value}</td>
-                  <td>{record.description}</td>
-                  <td className="row-actions">
-                    <button type="button" className="secondary" onClick={() => startEdit(record)}>
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      className="danger"
-                      onClick={async () => {
-                        await api.deleteRecord(record.id);
-                        await refresh();
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </td>
+              {recordTable.getHeaderGroups().map((headerGroup) => (
+                <tr key={headerGroup.id}>
+                  {headerGroup.headers.map((header) => <th key={header.id}>{header.isPlaceholder ? null : <recordTable.FlexRender header={header} />}</th>)}
                 </tr>
               ))}
+            </thead>
+            <tbody>
+              {recordTable.getRowModel().rows.map((row) => <tr key={row.id}>{row.getAllCells().map((cell) => <td key={cell.id}><recordTable.FlexRender cell={cell} /></td>)}</tr>)}
             </tbody>
           </table>
         </div>

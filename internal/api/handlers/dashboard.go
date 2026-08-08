@@ -14,38 +14,38 @@ import (
 	"github.com/derek/faro/internal/upstreamhealth"
 )
 
-func (s *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
+func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(responseWriter)
 		return
 	}
-	start := todayStart(r)
-	total := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ?`, start)
-	blocked := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ? AND action = 'blocked'`, start)
-	enabledBlocklists := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM blocklists WHERE enabled = 1`)
-	blockEntries := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM blocklist_entries`)
-	topClients := grouped(r.Context(), s.store.DB, `SELECT client_ip, COUNT(*) FROM dns_queries WHERE timestamp >= ? GROUP BY client_ip ORDER BY COUNT(*) DESC LIMIT 5`, start)
-	topBlocked := grouped(r.Context(), s.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? AND action = 'blocked' GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start)
-	deviceCount := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(DISTINCT client_ip) FROM dns_queries`)
-	reloadFailures := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM events WHERE type = 'dns.reload_failed' AND timestamp >= ?`, start)
-	cacheHits := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ? AND source = 'cache'`, start)
-	upstreamQueries := scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ? AND source = 'upstream'`, start)
-	cacheLatency := scalarFloat(r.Context(), s.store.DB, `SELECT COALESCE(AVG(latency_ms), 0) FROM dns_queries WHERE timestamp >= ? AND source = 'cache'`, start)
-	upstreamLatency := scalarFloat(r.Context(), s.store.DB, `SELECT COALESCE(AVG(latency_ms), 0) FROM dns_queries WHERE timestamp >= ? AND source = 'upstream'`, start)
-	liveCache := s.coreDNSCacheMetrics(r.Context())
+	start := todayStart(request)
+	total := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ?`, start)
+	blocked := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ? AND action = 'blocked'`, start)
+	enabledBlocklists := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM blocklists WHERE enabled = 1`)
+	blockEntries := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM blocklist_entries`)
+	topClients := grouped(request.Context(), handler.store.DB, `SELECT client_ip, COUNT(*) FROM dns_queries WHERE timestamp >= ? GROUP BY client_ip ORDER BY COUNT(*) DESC LIMIT 5`, start)
+	topBlocked := grouped(request.Context(), handler.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? AND action = 'blocked' GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start)
+	deviceCount := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(DISTINCT client_ip) FROM dns_queries`)
+	reloadFailures := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM events WHERE type = 'dns.reload_failed' AND timestamp >= ?`, start)
+	cacheHits := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ? AND source = 'cache'`, start)
+	upstreamQueries := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ? AND source = 'upstream'`, start)
+	cacheLatency := scalarFloat(request.Context(), handler.store.DB, `SELECT COALESCE(AVG(latency_ms), 0) FROM dns_queries WHERE timestamp >= ? AND source = 'cache'`, start)
+	upstreamLatency := scalarFloat(request.Context(), handler.store.DB, `SELECT COALESCE(AVG(latency_ms), 0) FROM dns_queries WHERE timestamp >= ? AND source = 'upstream'`, start)
+	liveCache := handler.coreDNSCacheMetrics(request.Context())
 	upstreamSnapshot := upstreamhealth.Snapshot{Status: "unknown", Summary: "Upstream health has not been checked yet.", Items: make([]upstreamhealth.Probe, 0)}
-	if s.upstreams != nil {
-		upstreamSnapshot = s.upstreams.Snapshot()
+	if handler.upstreams != nil {
+		upstreamSnapshot = handler.upstreams.Snapshot()
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(responseWriter, http.StatusOK, map[string]any{
 		"total_queries_today":   total,
 		"blocked_queries_today": blocked,
 		"block_percentage":      percentage(blocked, total),
 		"enabled_blocklists":    enabledBlocklists,
 		"blocklist_entries":     blockEntries,
 		"cache": map[string]any{
-			"enabled":                     settingValue(r.Context(), s.store.DB, "dns_cache_enabled") != "false",
+			"enabled":                     settingValue(request.Context(), handler.store.DB, "dns_cache_enabled") != "false",
 			"metrics_available":           liveCache.available,
 			"entries":                     liveCache.entries,
 			"hits_since_restart":          liveCache.hits,
@@ -57,30 +57,30 @@ func (s *Handler) dashboard(w http.ResponseWriter, r *http.Request) {
 			"average_cache_latency_ms":    cacheLatency,
 			"average_upstream_latency_ms": upstreamLatency,
 		},
-		"network_summary": networkSummary(r.Context(), s.store.DB, networkSummaryInput{
+		"network_summary": networkSummary(request.Context(), handler.store.DB, networkSummaryInput{
 			start: start, blocked: blocked, topClients: topClients, topBlocked: topBlocked,
 			upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available,
 		}),
-		"health_cards": healthCards(r.Context(), s.store.DB, healthCardsInput{
+		"health_cards": healthCards(request.Context(), handler.store.DB, healthCardsInput{
 			total: total, blocked: blocked, enabledBlocklists: enabledBlocklists, blockEntries: blockEntries,
 			deviceCount: deviceCount, reloadFailures: reloadFailures, upstreams: upstreamSnapshot,
 			dnsMetricsAvailable: liveCache.available,
 		}),
-		"stories": dashboardStories(r.Context(), s.store.DB, dashboardStoriesInput{
+		"stories": dashboardStories(request.Context(), handler.store.DB, dashboardStoriesInput{
 			start: start, blocked: blocked, topClients: topClients, topBlocked: topBlocked,
 			reloadFailures: reloadFailures, upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available,
 		}),
-		"whats_new":                whatsNew(r.Context(), s.store.DB, start),
-		"sparklines":               dashboardSparklines(r.Context(), s.store.DB),
-		"top_queried_domains":      grouped(r.Context(), s.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start),
+		"whats_new":                whatsNew(request.Context(), handler.store.DB, start),
+		"sparklines":               dashboardSparklines(request.Context(), handler.store.DB),
+		"top_queried_domains":      grouped(request.Context(), handler.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start),
 		"top_blocked_domains":      topBlocked,
 		"top_clients":              topClients,
-		"recent_activity":          recentQueries(r.Context(), s.store.DB),
+		"recent_activity":          recentQueries(request.Context(), handler.store.DB),
 		"upstream_health":          upstreamSnapshot.Summary,
 		"upstream_health_status":   upstreamSnapshot.Status,
 		"upstream_checked_at":      upstreamSnapshot.CheckedAt,
 		"upstream_probes":          upstreamSnapshot.Items,
-		"favicon_fetching_enabled": settingValue(r.Context(), s.store.DB, "favicon_fetching_enabled"),
+		"favicon_fetching_enabled": settingValue(request.Context(), handler.store.DB, "favicon_fetching_enabled"),
 	})
 }
 
@@ -91,10 +91,10 @@ type cacheMetrics struct {
 	requests  float64
 }
 
-func (s *Handler) coreDNSCacheMetrics(ctx context.Context) cacheMetrics {
+func (handler *Handler) coreDNSCacheMetrics(ctx context.Context) cacheMetrics {
 	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, s.metricsURL, nil)
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, handler.metricsURL, nil)
 	if err != nil {
 		return cacheMetrics{}
 	}

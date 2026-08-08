@@ -28,6 +28,7 @@ type Proxy struct {
 	store      *db.Store
 	address    string
 	state      atomic.Pointer[resolverState]
+	previous   *resolverState
 	next       atomic.Uint64
 	reloadMu   sync.Mutex
 	serveOnce  sync.Once
@@ -45,15 +46,27 @@ func New(store *db.Store, address string) *Proxy {
 	}
 }
 
-func (p *Proxy) Reload(ctx context.Context) error {
-	p.reloadMu.Lock()
-	defer p.reloadMu.Unlock()
-	transport, addresses, err := configuredTransport(ctx, p.store)
+func (proxy *Proxy) Reload(ctx context.Context) error {
+	config, err := RuntimeConfigFromStore(ctx, proxy.store)
+	if err != nil {
+		return err
+	}
+	return proxy.ReloadConfig(config)
+}
+
+// ReloadConfig applies an already accepted runtime snapshot without reading
+// the control-plane database. The standalone gateway uses this path so a
+// failed API transaction cannot publish uncommitted provider settings.
+func (proxy *Proxy) ReloadConfig(config RuntimeConfig) error {
+	proxy.reloadMu.Lock()
+	defer proxy.reloadMu.Unlock()
+	transport, addresses, err := config.validate()
 	if err != nil {
 		return err
 	}
 	if transport != "encrypted" {
-		p.state.Store(&resolverState{})
+		proxy.previous = proxy.state.Load()
+		proxy.state.Store(&resolverState{})
 		return nil
 	}
 	endpoints, err := EndpointsForAddresses(addresses)
@@ -68,18 +81,40 @@ func (p *Proxy) Reload(ctx context.Context) error {
 		}
 		clients = append(clients, client)
 	}
-	p.state.Store(&resolverState{clients: clients})
+	proxy.previous = proxy.state.Load()
+	proxy.state.Store(&resolverState{clients: clients})
 	return nil
 }
 
-func (p *Proxy) Start(ctx context.Context) error {
+// RestorePrevious returns the gateway to the state it had before the most
+// recent successful Reload. CoreDNS uses this when a staged configuration is
+// rejected after the encrypted transport was prepared.
+func (proxy *Proxy) RestorePrevious(_ context.Context) error {
+	proxy.reloadMu.Lock()
+	defer proxy.reloadMu.Unlock()
+	proxy.state.Store(proxy.previous)
+	return nil
+}
+
+func (proxy *Proxy) Start(ctx context.Context) error {
+	if proxy.store == nil {
+		return errors.New("encrypted DNS gateway has no configuration store")
+	}
+	config, err := RuntimeConfigFromStore(ctx, proxy.store)
+	if err != nil {
+		return err
+	}
+	return proxy.StartWithConfig(ctx, config)
+}
+
+func (proxy *Proxy) StartWithConfig(ctx context.Context, config RuntimeConfig) error {
 	var startErr error
-	p.serveOnce.Do(func() {
-		if err := p.Reload(ctx); err != nil {
+	proxy.serveOnce.Do(func() {
+		if err := proxy.ReloadConfig(config); err != nil {
 			startErr = err
 			return
 		}
-		tcpListener, err := net.Listen("tcp", p.address)
+		tcpListener, err := net.Listen("tcp", proxy.address)
 		if err != nil {
 			startErr = fmt.Errorf("start encrypted DNS TCP gateway: %w", err)
 			return
@@ -101,13 +136,13 @@ func (p *Proxy) Start(ctx context.Context) error {
 			_ = udpConnection.Close()
 			_ = tcpListener.Close()
 		}()
-		go p.serveUDP(ctx, udpConnection)
-		go p.serveTCP(ctx, tcpListener)
+		go proxy.serveUDP(ctx, udpConnection)
+		go proxy.serveTCP(ctx, tcpListener)
 	})
 	return startErr
 }
 
-func (p *Proxy) serveUDP(ctx context.Context, connection *net.UDPConn) {
+func (proxy *Proxy) serveUDP(ctx context.Context, connection *net.UDPConn) {
 	buffer := make([]byte, maxDNSMessageBytes)
 	for {
 		n, client, err := connection.ReadFromUDP(buffer)
@@ -118,12 +153,12 @@ func (p *Proxy) serveUDP(ctx context.Context, connection *net.UDPConn) {
 			return
 		}
 		query := append([]byte(nil), buffer[:n]...)
-		go p.handleUDP(ctx, connection, client, query)
+		go proxy.handleUDP(ctx, connection, client, query)
 	}
 }
 
-func (p *Proxy) handleUDP(ctx context.Context, connection *net.UDPConn, client *net.UDPAddr, query []byte) {
-	response := p.response(ctx, query)
+func (proxy *Proxy) handleUDP(ctx context.Context, connection *net.UDPConn, client *net.UDPAddr, query []byte) {
+	response := proxy.response(ctx, query)
 	if len(response) == 0 {
 		return
 	}
@@ -132,7 +167,7 @@ func (p *Proxy) handleUDP(ctx context.Context, connection *net.UDPConn, client *
 	}
 }
 
-func (p *Proxy) serveTCP(ctx context.Context, listener net.Listener) {
+func (proxy *Proxy) serveTCP(ctx context.Context, listener net.Listener) {
 	for {
 		connection, err := listener.Accept()
 		if err != nil {
@@ -141,11 +176,11 @@ func (p *Proxy) serveTCP(ctx context.Context, listener net.Listener) {
 			}
 			return
 		}
-		go p.handleTCP(ctx, connection)
+		go proxy.handleTCP(ctx, connection)
 	}
 }
 
-func (p *Proxy) handleTCP(ctx context.Context, connection net.Conn) {
+func (proxy *Proxy) handleTCP(ctx context.Context, connection net.Conn) {
 	defer func() {
 		if err := connection.Close(); err != nil && ctx.Err() == nil {
 			log.Printf("encrypted DNS TCP connection close failed: %v", err)
@@ -159,7 +194,7 @@ func (p *Proxy) handleTCP(ctx context.Context, connection net.Conn) {
 		if err != nil {
 			return
 		}
-		if err := writeTCPResponse(connection, p.response(ctx, query)); err != nil {
+		if err := writeTCPResponse(connection, proxy.response(ctx, query)); err != nil {
 			return
 		}
 	}
@@ -189,26 +224,26 @@ func writeTCPResponse(connection net.Conn, response []byte) error {
 	return err
 }
 
-func (p *Proxy) response(ctx context.Context, query []byte) []byte {
-	if !p.acquire(ctx) {
+func (proxy *Proxy) response(ctx context.Context, query []byte) []byte {
+	if !proxy.acquire(ctx) {
 		return nil
 	}
-	defer p.release()
+	defer proxy.release()
 	queryCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
-	response, err := p.exchange(queryCtx, query)
+	response, err := proxy.exchange(queryCtx, query)
 	if err != nil {
 		return serverFailure(query)
 	}
 	return response
 }
 
-func (p *Proxy) exchange(ctx context.Context, query []byte) ([]byte, error) {
-	state := p.state.Load()
+func (proxy *Proxy) exchange(ctx context.Context, query []byte) ([]byte, error) {
+	state := proxy.state.Load()
 	if state == nil || len(state.clients) == 0 {
 		return nil, errors.New("encrypted DNS has no configured providers")
 	}
-	start := int(p.next.Add(1)-1) % len(state.clients)
+	start := int(proxy.next.Add(1)-1) % len(state.clients)
 	var lastErr error
 	for offset := range state.clients {
 		client := state.clients[(start+offset)%len(state.clients)]
@@ -224,17 +259,17 @@ func (p *Proxy) exchange(ctx context.Context, query []byte) ([]byte, error) {
 	return nil, lastErr
 }
 
-func (p *Proxy) acquire(ctx context.Context) bool {
+func (proxy *Proxy) acquire(ctx context.Context) bool {
 	select {
-	case p.concurrent <- struct{}{}:
+	case proxy.concurrent <- struct{}{}:
 		return true
 	case <-ctx.Done():
 		return false
 	}
 }
 
-func (p *Proxy) release() {
-	<-p.concurrent
+func (proxy *Proxy) release() {
+	<-proxy.concurrent
 }
 
 func configuredTransport(ctx context.Context, store *db.Store) (transport string, addresses []string, err error) {

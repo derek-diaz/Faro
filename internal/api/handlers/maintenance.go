@@ -14,38 +14,38 @@ type pruneInput struct {
 	Compact       bool `json:"compact"`
 }
 
-func (s *Handler) maintenance(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
+func (handler *Handler) maintenance(responseWriter http.ResponseWriter, request *http.Request) {
+	switch request.Method {
 	case http.MethodGet:
-		stats, err := retention.Snapshot(r.Context(), s.store)
+		stats, err := retention.Snapshot(request.Context(), handler.store)
 		if err != nil {
-			writeError(w, err)
+			writeError(responseWriter, err)
 			return
 		}
 		var memory runtime.MemStats
 		runtime.ReadMemStats(&memory)
-		writeJSON(w, http.StatusOK, map[string]any{
+		writeJSON(responseWriter, http.StatusOK, map[string]any{
 			"status":               "healthy",
 			"process_memory_bytes": memory.Alloc,
-			"uptime_seconds":       int64(time.Since(s.startedAt).Seconds()),
+			"uptime_seconds":       int64(time.Since(handler.startedAt).Seconds()),
 			"storage":              stats,
 		})
 	case http.MethodPost:
-		input := pruneInput{RetentionDays: retention.ConfiguredDays(r.Context(), s.store), Compact: true}
-		if !decode(w, r, &input) {
+		input := pruneInput{RetentionDays: retention.ConfiguredDays(request.Context(), handler.store), Compact: true}
+		if !decode(responseWriter, request, &input) {
 			return
 		}
 		if input.RetentionDays < retention.MinDays || input.RetentionDays > retention.MaxDays {
-			writeBadRequest(w, errors.New("retention_days must be between 1 and 3650"))
+			writeBadRequest(responseWriter, errors.New("retention_days must be between 1 and 3650"))
 			return
 		}
-		result, err := retention.Prune(r.Context(), s.store, input.RetentionDays, input.Compact)
+		result, err := retention.Prune(request.Context(), handler.store, input.RetentionDays, input.Compact)
 		if err != nil {
-			writeError(w, err)
+			writeError(responseWriter, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, result)
+		writeJSON(responseWriter, http.StatusOK, result)
 	default:
-		methodNotAllowed(w)
+		methodNotAllowed(responseWriter)
 	}
 }

@@ -22,27 +22,27 @@ type fakeUniFi struct {
 	clients []Client
 }
 
-func (f *fakeUniFi) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("X-API-Key") != "local-api-key" {
-		http.Error(w, `{"message":"Forbidden"}`, http.StatusForbidden)
+func (unifi *fakeUniFi) ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Header.Get("X-API-Key") != "local-api-key" {
+		http.Error(responseWriter, `{"message":"Forbidden"}`, http.StatusForbidden)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	switch r.URL.Path {
+	responseWriter.Header().Set("Content-Type", "application/json")
+	switch request.URL.Path {
 	case "/proxy/network/integration/v1/sites":
-		_ = json.NewEncoder(w).Encode(page[Site]{
+		_ = json.NewEncoder(responseWriter).Encode(page[Site]{
 			Offset: 0, Limit: 200, Count: 1, TotalCount: 1,
 			Data: []Site{{ID: "site-1", Name: "Home"}},
 		})
 	case "/proxy/network/integration/v1/sites/site-1/clients":
-		f.mu.Lock()
-		clients := append([]Client(nil), f.clients...)
-		f.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(page[Client]{
+		unifi.mu.Lock()
+		clients := append([]Client(nil), unifi.clients...)
+		unifi.mu.Unlock()
+		_ = json.NewEncoder(responseWriter).Encode(page[Client]{
 			Offset: 0, Limit: 200, Count: len(clients), TotalCount: len(clients), Data: clients,
 		})
 	default:
-		http.NotFound(w, r)
+		http.NotFound(responseWriter, request)
 	}
 }
 

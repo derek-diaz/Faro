@@ -8,6 +8,7 @@ import {
 	ExternalLink,
 	MonitorSmartphone,
 	LogOut,
+	Menu,
 	Network,
 	Router,
 	Search,
@@ -15,10 +16,12 @@ import {
 	ShieldCheck,
 	Moon,
 	Sun,
-	SunMoon
+	SunMoon,
+	X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
+import { useState } from "react";
 import type { AppVersion, NotificationsResponse, ReleaseInfo } from "../api/client";
 import type { Page } from "../App";
 import { BrandLogo } from "./BrandLogo";
@@ -52,18 +55,23 @@ type LayoutProps = {
 };
 
 export function Layout({ page, setPage, themeMode, onThemeModeChange, children, apiState, onOpenSearch, notifications, onOpenNotifications, username, onSignOut, appVersion, releaseUpdate }: LayoutProps) {
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const currentPage = navItems.find((item) => item.id === page) ?? navItems[0];
   const apiStatusTitle = getApiStatusTitle(apiState);
   const apiStatusLabel = getApiStatusLabel(apiState);
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      <aside className={mobileNavOpen ? "sidebar mobile-nav-open" : "sidebar"}>
         <div className="brand">
           <BrandLogo />
           <strong className="brand-wordmark">Faro</strong>
+          <button className="mobile-nav-toggle" type="button" aria-expanded={mobileNavOpen} aria-controls="primary-navigation" onClick={() => setMobileNavOpen((open) => !open)}>
+            {mobileNavOpen ? <X size={18} /> : <Menu size={18} />}
+            <span>{mobileNavOpen ? "Close" : "Menu"}</span>
+          </button>
         </div>
 
-        <nav>
+        <nav id="primary-navigation" aria-label="Primary navigation">
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
@@ -74,6 +82,7 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
                 onClick={(event) => {
                   event.preventDefault();
                   setPage(item.id);
+                  setMobileNavOpen(false);
                 }}
               >
                 <Icon size={18} />
@@ -156,7 +165,7 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
           </div>
         </header>
         {releaseUpdate && (
-          <div className="update-banner" role="status">
+          <output className="update-banner">
             <div className="update-banner-copy">
               <strong>Faro {releaseUpdate.display} is available.</strong>
               <span>You are running {appVersion?.display ?? "an earlier version"}.</span>
@@ -164,7 +173,7 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
             <a href={releaseUpdate.url} target="_blank" rel="noreferrer">
               View release <ExternalLink size={15} />
             </a>
-          </div>
+          </output>
         )}
         <div className="main-content">{children}</div>
       </main>
@@ -190,7 +199,7 @@ function getApiStatusTitle(apiState: LayoutProps["apiState"]) {
 function getApiStatusLabel(apiState: LayoutProps["apiState"]) {
   switch (apiState) {
     case "online":
-      return "API online";
+      return "Faro is online";
     case "offline":
       return "Offline";
     default:

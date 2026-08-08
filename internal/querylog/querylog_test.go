@@ -10,6 +10,7 @@ import (
 
 	"github.com/derek/faro/internal/coredns"
 	"github.com/derek/faro/internal/db"
+	"github.com/mattn/go-sqlite3"
 )
 
 func TestParseObservableLogLine(t *testing.T) {
@@ -116,6 +117,35 @@ func TestInsertPersistsDecisionSnapshot(t *testing.T) {
 	}
 	if snapshot.Confidence != "configuration_snapshot" || snapshot.CapturedAt == "" {
 		t.Fatalf("missing provenance metadata: %#v", snapshot)
+	}
+}
+
+func TestActivityStorageFailureDoesNotStopDNSDecisionEvaluation(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	store.ReportActivityWriteFailure(sqlite3.Error{Code: sqlite3.ErrFull})
+	tailer := NewTailer(store, "")
+	tailer.insert(context.Background(), `[INFO] FARO|192.168.7.22|A|still-resolves.example.|NOERROR|0.001s|-`)
+
+	var historyRows int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM dns_queries WHERE domain = 'still-resolves.example'`).Scan(&historyRows); err != nil {
+		t.Fatal(err)
+	}
+	if historyRows != 0 {
+		t.Fatalf("activity history write succeeded while storage was paused: %d rows", historyRows)
+	}
+
+	decision := coredns.ExplainDomainForClient(context.Background(), store, "still-resolves.example", "192.168.7.22")
+	if decision.Action != "allowed" {
+		t.Fatalf("DNS decision changed while activity storage was paused: %+v", decision)
+	}
+	status := store.ActivityStorageStatus()
+	if status.Status != db.ActivityStoragePaused || status.Reason != "Insufficient disk space" {
+		t.Fatalf("unexpected activity storage status: %+v", status)
 	}
 }
 

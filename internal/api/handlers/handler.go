@@ -83,6 +83,8 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 	mux.HandleFunc("/healthz", handler.health)
 	mux.HandleFunc("/api/version", handler.version)
 	mux.HandleFunc("/api/version/check", handler.versionCheck)
+	mux.HandleFunc("/api/upgrade", handler.upgrade)
+	mux.HandleFunc("/api/diagnostics/coredns", handler.corednsDiagnostics)
 	mux.HandleFunc("/metrics", handler.metrics)
 	mux.HandleFunc("/api/auth/status", authManager.Status)
 	mux.HandleFunc("/api/auth/setup", authManager.Setup)
@@ -133,31 +135,31 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 }
 
 func replicaReadOnly(store *db.Store, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet || request.Method == http.MethodHead || request.Method == http.MethodOptions {
-			next.ServeHTTP(w, request)
+			next.ServeHTTP(responseWriter, request)
 			return
 		}
 		// Leaving redundancy is the one authenticated local mutation a replica
 		// must be able to perform for recovery or reuse as a standalone server.
 		if request.Method == http.MethodDelete && request.URL.Path == "/api/redundancy" {
-			next.ServeHTTP(w, request)
+			next.ServeHTTP(responseWriter, request)
 			return
 		}
 		if request.Method == http.MethodPost && (request.URL.Path == "/api/auth/login" || request.URL.Path == "/api/auth/logout") {
-			next.ServeHTTP(w, request)
+			next.ServeHTTP(responseWriter, request)
 			return
 		}
 		var role string
 		if err := store.DB.QueryRowContext(request.Context(), `SELECT role FROM redundancy_state WHERE id = 1`).Scan(&role); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not verify this Faro server's role"})
+			writeJSON(responseWriter, http.StatusInternalServerError, map[string]string{"error": "could not verify this Faro server's role"})
 			return
 		}
 		if role == redundancy.RoleReplica {
-			writeJSON(w, http.StatusConflict, map[string]string{"error": "replica servers are read-only and managed by the primary Faro server"})
+			writeJSON(responseWriter, http.StatusConflict, map[string]string{"error": "replica servers are read-only and managed by the primary Faro server"})
 			return
 		}
-		next.ServeHTTP(w, request)
+		next.ServeHTTP(responseWriter, request)
 	})
 }
 

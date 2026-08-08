@@ -34,7 +34,9 @@ func TestSetupCreatesAuthenticatedSession(t *testing.T) {
 		t.Fatalf("unexpected session cookie: %#v", cookies)
 	}
 
-	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	protected := manager.Require(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.WriteHeader(http.StatusNoContent)
+	}))
 	unauthorized := httptest.NewRecorder()
 	protected.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/dashboard", nil))
 	if unauthorized.Code != http.StatusUnauthorized {
@@ -64,8 +66,8 @@ func TestSetupIsRejectedOnReplica(t *testing.T) {
 
 func TestUnconfiguredInstallationCanLeaveRedundancyWithoutSession(t *testing.T) {
 	manager := newTestManager(t)
-	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
+	protected := manager.Require(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.WriteHeader(http.StatusNoContent)
 	}))
 	response := httptest.NewRecorder()
 	protected.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/api/redundancy", nil))
@@ -82,8 +84,8 @@ func TestConfiguredInstallationRequiresSessionToLeaveRedundancy(t *testing.T) {
 	if setupResponse.Code != http.StatusCreated {
 		t.Fatalf("setup status = %d, body = %s", setupResponse.Code, setupResponse.Body.String())
 	}
-	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
+	protected := manager.Require(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.WriteHeader(http.StatusNoContent)
 	}))
 	response := httptest.NewRecorder()
 	protected.ServeHTTP(response, httptest.NewRequest(http.MethodDelete, "/api/redundancy", nil))
@@ -94,8 +96,10 @@ func TestConfiguredInstallationRequiresSessionToLeaveRedundancy(t *testing.T) {
 
 func TestHealthAndMetricsRemainPublic(t *testing.T) {
 	manager := newTestManager(t)
-	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
-	for _, path := range []string{"/healthz", "/metrics", "/api/version", "/api/version/check"} {
+	protected := manager.Require(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.WriteHeader(http.StatusNoContent)
+	}))
+	for _, path := range []string{"/healthz", "/metrics", "/api/version", "/api/version/check", "/api/upgrade"} {
 		response := httptest.NewRecorder()
 		protected.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusNoContent {
@@ -193,7 +197,9 @@ func TestLogoutInvalidatesSession(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodGet, "/api/dashboard", nil)
 	request.AddCookie(cookie)
-	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	protected := manager.Require(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.WriteHeader(http.StatusNoContent)
+	}))
 	response := httptest.NewRecorder()
 	protected.ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized {
@@ -229,7 +235,9 @@ func TestChangePasswordVerifiesCurrentPasswordAndClosesOtherSessions(t *testing.
 		t.Fatalf("change password status = %d, body = %s", changeResponse.Code, changeResponse.Body.String())
 	}
 
-	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	protected := manager.Require(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.WriteHeader(http.StatusNoContent)
+	}))
 	currentRequest := httptest.NewRequest(http.MethodGet, "/api/dashboard", nil)
 	currentRequest.AddCookie(currentSession)
 	currentResponse := httptest.NewRecorder()

@@ -33,6 +33,7 @@ import {
   type ProtectionInput
 } from "../api/client";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { errorMessage } from "../utils/formatting";
 
 type Props = {
   readonly protections: Protection[];
@@ -110,7 +111,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
       await refresh();
       setNotice(`${editor.name} was updated.`);
     } catch (error_) {
-      setError(message(error_, "Could not save protection."));
+      setError(errorMessage(error_, "Could not save protection."));
     } finally {
       setSaveStage("");
       setBusy(false);
@@ -127,7 +128,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
       setWizard(false);
       setNotice(`${draft.name} is ready.`);
     } catch (error_) {
-      setError(message(error_, "Could not create protection."));
+      setError(errorMessage(error_, "Could not create protection."));
     } finally {
       setBusy(false);
     }
@@ -143,7 +144,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
       await refresh();
       setNotice(`${selected.name} was deleted. Its devices now use Home.`);
     } catch (error_) {
-      setError(message(error_, "Could not delete protection."));
+      setError(errorMessage(error_, "Could not delete protection."));
     } finally {
       setBusy(false);
       setConfirmDelete(false);
@@ -298,4 +299,3 @@ function lines(value: string) { return value.split(/\r?\n/).map((line) => line.t
 function toggleNumber(values: number[], value: number) { return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]; }
 function toggleString(values: string[], value: string) { return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]; }
 function sourceHost(value: string) { try { return new URL(value).hostname.replace(/^www\./, ""); } catch { return "Custom source"; } }
-function message(caught: unknown, fallback: string) { return caught instanceof Error && caught.message ? caught.message : fallback; }

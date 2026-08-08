@@ -56,39 +56,39 @@ const etagHeader = "ETag"
 // noinspection SpellCheckingInspection
 const sqliteStrftime = "strftime"
 
-func (s *Handler) deviceInventory(w http.ResponseWriter, r *http.Request) {
-	options, err := parseDeviceInventoryOptions(r)
+func (handler *Handler) deviceInventory(responseWriter http.ResponseWriter, request *http.Request) {
+	options, err := parseDeviceInventoryOptions(request)
 	if err != nil {
-		writeBadRequest(w, err)
+		writeBadRequest(responseWriter, err)
 		return
 	}
-	revision, err := s.deviceInventoryRevision(r)
+	revision, err := handler.deviceInventoryRevision(request)
 	if err != nil {
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return
 	}
 	etag := deviceInventoryETag(revision, options)
-	w.Header().Set(etagHeader, etag)
-	w.Header().Set("Cache-Control", "private, no-cache")
-	if options.paged && r.Header.Get("If-None-Match") == etag {
-		w.WriteHeader(http.StatusNotModified)
+	responseWriter.Header().Set(etagHeader, etag)
+	responseWriter.Header().Set("Cache-Control", "private, no-cache")
+	if options.paged && request.Header.Get("If-None-Match") == etag {
+		responseWriter.WriteHeader(http.StatusNotModified)
 		return
 	}
 
-	items, total, summary, err := s.loadDeviceInventory(r, options)
+	items, total, summary, err := handler.loadDeviceInventory(request, options)
 	if err != nil {
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return
 	}
 	if !options.paged {
-		writeJSON(w, http.StatusOK, items)
+		writeJSON(responseWriter, http.StatusOK, items)
 		return
 	}
 	totalPages := 0
 	if total > 0 {
 		totalPages = (total + options.pageSize - 1) / options.pageSize
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(responseWriter, http.StatusOK, map[string]any{
 		"items":       items,
 		"page":        options.page,
 		"page_size":   options.pageSize,
@@ -99,8 +99,8 @@ func (s *Handler) deviceInventory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func parseDeviceInventoryOptions(r *http.Request) (deviceInventoryOptions, error) {
-	query := r.URL.Query()
+func parseDeviceInventoryOptions(request *http.Request) (deviceInventoryOptions, error) {
+	query := request.URL.Query()
 	paged := query.Get("format") == "page" || query.Has("page") || query.Has("page_size") ||
 		query.Has("search") || query.Has("sort") || query.Has("direction") || query.Has("active_today")
 	options := deviceInventoryOptions{
@@ -192,10 +192,10 @@ func normalizeInventoryDirection(value, sortValue string) (string, error) {
 	}
 }
 
-func (s *Handler) deviceInventoryRevision(r *http.Request) (string, error) {
+func (handler *Handler) deviceInventoryRevision(request *http.Request) (string, error) {
 	var maxQueryID int64
 	var devicesUpdated, addressesUpdated, namesUpdated, classificationsUpdated, membershipsUpdated, profilesUpdated, recordsUpdated string
-	err := s.store.DB.QueryRowContext(r.Context(), `
+	err := handler.store.DB.QueryRowContext(request.Context(), `
 		SELECT
 			COALESCE((SELECT MAX(id) FROM dns_queries), 0),
 			COALESCE((SELECT MAX(updated_at) FROM devices), ''),
@@ -219,8 +219,8 @@ func deviceInventoryETag(revision string, options deviceInventoryOptions) string
 	return `"` + hex.EncodeToString(sum[:]) + `"`
 }
 
-func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOptions) ([]map[string]any, int, deviceInventorySummary, error) {
-	start := todayStart(r)
+func (handler *Handler) loadDeviceInventory(request *http.Request, options deviceInventoryOptions) ([]map[string]any, int, deviceInventorySummary, error) {
+	start := todayStart(request)
 	searchPattern := "%" + strings.ToLower(options.search) + "%"
 	activeToday := 0
 	if options.activeToday {
@@ -235,7 +235,7 @@ func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOp
 	}[options.sort]
 	order := strings.ToUpper(options.direction)
 
-	rows, err := s.store.DB.QueryContext(r.Context(), `
+	rows, err := handler.store.DB.QueryContext(request.Context(), `
 		WITH
 		day AS (
 			SELECT
@@ -348,19 +348,19 @@ func (s *Handler) loadDeviceInventory(r *http.Request, options deviceInventoryOp
 		return nil, 0, deviceInventorySummary{}, err
 	}
 	if len(baseDevices) == 0 {
-		total, err = s.inventoryMatchingCount(r, start, options.search, options.activeToday)
+		total, err = handler.inventoryMatchingCount(request, start, options.search, options.activeToday)
 		if err != nil {
 			return nil, 0, deviceInventorySummary{}, err
 		}
 	}
 
-	addressesByDevice, clientIPs, err := s.inventoryAddresses(r, baseDevices)
+	addressesByDevice, clientIPs, err := handler.inventoryAddresses(request, baseDevices)
 	if err != nil {
 		return nil, 0, deviceInventorySummary{}, err
 	}
-	discoveredNames := s.discoverDeviceNames(r.Context(), clientIPs)
+	discoveredNames := handler.discoverDeviceNames(request.Context(), clientIPs)
 	items := buildDeviceInventoryItems(baseDevices, addressesByDevice, discoveredNames)
-	summary, err := s.inventorySummary(r, start)
+	summary, err := handler.inventorySummary(request, start)
 	if err != nil {
 		return nil, 0, deviceInventorySummary{}, err
 	}
@@ -409,14 +409,14 @@ func buildDeviceInventoryItems(baseDevices []inventoryBaseDevice, addressesByDev
 	return items
 }
 
-func (s *Handler) inventoryMatchingCount(r *http.Request, start, search string, activeOnly bool) (int, error) {
+func (handler *Handler) inventoryMatchingCount(request *http.Request, start, search string, activeOnly bool) (int, error) {
 	pattern := "%" + strings.ToLower(search) + "%"
 	activeToday := 0
 	if activeOnly {
 		activeToday = 1
 	}
 	var total int
-	err := s.store.DB.QueryRowContext(r.Context(), `
+	err := handler.store.DB.QueryRowContext(request.Context(), `
 		WITH
 		day AS (
 			SELECT device_id, COUNT(*) AS total
@@ -474,7 +474,7 @@ func (s *Handler) inventoryMatchingCount(r *http.Request, start, search string, 
 	return total, err
 }
 
-func (s *Handler) inventoryAddresses(r *http.Request, devices []inventoryBaseDevice) (map[int64][]string, []string, error) {
+func (handler *Handler) inventoryAddresses(request *http.Request, devices []inventoryBaseDevice) (map[int64][]string, []string, error) {
 	result := make(map[int64][]string, len(devices))
 	if len(devices) == 0 {
 		return result, make([]string, 0), nil
@@ -485,7 +485,7 @@ func (s *Handler) inventoryAddresses(r *http.Request, devices []inventoryBaseDev
 		arguments = append(arguments, device.deviceID)
 		placeholders = append(placeholders, "?")
 	}
-	rows, err := s.store.DB.QueryContext(r.Context(), `
+	rows, err := handler.store.DB.QueryContext(request.Context(), `
 		SELECT device_id, address
 		FROM device_addresses
 		WHERE device_id IN (`+strings.Join(placeholders, ",")+`)
@@ -508,9 +508,9 @@ func (s *Handler) inventoryAddresses(r *http.Request, devices []inventoryBaseDev
 	return result, clientIPs, rows.Err()
 }
 
-func (s *Handler) inventorySummary(r *http.Request, start string) (deviceInventorySummary, error) {
+func (handler *Handler) inventorySummary(request *http.Request, start string) (deviceInventorySummary, error) {
 	var summary deviceInventorySummary
-	err := s.store.DB.QueryRowContext(r.Context(), `
+	err := handler.store.DB.QueryRowContext(request.Context(), `
 		WITH day AS (
 			SELECT device_id, COUNT(*) AS total,
 			       SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END) AS blocked

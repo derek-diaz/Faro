@@ -113,10 +113,10 @@ export function App() {
       />
     );
   }
-  if (!auth.configured && joiningExisting) return <JoinExistingFaro onBack={() => setJoiningExisting(false)} onJoined={setRedundancy} />;
+  if (joiningExisting) return <JoinExistingFaro onBack={() => setJoiningExisting(false)} onJoined={setRedundancy} />;
   if (!auth.configured) return <AuthScreen mode="setup" onSubmit={authenticate} error={authError} onJoinExisting={() => setJoiningExisting(true)} />;
-  if (!auth.authenticated) return <AuthScreen mode="login" onSubmit={authenticate} error={authError} />;
-  if (!auth.onboarding_complete) return <Onboarding username={auth.username || "admin"} onComplete={() => setAuth({ ...auth, onboarding_complete: true })} />;
+  if (!auth.authenticated) return <AuthScreen mode="login" onSubmit={authenticate} error={authError} onJoinExisting={() => setJoiningExisting(true)} />;
+  if (!auth.onboarding_complete) return <Onboarding username={auth.username || "admin"} onComplete={() => setAuth({ ...auth, onboarding_complete: true })} onJoinExisting={() => setJoiningExisting(true)} />;
 
   return <AuthenticatedApp username={auth.username || "admin"} onSignedOut={() => setAuth({ configured: true, authenticated: false, onboarding_complete: true })} />;
 }
@@ -130,7 +130,7 @@ function AuthenticatedApp({ username, onSignedOut }: AuthenticatedAppProps) {
 	const [versionInfo, setVersionInfo] = useState<VersionCheck | null>(null);
 	const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const initialRoute = useMemo(readRoute, []);
-  const [page, setPageState] = useState<Page>(initialRoute.page);
+  const [page, setPage] = useState<Page>(initialRoute.page);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [devices, setDevices] = useState<DeviceSummary[]>([]);
   const [records, setRecords] = useState<DNSRecord[]>([]);
@@ -213,7 +213,7 @@ function AuthenticatedApp({ username, onSignedOut }: AuthenticatedAppProps) {
     }
     function onPopState() {
       const route = readRoute();
-      setPageState(route.page);
+      setPage(route.page);
       setSelectedClientIP(route.clientIP);
       setSelectedDomain(route.domain);
       setSearchOpen(false);
@@ -309,7 +309,7 @@ function AuthenticatedApp({ username, onSignedOut }: AuthenticatedAppProps) {
   }
 
   function navigateToPage(nextPage: Page) {
-    setPageState(nextPage);
+    setPage(nextPage);
     setSelectedDomain(null);
     if (nextPage !== "devices") setSelectedClientIP(null);
     const target = nextPage === "devices" && selectedClientIP
@@ -320,7 +320,7 @@ function AuthenticatedApp({ username, onSignedOut }: AuthenticatedAppProps) {
   }
 
   function selectDevice(clientIP: string | null, replace = false) {
-    setPageState("devices");
+    setPage("devices");
     setSelectedClientIP(clientIP);
     setSelectedDomain(null);
     const target = clientIP ? `/devices/${encodeURIComponent(clientIP)}` : pagePaths.devices;

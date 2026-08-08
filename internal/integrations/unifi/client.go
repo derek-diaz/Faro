@@ -71,11 +71,11 @@ type responseError struct {
 	Message    string
 }
 
-func (e *responseError) Error() string {
-	if e.Message == "" {
-		return fmt.Sprintf("UniFi returned HTTP %d", e.StatusCode)
+func (responseError *responseError) Error() string {
+	if responseError.Message == "" {
+		return fmt.Sprintf("UniFi returned HTTP %d", responseError.StatusCode)
 	}
-	return fmt.Sprintf("UniFi returned HTTP %d: %s", e.StatusCode, e.Message)
+	return fmt.Sprintf("UniFi returned HTTP %d: %s", responseError.StatusCode, responseError.Message)
 }
 
 func newAPIClient(baseURL, apiKey, fingerprint string) (*apiClient, error) {
@@ -187,11 +187,11 @@ func normalizeBaseURL(value string) (string, error) {
 	return strings.TrimSuffix(parsed.String(), "/"), nil
 }
 
-func (c *apiClient) listSites(ctx context.Context) ([]Site, error) {
+func (client *apiClient) listSites(ctx context.Context) ([]Site, error) {
 	var lastErr error
 	for _, prefix := range integrationPrefixes {
 		var result page[Site]
-		err := c.get(ctx, prefix+"/sites?offset=0&limit=200", &result)
+		err := client.get(ctx, prefix+"/sites?offset=0&limit=200", &result)
 		if err == nil {
 			return result.Data, nil
 		}
@@ -204,14 +204,14 @@ func (c *apiClient) listSites(ctx context.Context) ([]Site, error) {
 	return nil, lastErr
 }
 
-func (c *apiClient) listClients(ctx context.Context, siteID string) ([]Client, error) {
+func (client *apiClient) listClients(ctx context.Context, siteID string) ([]Client, error) {
 	siteID = strings.TrimSpace(siteID)
 	if siteID == "" {
 		return nil, errors.New("select a UniFi site")
 	}
 	var lastErr error
 	for _, prefix := range integrationPrefixes {
-		items, err := c.listClientsAt(ctx, prefix, siteID)
+		items, err := client.listClientsAt(ctx, prefix, siteID)
 		if err == nil {
 			return items, nil
 		}
@@ -224,12 +224,12 @@ func (c *apiClient) listClients(ctx context.Context, siteID string) ([]Client, e
 	return nil, lastErr
 }
 
-func (c *apiClient) listClientsAt(ctx context.Context, prefix, siteID string) ([]Client, error) {
+func (client *apiClient) listClientsAt(ctx context.Context, prefix, siteID string) ([]Client, error) {
 	var items []Client
 	for offset := 0; ; offset += pageSize {
 		var result page[Client]
 		path := prefix + "/sites/" + url.PathEscape(siteID) + "/clients?offset=" + strconv.Itoa(offset) + "&limit=" + strconv.Itoa(pageSize)
-		if err := c.get(ctx, path, &result); err != nil {
+		if err := client.get(ctx, path, &result); err != nil {
 			return nil, err
 		}
 		items = append(items, result.Data...)
@@ -239,14 +239,14 @@ func (c *apiClient) listClientsAt(ctx context.Context, prefix, siteID string) ([
 	}
 }
 
-func (c *apiClient) get(ctx context.Context, path string, destination any) (err error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+func (client *apiClient) get(ctx context.Context, path string, destination any) (err error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, client.baseURL+path, nil)
 	if err != nil {
 		return err
 	}
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("X-API-Key", c.apiKey)
-	response, err := c.httpClient.Do(request)
+	request.Header.Set("X-API-Key", client.apiKey)
+	response, err := client.httpClient.Do(request)
 	if err != nil {
 		return fmt.Errorf("connect to UniFi: %w", err)
 	}
@@ -300,7 +300,7 @@ func certificateForAddress(ctx context.Context, baseURL string) (certificate *Ce
 		ServerName:         parsed.Hostname(),
 	})
 	defer func() {
-		if closeErr := connection.Close(); closeErr != nil {
+		if closeErr := rawConnection.Close(); closeErr != nil {
 			certificate = nil
 			err = errors.Join(err, fmt.Errorf("close UniFi certificate connection: %w", closeErr))
 		}

@@ -7,6 +7,7 @@ FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS go-build
 ARG TARGETOS
 ARG TARGETARCH
 ARG BUILDARCH
+ARG FARO_VERSION=0.9.0
 
 WORKDIR /app
 COPY go.mod go.sum* ./
@@ -29,7 +30,9 @@ RUN case "$BUILDARCH/$TARGETARCH" in \
       *) echo "Unsupported build: $BUILDARCH -> $TARGETARCH" >&2; exit 1 ;; \
     esac && \
     CGO_ENABLED=1 GOOS="$TARGETOS" GOARCH="$TARGETARCH" CC="$CC" \
-      go build -o /out/faro-api ./cmd/faro-api && \
+      go build -ldflags "-X github.com/derek/faro/internal/version.Number=$FARO_VERSION" -o /out/faro-api ./cmd/faro-api && \
+    CGO_ENABLED=1 GOOS="$TARGETOS" GOARCH="$TARGETARCH" CC="$CC" \
+      go build -ldflags "-X github.com/derek/faro/internal/version.Number=$FARO_VERSION" -o /out/faro-dohproxy ./cmd/faro-dohproxy && \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
       go build -o /out/faro-logtee ./cmd/faro-logtee
 
@@ -43,12 +46,19 @@ RUN npm run build
 
 FROM debian:bookworm-slim
 
+ARG FARO_VERSION=0.9.0
+
+LABEL org.opencontainers.image.title="Faro" \
+      org.opencontainers.image.version="$FARO_VERSION" \
+      org.opencontainers.image.source="https://github.com/derek-diaz/Faro"
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates curl nginx-light tini && \
     rm -rf /var/lib/apt/lists/* /etc/nginx/sites-enabled/default && \
     mkdir -p /config/coredns /config/logs /config/favicons
 
 COPY --from=go-build /out/faro-api /usr/local/bin/faro-api
+COPY --from=go-build /out/faro-dohproxy /usr/local/bin/faro-dohproxy
 COPY --from=go-build /out/faro-logtee /usr/local/bin/faro-logtee
 COPY --from=coredns /coredns /usr/local/bin/coredns
 COPY --from=web-build /app/dist /usr/share/nginx/html
@@ -61,6 +71,9 @@ COPY coredns/sample-blocklist.txt /app/coredns/sample-blocklist.txt
 RUN chmod 0755 /usr/local/bin/faro-entrypoint /usr/local/bin/faro-healthcheck
 
 ENV FARO_DB_PATH=/config/faro.db \
+    FARO_MIGRATION_BACKUP_DIR=/config/migrations \
+    FARO_UPGRADE_STATE_PATH=/config/faro-upgrade.json \
+    FARO_DOH_RUNTIME_PATH=/config/faro-doh.json \
     FARO_DEVICE_CATALOG_PATH=/config/device-catalog.json \
     FARO_FAVICON_DIR=/config/favicons \
     FARO_COREDNS_CONFIG_DIR=/config/coredns \

@@ -11,24 +11,26 @@ import (
 )
 
 const (
-	DefaultDays = 30
-	MinDays     = 1
-	MaxDays     = 3650
+	DefaultDays    = 30
+	MinDays        = 1
+	MaxDays        = 3650
+	pruneBatchSize = 5000
 )
 
 type Stats struct {
-	DatabaseBytes            int64  `json:"database_bytes"`
-	DatabaseUsedBytes        int64  `json:"database_used_bytes"`
-	DatabaseReclaimableBytes int64  `json:"database_reclaimable_bytes"`
-	QueryCount               int64  `json:"query_count"`
-	EventCount               int64  `json:"event_count"`
-	OldestQuery              string `json:"oldest_query,omitempty"`
-	OldestEvent              string `json:"oldest_event,omitempty"`
-	RetentionDays            int    `json:"retention_days"`
-	RetentionCutoff          string `json:"retention_cutoff"`
-	LastPrunedAt             string `json:"last_pruned_at,omitempty"`
-	LastQueriesDeleted       int64  `json:"last_queries_deleted"`
-	LastEventsDeleted        int64  `json:"last_events_deleted"`
+	DatabaseBytes            int64                    `json:"database_bytes"`
+	DatabaseUsedBytes        int64                    `json:"database_used_bytes"`
+	DatabaseReclaimableBytes int64                    `json:"database_reclaimable_bytes"`
+	QueryCount               int64                    `json:"query_count"`
+	EventCount               int64                    `json:"event_count"`
+	OldestQuery              string                   `json:"oldest_query,omitempty"`
+	OldestEvent              string                   `json:"oldest_event,omitempty"`
+	RetentionDays            int                      `json:"retention_days"`
+	RetentionCutoff          string                   `json:"retention_cutoff"`
+	LastPrunedAt             string                   `json:"last_pruned_at,omitempty"`
+	LastQueriesDeleted       int64                    `json:"last_queries_deleted"`
+	LastEventsDeleted        int64                    `json:"last_events_deleted"`
+	ActivityStorage          db.ActivityStorageStatus `json:"activity_storage"`
 }
 
 type Result struct {
@@ -60,6 +62,7 @@ func Snapshot(ctx context.Context, store *db.Store) (Stats, error) {
 	stats := Stats{
 		RetentionDays:   days,
 		RetentionCutoff: time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339),
+		ActivityStorage: store.ActivityStorageStatus(),
 	}
 	var pageCount, pageSize, freePages int64
 	if err := store.DB.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err != nil {
@@ -96,25 +99,28 @@ func Prune(ctx context.Context, store *db.Store, days int, compact bool) (Result
 		return Result{}, err
 	}
 	cutoff := time.Now().UTC().AddDate(0, 0, -days)
-	queryResult, err := store.DB.ExecContext(ctx, `DELETE FROM dns_queries WHERE datetime(timestamp) < datetime(?)`, cutoff.Format(time.RFC3339))
+	queriesDeleted, err := deleteExpiredRows(ctx, store.DB, "dns_queries", cutoff)
 	if err != nil {
+		store.ReportActivityWriteFailure(err)
 		return Result{}, err
 	}
-	eventResult, err := store.DB.ExecContext(ctx, `DELETE FROM events WHERE datetime(timestamp) < datetime(?)`, cutoff.Format(time.RFC3339))
+	eventsDeleted, err := deleteExpiredRows(ctx, store.DB, "events", cutoff)
 	if err != nil {
+		store.ReportActivityWriteFailure(err)
 		return Result{}, err
 	}
 	if _, err := store.DB.ExecContext(ctx, `DELETE FROM notification_states WHERE event_key <> '*' AND datetime(updated_at) < datetime(?)`, cutoff.Format(time.RFC3339)); err != nil {
+		store.ReportActivityWriteFailure(err)
 		return Result{}, err
 	}
-	queriesDeleted, _ := queryResult.RowsAffected()
-	eventsDeleted, _ := eventResult.RowsAffected()
 	completedAt := time.Now().UTC().Format(time.RFC3339)
 	if err := storePruneResult(ctx, store.DB, completedAt, queriesDeleted, eventsDeleted); err != nil {
+		store.ReportActivityWriteFailure(err)
 		return Result{}, err
 	}
 	if compact {
 		if _, err := store.DB.ExecContext(ctx, `VACUUM`); err != nil {
+			store.ReportActivityWriteFailure(err)
 			return Result{}, err
 		}
 	}
@@ -122,6 +128,7 @@ func Prune(ctx context.Context, store *db.Store, days int, compact bool) (Result
 	if err != nil {
 		return Result{}, err
 	}
+	store.ReportActivityWriteSuccess()
 	return Result{
 		QueriesDeleted: queriesDeleted,
 		EventsDeleted:  eventsDeleted,
@@ -133,6 +140,32 @@ func Prune(ctx context.Context, store *db.Store, days int, compact bool) (Result
 		Compacted:      compact,
 		CompletedAt:    completedAt,
 	}, nil
+}
+
+func deleteExpiredRows(ctx context.Context, database *sql.DB, table string, cutoff time.Time) (int64, error) {
+	query := fmt.Sprintf(`
+		DELETE FROM %s
+		WHERE id IN (
+			SELECT id FROM %s
+			WHERE datetime(timestamp) < datetime(?)
+			ORDER BY id
+			LIMIT ?
+		)`, table, table)
+	var deleted int64
+	for {
+		result, err := database.ExecContext(ctx, query, cutoff.Format(time.RFC3339), pruneBatchSize)
+		if err != nil {
+			return deleted, err
+		}
+		batch, err := result.RowsAffected()
+		if err != nil {
+			return deleted, err
+		}
+		deleted += batch
+		if batch < pruneBatchSize {
+			return deleted, nil
+		}
+	}
 }
 
 func setting(ctx context.Context, database *sql.DB, key string) string {

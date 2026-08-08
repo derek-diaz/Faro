@@ -26,21 +26,21 @@ type recordingApplier struct {
 	local    int
 }
 
-func (a *recordingApplier) Apply(_ context.Context) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.local++
-	return a.localErr
+func (applier *recordingApplier) Apply(_ context.Context) error {
+	applier.mu.Lock()
+	defer applier.mu.Unlock()
+	applier.local++
+	return applier.localErr
 }
 
-func (a *recordingApplier) ApplyReplica(_ context.Context, files map[string][]byte, settings map[string]string) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.err != nil {
-		return a.err
+func (applier *recordingApplier) ApplyReplica(_ context.Context, files map[string][]byte, settings map[string]string) error {
+	applier.mu.Lock()
+	defer applier.mu.Unlock()
+	if applier.err != nil {
+		return applier.err
 	}
-	a.files = files
-	a.settings = settings
+	applier.files = files
+	applier.settings = settings
 	return nil
 }
 
@@ -403,70 +403,70 @@ func openRedundancyStore(t *testing.T) *db.Store {
 }
 
 func controllerProtocolHandler(manager *Manager) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api/redundancy/pair":
 			var input PairRequest
 			if err := json.NewDecoder(request.Body).Decode(&input); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				http.Error(responseWriter, err.Error(), http.StatusBadRequest)
 				return
 			}
 			result, err := manager.AcceptPair(request.Context(), input)
-			writeTestJSON(w, result, err)
+			writeTestJSON(responseWriter, result, err)
 		case "/api/redundancy/replica/snapshot":
 			_, secret, err := manager.AuthenticateNodeRequest(request.Context(), request, nil)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusUnauthorized)
+				http.Error(responseWriter, err.Error(), http.StatusUnauthorized)
 				return
 			}
 			since, err := strconv.ParseInt(request.URL.Query().Get("since"), 10, 64)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				http.Error(responseWriter, err.Error(), http.StatusBadRequest)
 				return
 			}
 			envelope, _, err := manager.SnapshotEnvelope(request.Context(), since, secret)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(responseWriter, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			if envelope == nil {
-				w.WriteHeader(http.StatusNoContent)
+				responseWriter.WriteHeader(http.StatusNoContent)
 				return
 			}
-			writeTestJSON(w, envelope, nil)
+			writeTestJSON(responseWriter, envelope, nil)
 		case "/api/redundancy/replica/ack":
 			var ack SyncAck
 			var payload json.RawMessage
 			decoder := json.NewDecoder(request.Body)
 			if err := decoder.Decode(&payload); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				http.Error(responseWriter, err.Error(), http.StatusBadRequest)
 				return
 			}
 			nodeID, _, err := manager.AuthenticateNodeRequest(request.Context(), request, payload)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusUnauthorized)
+				http.Error(responseWriter, err.Error(), http.StatusUnauthorized)
 				return
 			}
 			if err := json.Unmarshal(payload, &ack); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				http.Error(responseWriter, err.Error(), http.StatusBadRequest)
 				return
 			}
 			if err := manager.RecordAcknowledgement(request.Context(), nodeID, ack); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(responseWriter, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			writeTestJSON(w, map[string]bool{"ok": true}, nil)
+			writeTestJSON(responseWriter, map[string]bool{"ok": true}, nil)
 		default:
-			http.NotFound(w, request)
+			http.NotFound(responseWriter, request)
 		}
 	})
 }
 
-func writeTestJSON(w http.ResponseWriter, payload any, err error) {
+func writeTestJSON(responseWriter http.ResponseWriter, payload any, err error) {
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(responseWriter, err.Error(), http.StatusBadRequest)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(payload)
+	responseWriter.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(responseWriter).Encode(payload)
 }

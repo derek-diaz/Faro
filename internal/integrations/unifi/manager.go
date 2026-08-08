@@ -83,14 +83,14 @@ func NewManager(store *db.Store, keyPath string) *Manager {
 	return &Manager{store: store, keyPath: keyPath}
 }
 
-func (m *Manager) Run(ctx context.Context) {
+func (manager *Manager) Run(ctx context.Context) {
 	timer := time.NewTimer(15 * time.Second)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
 		return
 	case <-timer.C:
-		if _, err := m.Sync(ctx); err != nil && !errors.Is(err, ErrNotConfigured) {
+		if _, err := manager.Sync(ctx); err != nil && !errors.Is(err, ErrNotConfigured) {
 			log.Printf("UniFi device sync failed: %v", err)
 		}
 	}
@@ -101,7 +101,7 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if _, err := m.Sync(ctx); err != nil && !errors.Is(err, ErrNotConfigured) {
+			if _, err := manager.Sync(ctx); err != nil && !errors.Is(err, ErrNotConfigured) {
 				log.Printf("UniFi device sync failed: %v", err)
 			}
 		}
@@ -111,7 +111,7 @@ func (m *Manager) Run(ctx context.Context) {
 var ErrNotConfigured = errors.New("UniFi is not connected")
 var errUnusableClient = errors.New("UniFi client has no stable usable network identity")
 
-func (m *Manager) Test(ctx context.Context, input TestInput) (TestResult, error) {
+func (manager *Manager) Test(ctx context.Context, input TestInput) (TestResult, error) {
 	client, err := newAPIClient(input.BaseURL, input.APIKey, input.TLSFingerprint)
 	if err != nil {
 		return TestResult{}, err
@@ -130,8 +130,8 @@ func (m *Manager) Test(ctx context.Context, input TestInput) (TestResult, error)
 	return TestResult{}, friendlyConnectionError(err)
 }
 
-func (m *Manager) Configure(ctx context.Context, input ConfigureInput) (Status, error) {
-	test, err := m.Test(ctx, TestInput{
+func (manager *Manager) Configure(ctx context.Context, input ConfigureInput) (Status, error) {
+	test, err := manager.Test(ctx, TestInput{
 		BaseURL:        input.BaseURL,
 		APIKey:         input.APIKey,
 		TLSFingerprint: input.TLSFingerprint,
@@ -152,7 +152,7 @@ func (m *Manager) Configure(ctx context.Context, input ConfigureInput) (Status, 
 	if selected == nil {
 		return Status{}, errors.New("select a site returned by this UniFi console")
 	}
-	key, err := loadOrCreateKey(m.keyPath)
+	key, err := loadOrCreateKey(manager.keyPath)
 	if err != nil {
 		return Status{}, fmt.Errorf("prepare integration credentials: %w", err)
 	}
@@ -162,7 +162,7 @@ func (m *Manager) Configure(ctx context.Context, input ConfigureInput) (Status, 
 	}
 	baseURL, _ := normalizeBaseURL(input.BaseURL)
 	fingerprint := normalizeFingerprint(input.TLSFingerprint)
-	if _, err := m.store.DB.ExecContext(ctx, `
+	if _, err := manager.store.DB.ExecContext(ctx, `
 		INSERT INTO integration_configs(kind, enabled, base_url, secret_ciphertext, site_id, site_name, tls_fingerprint, last_error, updated_at)
 		VALUES(?, 1, ?, ?, ?, ?, ?, '', CURRENT_TIMESTAMP)
 		ON CONFLICT(kind) DO UPDATE SET
@@ -177,8 +177,8 @@ func (m *Manager) Configure(ctx context.Context, input ConfigureInput) (Status, 
 		integrationKind, baseURL, ciphertext, selected.ID, selected.Name, fingerprint); err != nil {
 		return Status{}, err
 	}
-	_, syncErr := m.Sync(ctx)
-	status, statusErr := m.Status(ctx)
+	_, syncErr := manager.Sync(ctx)
+	status, statusErr := manager.Status(ctx)
 	if statusErr != nil {
 		return Status{}, statusErr
 	}
@@ -188,25 +188,25 @@ func (m *Manager) Configure(ctx context.Context, input ConfigureInput) (Status, 
 	return status, nil
 }
 
-func (m *Manager) Disconnect(ctx context.Context) error {
-	m.syncMu.Lock()
-	defer m.syncMu.Unlock()
-	if _, err := m.store.DB.ExecContext(ctx, `
+func (manager *Manager) Disconnect(ctx context.Context) error {
+	manager.syncMu.Lock()
+	defer manager.syncMu.Unlock()
+	if _, err := manager.store.DB.ExecContext(ctx, `
 		DELETE FROM unifi_client_snapshots
 		WHERE site_id = (SELECT site_id FROM integration_configs WHERE kind = ?)`, integrationKind); err != nil {
 		return err
 	}
-	if _, err := m.store.DB.ExecContext(ctx, `DELETE FROM integration_configs WHERE kind = ?`, integrationKind); err != nil {
+	if _, err := manager.store.DB.ExecContext(ctx, `DELETE FROM integration_configs WHERE kind = ?`, integrationKind); err != nil {
 		return err
 	}
-	if _, err := m.store.DB.ExecContext(ctx, `DELETE FROM device_names WHERE source = 'unifi'`); err != nil {
+	if _, err := manager.store.DB.ExecContext(ctx, `DELETE FROM device_names WHERE source = 'unifi'`); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (m *Manager) Status(ctx context.Context) (Status, error) {
-	config, err := m.readConfig(ctx)
+func (manager *Manager) Status(ctx context.Context) (Status, error) {
+	config, err := manager.readConfig(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Status{}, nil
 	}
@@ -234,10 +234,10 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 	}, nil
 }
 
-func (m *Manager) Sync(ctx context.Context) (SyncResult, error) {
-	m.syncMu.Lock()
-	defer m.syncMu.Unlock()
-	config, err := m.readConfig(ctx)
+func (manager *Manager) Sync(ctx context.Context) (SyncResult, error) {
+	manager.syncMu.Lock()
+	defer manager.syncMu.Unlock()
+	config, err := manager.readConfig(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SyncResult{}, ErrNotConfigured
 	}
@@ -247,42 +247,42 @@ func (m *Manager) Sync(ctx context.Context) (SyncResult, error) {
 	if !config.enabled || config.secretCiphertext == "" || config.siteID == "" {
 		return SyncResult{}, ErrNotConfigured
 	}
-	key, err := loadOrCreateKey(m.keyPath)
+	key, err := loadOrCreateKey(manager.keyPath)
 	if err != nil {
-		return SyncResult{}, m.recordSyncError(ctx, fmt.Errorf("load integration credentials: %w", err))
+		return SyncResult{}, manager.recordSyncError(ctx, fmt.Errorf("load integration credentials: %w", err))
 	}
 	apiKey, err := decryptSecret(key, config.secretCiphertext)
 	if err != nil {
-		return SyncResult{}, m.recordSyncError(ctx, errors.New("faro could not read the saved UniFi API key; reconnect the integration"))
+		return SyncResult{}, manager.recordSyncError(ctx, errors.New("faro could not read the saved UniFi API key; reconnect the integration"))
 	}
 	client, err := newAPIClient(config.baseURL, apiKey, config.tlsFingerprint)
 	if err != nil {
-		return SyncResult{}, m.recordSyncError(ctx, err)
+		return SyncResult{}, manager.recordSyncError(ctx, err)
 	}
 	clients, err := client.listClients(ctx, config.siteID)
 	if err != nil {
-		return SyncResult{}, m.recordSyncError(ctx, friendlyConnectionError(err))
+		return SyncResult{}, manager.recordSyncError(ctx, friendlyConnectionError(err))
 	}
 	startedAt := time.Now().UTC()
 	synced, skipped := 0, 0
 	for _, observed := range clients {
-		if err := m.reconcileClient(ctx, config.siteID, observed, startedAt); err != nil {
+		if err := manager.reconcileClient(ctx, config.siteID, observed, startedAt); err != nil {
 			if errors.Is(err, errUnusableClient) {
 				log.Printf("skip UniFi client %q: %v", observed.ID, err)
 				skipped++
 				continue
 			}
-			return SyncResult{}, m.recordSyncError(ctx, err)
+			return SyncResult{}, manager.recordSyncError(ctx, err)
 		}
 		synced++
 	}
-	if _, err := m.store.DB.ExecContext(ctx, `
+	if _, err := manager.store.DB.ExecContext(ctx, `
 		DELETE FROM unifi_client_snapshots
 		WHERE site_id = ? AND last_synced_at < ?`, config.siteID, startedAt.Format(time.RFC3339Nano)); err != nil {
-		return SyncResult{}, m.recordSyncError(ctx, err)
+		return SyncResult{}, manager.recordSyncError(ctx, err)
 	}
 	completedAt := time.Now().UTC().Format(time.RFC3339)
-	if _, err := m.store.DB.ExecContext(ctx, `
+	if _, err := manager.store.DB.ExecContext(ctx, `
 		UPDATE integration_configs
 		SET last_sync_at = ?, last_error = '', synced_devices = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE kind = ?`, completedAt, synced, integrationKind); err != nil {
@@ -291,7 +291,7 @@ func (m *Manager) Sync(ctx context.Context) (SyncResult, error) {
 	return SyncResult{SyncedDevices: synced, Skipped: skipped, CompletedAt: completedAt}, nil
 }
 
-func (m *Manager) reconcileClient(ctx context.Context, siteID string, client Client, observedAt time.Time) error {
+func (manager *Manager) reconcileClient(ctx context.Context, siteID string, client Client, observedAt time.Time) error {
 	ip := net.ParseIP(strings.TrimSpace(client.IPAddress))
 	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
 		return fmt.Errorf("%w: missing IP address", errUnusableClient)
@@ -308,13 +308,13 @@ func (m *Manager) reconcileClient(ctx context.Context, siteID string, client Cli
 		{Kind: "mac", Value: strings.ToLower(mac.String()), Source: "unifi", Confidence: "strong"},
 		{Kind: "unifi_client", Value: siteID + "/" + clientID, Source: "unifi", Confidence: "strong"},
 	}
-	deviceID, err := deviceidentity.ObserveAddress(ctx, m.store, ip.String(), "unifi", identifiers)
+	deviceID, err := deviceidentity.ObserveAddress(ctx, manager.store, ip.String(), "unifi", identifiers)
 	if err != nil {
 		return err
 	}
 	name := cleanClientName(client.Name, ip.String(), mac.String())
 	if name != "" {
-		if _, err := m.store.DB.ExecContext(ctx, `
+		if _, err := manager.store.DB.ExecContext(ctx, `
 			INSERT INTO device_names(device_id, source, name)
 			VALUES(?, 'unifi', ?)
 			ON CONFLICT(device_id, source) DO UPDATE SET
@@ -328,7 +328,7 @@ func (m *Manager) reconcileClient(ctx context.Context, siteID string, client Cli
 	if strings.TrimSpace(client.ConnectedAt) != "" {
 		connectedAt = client.ConnectedAt
 	}
-	_, err = m.store.DB.ExecContext(ctx, `
+	_, err = manager.store.DB.ExecContext(ctx, `
 		INSERT INTO unifi_client_snapshots(
 			client_id, site_id, device_id, mac_address, ip_address, name,
 			connection_type, uplink_device_id, connected_at, last_synced_at
@@ -356,11 +356,11 @@ func allZeroMAC(mac net.HardwareAddr) bool {
 	return true
 }
 
-func (m *Manager) readConfig(ctx context.Context) (storedConfig, error) {
+func (manager *Manager) readConfig(ctx context.Context) (storedConfig, error) {
 	var config storedConfig
 	var enabled int
 	var lastSync sql.NullString
-	err := m.store.DB.QueryRowContext(ctx, `
+	err := manager.store.DB.QueryRowContext(ctx, `
 		SELECT enabled, base_url, secret_ciphertext, site_id, site_name, tls_fingerprint,
 		       last_sync_at, last_error, synced_devices
 		FROM integration_configs WHERE kind = ?`, integrationKind).Scan(
@@ -373,12 +373,12 @@ func (m *Manager) readConfig(ctx context.Context) (storedConfig, error) {
 	return config, err
 }
 
-func (m *Manager) recordSyncError(ctx context.Context, err error) error {
+func (manager *Manager) recordSyncError(ctx context.Context, err error) error {
 	message := strings.TrimSpace(err.Error())
 	if len(message) > 500 {
 		message = message[:500]
 	}
-	_, _ = m.store.DB.ExecContext(ctx, `
+	_, _ = manager.store.DB.ExecContext(ctx, `
 		UPDATE integration_configs SET last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE kind = ?`,
 		message, integrationKind)
 	return err

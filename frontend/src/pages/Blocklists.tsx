@@ -1,9 +1,11 @@
-import { AlertCircle, AlertTriangle, Check, CheckCircle2, Database, Download, Filter, Info, Plus, RefreshCw, Search, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
+import { AlertCircle, AlertTriangle, Check, CheckCircle2, Database, Download, Eye, Filter, Info, ListFilter, Network, Plus, RefreshCw, Search, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useMemo, useRef, useState, type ReactNode, type SubmitEvent } from "react";
 import { api, type Blocklist } from "../api/client";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
 import { blocklistCatalog, blocklistCategories, type BlocklistCategory, type CatalogBlocklist } from "../data/blocklists";
+import { errorMessage, formatNumber, normalizeURL } from "../utils/formatting";
 
 type BlocklistsProps = {
   readonly blocklists: Blocklist[];
@@ -13,6 +15,14 @@ type BlocklistsProps = {
 type View = "installed" | "available";
 type Notice = { tone: "success" | "error"; text: string } | null;
 type Installation = { id: string; name: string; stage: "Adding source" | "Downloading and checking domains" | "Updating Faro's library" };
+
+const categoryIcons: Record<BlocklistCategory, LucideIcon> = {
+  Everyday: ShieldCheck,
+  Security: AlertTriangle,
+  Privacy: Eye,
+  Content: ListFilter,
+  Network,
+};
 
 export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
   const [view, setView] = useState<View>("installed");
@@ -304,7 +314,8 @@ function BlocklistCatalog({ catalogCandidates, filteredCatalog, visibleCategorie
 }
 
 function CatalogCategory({ category, items, installing, isInstalling, onInstall }: { readonly category: typeof blocklistCategories[number]; readonly items: CatalogBlocklist[]; readonly installing: Installation | null; readonly isInstalling: boolean; readonly onInstall: (item: CatalogBlocklist) => Promise<void> }) {
-  return <section className="catalog-category-section"><header><div><h3>{category.label}</h3><p>{category.description}</p></div><span>{items.length} available</span></header><div className="blocklist-catalog-grid">{items.map((item) => <CatalogCard key={item.id} item={item} installing={installing} isInstalling={isInstalling} onInstall={onInstall} />)}</div></section>;
+  const CategoryIcon = categoryIcons[category.id];
+  return <section className="catalog-category-section"><header><div className="catalog-category-icon" aria-hidden="true"><CategoryIcon size={18} /></div><div className="catalog-category-copy"><div className="catalog-category-title-row"><h3>{category.label}</h3><span className="catalog-category-count">{items.length} available</span></div><p>{category.description}</p></div></header><div className="blocklist-catalog-grid">{items.map((item) => <CatalogCard key={item.id} item={item} installing={installing} isInstalling={isInstalling} onInstall={onInstall} />)}</div></section>;
 }
 
 function CatalogCard({ item, installing, isInstalling, onInstall }: { readonly item: CatalogBlocklist; readonly installing: Installation | null; readonly isInstalling: boolean; readonly onInstall: (item: CatalogBlocklist) => Promise<void> }) {
@@ -334,13 +345,6 @@ function SummaryItem({ icon, label, value, tone = "" }: { readonly icon: ReactNo
 function isInstalled(item: CatalogBlocklist, installed: Blocklist[]) {
   const itemURL = normalizeURL(item.url);
   return installed.some((blocklist) => normalizeURL(blocklist.url) === itemURL || blocklist.name.toLowerCase() === item.name.toLowerCase());
-}
-
-function normalizeURL(value: string) {
-  const trimmed = value.trim();
-  let end = trimmed.length;
-  while (end > 0 && trimmed[end - 1] === "/") end -= 1;
-  return trimmed.slice(0, end).toLowerCase();
 }
 
 function isStale(value?: string | null) {
@@ -374,12 +378,4 @@ function sourceInitial(blocklist: Blocklist) {
 function usageLabel(count = 0) {
   if (count === 0) return "Not used by a protection setup";
   return `Used by ${count} protection setup${count === 1 ? "" : "s"}`;
-}
-
-function formatNumber(value: number) {
-  return new Intl.NumberFormat().format(value);
-}
-
-function errorMessage(caught: unknown, fallback: string) {
-  return caught instanceof Error && caught.message ? caught.message : fallback;
 }

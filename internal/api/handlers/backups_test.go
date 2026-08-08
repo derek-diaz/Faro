@@ -22,13 +22,13 @@ type restoreObservingReloader struct {
 	upstreams []string
 }
 
-func (r *restoreObservingReloader) Apply(context.Context) error {
+func (reloader *restoreObservingReloader) Apply(context.Context) error {
 	var upstream string
-	if err := r.store.DB.QueryRow(`SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&upstream); err != nil {
+	if err := reloader.store.DB.QueryRow(`SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&upstream); err != nil {
 		return err
 	}
-	r.upstreams = append(r.upstreams, upstream)
-	if len(r.upstreams) == 1 {
+	reloader.upstreams = append(reloader.upstreams, upstream)
+	if len(reloader.upstreams) == 1 {
 		return errors.New("restored DNS configuration was rejected")
 	}
 	return nil

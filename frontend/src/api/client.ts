@@ -263,6 +263,19 @@ export type ActivityCounts = {
   system: number;
 };
 
+export type ActivityTimelineBucket = {
+  timestamp: string;
+  total: number;
+  blocked: number;
+};
+
+export type ActivityTimeline = {
+  from: string;
+  to: string;
+  bucket_seconds: number;
+  buckets: ActivityTimelineBucket[];
+};
+
 export type ActivityPage = {
   items: FaroEvent[];
   page: number;
@@ -270,6 +283,7 @@ export type ActivityPage = {
   total: number;
   total_pages: number;
   counts: ActivityCounts;
+  timeline: ActivityTimeline | null;
 };
 
 export type HealthCard = {
@@ -401,6 +415,12 @@ export type MaintenanceStorage = {
   last_pruned_at?: string;
   last_queries_deleted: number;
   last_events_deleted: number;
+  activity_storage: {
+    status: OpenString<"healthy" | "paused" | "degraded">;
+    reason?: string;
+    last_error?: string;
+    last_failure_at?: string;
+  };
 };
 
 export type MaintenanceStatus = {
@@ -408,6 +428,33 @@ export type MaintenanceStatus = {
   process_memory_bytes: number;
   uptime_seconds: number;
   storage: MaintenanceStorage;
+};
+
+export type CoreDNSDiagnosticFile = {
+  name: string;
+  kind: OpenString<"corefile" | "hosts">;
+  active: string;
+  generated: string;
+  active_hash?: string;
+  generated_hash?: string;
+  active_bytes: number;
+  generated_bytes: number;
+  active_truncated?: boolean;
+  generated_truncated?: boolean;
+  referenced: boolean;
+  matches: boolean;
+};
+
+export type CoreDNSDiagnostics = {
+  status: OpenString<"healthy" | "drifted" | "not_initialized" | "generator_error" | "unavailable">;
+  generated_at: string;
+  bootstrapped: boolean;
+  active_corefile_hash?: string;
+  generated_corefile_hash?: string;
+  reloads_total: number;
+  reload_failures_total: number;
+  files: CoreDNSDiagnosticFile[];
+  error?: string;
 };
 
 export type PruneResult = {
@@ -518,19 +565,24 @@ export type PairingCode = {
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 const BROWSER_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 
+function notifyUnauthorized(response: Response) {
+  if (response.status === 401) window.dispatchEvent(new Event("faro:unauthorized"));
+}
+
+async function ensureResponseOK(response: Response) {
+  if (response.ok) return;
+  const body = await response.json().catch(() => ({ error: response.statusText }));
+  throw new Error(body.error ?? response.statusText);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { "Content-Type": "application/json", "X-Faro-Timezone": BROWSER_TIMEZONE, ...(init?.headers ?? {}) },
+    headers: { "Content-Type": "application/json", "X-Faro-Timezone": BROWSER_TIMEZONE, ...init?.headers },
     ...init
   });
-  if (response.status === 401) {
-    window.dispatchEvent(new Event("faro:unauthorized"));
-  }
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(body.error ?? response.statusText);
-  }
-  return response.json() as Promise<T>;
+  notifyUnauthorized(response);
+  await ensureResponseOK(response);
+  return await response.json() as T;
 }
 
 async function deviceInventoryRequest(
@@ -555,14 +607,11 @@ async function deviceInventoryRequest(
       ...(etag ? { "If-None-Match": etag } : {})
     }
   });
-  if (response.status === 401) window.dispatchEvent(new Event("faro:unauthorized"));
+  notifyUnauthorized(response);
   if (response.status === 304) {
     return { page: null, etag: response.headers.get("ETag") ?? etag, notModified: true };
   }
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(body.error ?? response.statusText);
-  }
+  await ensureResponseOK(response);
   return {
     page: await response.json() as DeviceInventoryPage,
     etag: response.headers.get("ETag") ?? "",
@@ -573,13 +622,10 @@ async function deviceInventoryRequest(
 async function backupRequest(path: string, init: RequestInit): Promise<Response> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
-    headers: { "X-Faro-Timezone": BROWSER_TIMEZONE, ...(init.headers ?? {}) }
+    headers: { "X-Faro-Timezone": BROWSER_TIMEZONE, ...init.headers }
   });
-  if (response.status === 401) window.dispatchEvent(new Event("faro:unauthorized"));
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ error: response.statusText }));
-    throw new Error(body.error ?? response.statusText);
-  }
+  notifyUnauthorized(response);
+  await ensureResponseOK(response);
   return response;
 }
 
@@ -604,8 +650,13 @@ export const api = {
     request<{ ok: boolean }>(`/api/redundancy/nodes/${encodeURIComponent(nodeID)}`, { method: "DELETE" }),
   dashboard: () => request<DashboardSummary>("/api/dashboard"),
   queries: (search = "") => request<DNSQuery[]>(`/api/queries?search=${encodeURIComponent(search)}`),
-  events: (search = "", scope = "all", page = 1, pageSize = 50) =>
-    request<ActivityPage>(`/api/events?search=${encodeURIComponent(search)}&scope=${encodeURIComponent(scope)}&page=${page}&page_size=${pageSize}`),
+  events: (search = "", scope = "all", page = 1, pageSize = 50, range = "all", from = "", to = "") => {
+    const params = new URLSearchParams({ search, scope, page: String(page), page_size: String(pageSize) });
+    if (range && range !== "all") params.set("range", range);
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    return request<ActivityPage>(`/api/events?${params.toString()}`);
+  },
   notifications: () => request<NotificationsResponse>("/api/notifications"),
   markNotificationRead: (id: string) => request<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}/read`, { method: "PUT" }),
   dismissNotification: (id: string) => request<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}`, { method: "DELETE" }),
@@ -644,12 +695,9 @@ export const api = {
   assignDeviceProtection: (clientIP: string, protectionID: number) =>
     request<{ ok: boolean }>(`/api/devices/${encodeURIComponent(clientIP)}/protection`, { method: "PUT", body: JSON.stringify({ protection_id: protectionID }) }),
   allowlist: () => request<DomainEntry[]>("/api/allowlist"),
-  blockDomains: () => request<DomainEntry[]>("/api/blocklist-domains"),
   addAllow: (domain: string) => request<{ id: number }>("/api/allowlist", { method: "POST", body: JSON.stringify({ domain }) }),
   addBlock: (domain: string) =>
     request<{ id: number }>("/api/blocklist-domains", { method: "POST", body: JSON.stringify({ domain }) }),
-  deleteAllow: (id: number) => request<{ ok: boolean }>(`/api/allowlist/${id}`, { method: "DELETE" }),
-  deleteBlock: (id: number) => request<{ ok: boolean }>(`/api/blocklist-domains/${id}`, { method: "DELETE" }),
   settings: () => request<Setting[]>("/api/settings"),
   updateSettings: (settings: Record<string, string>) =>
     request<{ ok: boolean }>("/api/settings", { method: "PUT", body: JSON.stringify(settings) }),
@@ -661,6 +709,7 @@ export const api = {
   syncUnifi: () => request<UnifiSyncResult>("/api/integrations/unifi/sync", { method: "POST" }),
   disconnectUnifi: () => request<{ ok: boolean }>("/api/integrations/unifi", { method: "DELETE" }),
   maintenance: () => request<MaintenanceStatus>("/api/maintenance"),
+  corednsDiagnostics: () => request<CoreDNSDiagnostics>("/api/diagnostics/coredns"),
   prune: (retentionDays: number, compact: boolean) =>
     request<PruneResult>("/api/maintenance", { method: "POST", body: JSON.stringify({ retention_days: retentionDays, compact }) }),
   exportBackup: async (passphrase: string) => {
@@ -670,7 +719,8 @@ export const api = {
       body: JSON.stringify({ passphrase })
     });
     const disposition = response.headers.get("Content-Disposition") ?? "";
-    const filename = disposition.match(/filename="([^"]+)"/)?.[1] ?? "faro-backup.faro-backup";
+    const filenameMatch = /filename="([^"]+)"/.exec(disposition);
+    const filename = filenameMatch?.[1] ?? "faro-backup.faro-backup";
     return { blob: await response.blob(), filename };
   },
   restoreBackup: async (file: File, passphrase: string) => {
@@ -678,7 +728,7 @@ export const api = {
     body.append("passphrase", passphrase);
     body.append("backup", file);
     const response = await backupRequest("/api/backups/restore", { method: "POST", body });
-    return response.json() as Promise<BackupRestoreResult>;
+    return await response.json() as BackupRestoreResult;
   },
   reload: () => request<{ ok: boolean }>("/api/reload", { method: "POST" })
 };

@@ -36,7 +36,16 @@ func main() {
 
 	store, err := db.Open(dbPath)
 	if err != nil {
-		log.Fatalf("open db: %v", err)
+		var incompatible *db.IncompatibleVersionError
+		var migration *db.MigrationError
+		switch {
+		case errors.As(err, &incompatible):
+			log.Fatalf("database upgrade blocked by incompatible schema: %v; inspect %s", err, upgradeStatePath(dbPath))
+		case errors.As(err, &migration):
+			log.Fatalf("database upgrade failed: %v; inspect %s", err, upgradeStatePath(dbPath))
+		default:
+			log.Fatalf("open db: %v; inspect %s", err, upgradeStatePath(dbPath))
+		}
 	}
 	defer func() {
 		if err := store.Close(); err != nil {
@@ -47,16 +56,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	dohRuntimePath := env("FARO_DOH_RUNTIME_PATH", filepath.Join(filepath.Dir(dbPath), "faro-doh.json"))
 	encryptedDNS := dohproxy.New(store, dohproxy.DefaultAddress)
-	if err := encryptedDNS.Start(ctx); err != nil {
-		log.Fatalf("start encrypted DNS gateway: %v", err)
-	}
 
 	reloader := coredns.NewManager(store, configDir)
 	reloader.BeforeApply = encryptedDNS.Reload
+	reloader.RollbackApply = encryptedDNS.RestorePrevious
 	secretKeyPath := env("FARO_SECRET_KEY_PATH", filepath.Join(filepath.Dir(dbPath), "faro-secrets.key"))
 	redundancyManager := redundancy.NewManager(store, reloader, configDir, secretKeyPath)
-	reloader.AfterApply = redundancyManager.ConfigurationApplied
+	reloader.CommitApply = func(ctx context.Context) error {
+		return dohproxy.WriteRuntimeConfigFromStore(ctx, dohRuntimePath, store)
+	}
+	reloader.AfterApply = func(ctx context.Context) {
+		redundancyManager.ConfigurationApplied(ctx)
+	}
 	if err := reloader.Apply(context.Background()); err != nil {
 		log.Printf("initial coredns render failed: %v", err)
 	}
@@ -104,4 +117,11 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func upgradeStatePath(dbPath string) string {
+	if value := os.Getenv("FARO_UPGRADE_STATE_PATH"); value != "" {
+		return value
+	}
+	return filepath.Join(filepath.Dir(dbPath), "faro-upgrade.json")
 }

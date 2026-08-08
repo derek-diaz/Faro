@@ -1,3 +1,5 @@
+import type { EncryptedUpstreamEndpoint } from "../api/client";
+
 export type FilteringMode = "none" | "security" | "family" | "ads";
 
 export type ResolverProfile = {
@@ -106,4 +108,17 @@ export function allCatalogAddresses() {
 
 export function parseUpstreamServers(value: string) {
   return Array.from(new Set(value.split(",").map((server) => server.trim()).filter(Boolean)));
+}
+
+export function encryptedEndpointIndex(endpoints: EncryptedUpstreamEndpoint[]) {
+  const index = new Map<string, EncryptedUpstreamEndpoint>();
+  endpoints.forEach((endpoint) => endpoint.bootstrap_ips.forEach((address) => index.set(address, endpoint)));
+  return index;
+}
+
+export function encryptedEndpointForAddresses(addresses: string[], index: Map<string, EncryptedUpstreamEndpoint>) {
+  const endpoints = addresses.map((address) => index.get(address));
+  const first = endpoints[0];
+  if (!first || endpoints.some((endpoint) => endpoint?.url !== first.url)) return null;
+  return first;
 }

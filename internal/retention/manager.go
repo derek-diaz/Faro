@@ -17,9 +17,9 @@ func NewManager(store *db.Store) *Manager {
 	return &Manager{Store: store, Interval: 6 * time.Hour}
 }
 
-func (m *Manager) Run(ctx context.Context) {
-	m.prune(ctx)
-	interval := m.Interval
+func (manager *Manager) Run(ctx context.Context) {
+	manager.prune(ctx)
+	interval := manager.Interval
 	if interval <= 0 {
 		interval = 6 * time.Hour
 	}
@@ -30,14 +30,14 @@ func (m *Manager) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.prune(ctx)
+			manager.prune(ctx)
 		}
 	}
 }
 
-func (m *Manager) prune(ctx context.Context) {
-	days := ConfiguredDays(ctx, m.Store)
-	result, err := Prune(ctx, m.Store, days, false)
+func (manager *Manager) prune(ctx context.Context) {
+	days := ConfiguredDays(ctx, manager.Store)
+	result, err := Prune(ctx, manager.Store, days, false)
 	if err != nil {
 		log.Printf("retention prune failed: %v", err)
 		return

@@ -46,84 +46,84 @@ func NewManager(store *db.Store, applier ReplicaApplier, configDir, secretKeyPat
 	}
 }
 
-func (m *Manager) Run(ctx context.Context) {
-	ticker := time.NewTicker(m.syncInterval)
+func (manager *Manager) Run(ctx context.Context) {
+	ticker := time.NewTicker(manager.syncInterval)
 	defer ticker.Stop()
-	m.triggerSync()
+	manager.triggerSync()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.expirePairings()
-			if state, err := m.readState(ctx); err == nil && state.Role == RoleReplica {
-				if err := m.syncReplica(ctx); err != nil {
-					m.recordReplicaError(context.WithoutCancel(ctx), err)
+			manager.expirePairings()
+			if state, err := manager.readState(ctx); err == nil && state.Role == RoleReplica {
+				if err := manager.syncReplica(ctx); err != nil {
+					manager.recordReplicaError(context.WithoutCancel(ctx), err)
 				}
 			}
-		case <-m.syncNow:
-			if state, err := m.readState(ctx); err == nil && state.Role == RoleReplica {
-				if err := m.syncReplica(ctx); err != nil {
-					m.recordReplicaError(context.WithoutCancel(ctx), err)
+		case <-manager.syncNow:
+			if state, err := manager.readState(ctx); err == nil && state.Role == RoleReplica {
+				if err := manager.syncReplica(ctx); err != nil {
+					manager.recordReplicaError(context.WithoutCancel(ctx), err)
 				}
 			}
 		}
 	}
 }
 
-func (m *Manager) ConfigurationApplied(ctx context.Context) {
-	state, err := m.readState(ctx)
+func (manager *Manager) ConfigurationApplied(ctx context.Context) {
+	state, err := manager.readState(ctx)
 	if err != nil || state.Role != RoleController {
 		return
 	}
-	if err := m.captureSnapshot(ctx, state); err != nil {
+	if err := manager.captureSnapshot(ctx, state); err != nil {
 		log.Printf("capture redundancy configuration: %v", err)
 	}
 }
 
-func (m *Manager) PublicStatus(ctx context.Context) (PublicStatus, error) {
-	state, err := m.readState(ctx)
+func (manager *Manager) PublicStatus(ctx context.Context) (PublicStatus, error) {
+	state, err := manager.readState(ctx)
 	if err != nil {
 		return PublicStatus{}, err
 	}
 	return publicStatus(state), nil
 }
 
-func (m *Manager) Status(ctx context.Context) (Status, error) {
-	state, err := m.readState(ctx)
+func (manager *Manager) Status(ctx context.Context) (Status, error) {
+	state, err := manager.readState(ctx)
 	if err != nil {
 		return Status{}, err
 	}
 	result := Status{PublicStatus: publicStatus(state), Nodes: []NodeInfo{}}
-	result.LANAddress = m.lanAddress(ctx)
+	result.LANAddress = manager.lanAddress(ctx)
 	switch state.Role {
 	case RoleController:
-		return m.controllerStatus(ctx, state, result)
+		return manager.controllerStatus(ctx, state, result)
 	case RoleReplica:
-		result.Healthy = state.LastError == "" && recentlySeen(state.LastSyncAt, m.now(), 3*m.syncInterval+5*time.Second)
+		result.Healthy = state.LastError == "" && recentlySeen(state.LastSyncAt, manager.now(), 3*manager.syncInterval+5*time.Second)
 	default:
 		result.Healthy = true
 	}
 	return result, nil
 }
 
-func (m *Manager) lanAddress(ctx context.Context) string {
+func (manager *Manager) lanAddress(ctx context.Context) string {
 	var address string
-	if err := m.store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'faro_lan_ip'`).Scan(&address); err != nil {
+	if err := manager.store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'faro_lan_ip'`).Scan(&address); err != nil {
 		return ""
 	}
 	return address
 }
 
-func (m *Manager) controllerStatus(ctx context.Context, state localState, result Status) (Status, error) {
-	now := m.now().UTC().Format(time.RFC3339)
+func (manager *Manager) controllerStatus(ctx context.Context, state localState, result Status) (Status, error) {
+	now := manager.now().UTC().Format(time.RFC3339)
 	result.ControllerName = state.NodeName
 	result.Nodes = append(result.Nodes, NodeInfo{
 		NodeID: state.NodeID, Name: state.NodeName, LANAddress: result.LANAddress,
 		Role: RoleController, Online: true, ConfigRevision: state.ConfigRevision,
 		LastSeenAt: now, LastSyncAt: now,
 	})
-	rows, err := m.store.DB.QueryContext(ctx, `
+	rows, err := manager.store.DB.QueryContext(ctx, `
 		SELECT node_id, name, lan_address, config_revision,
 		       COALESCE(last_seen_at, ''), COALESCE(last_sync_at, ''), last_error
 		FROM redundancy_nodes ORDER BY name COLLATE NOCASE`)
@@ -137,7 +137,7 @@ func (m *Manager) controllerStatus(ctx context.Context, state localState, result
 		if err := rows.Scan(&node.NodeID, &node.Name, &node.LANAddress, &node.ConfigRevision, &node.LastSeenAt, &node.LastSyncAt, &node.LastError); err != nil {
 			return Status{}, err
 		}
-		node.Online = recentlySeen(node.LastSeenAt, m.now(), 3*m.syncInterval+5*time.Second)
+		node.Online = recentlySeen(node.LastSeenAt, manager.now(), 3*manager.syncInterval+5*time.Second)
 		result.Nodes = append(result.Nodes, node)
 	}
 	if err := rows.Err(); err != nil {
@@ -152,19 +152,19 @@ func (m *Manager) controllerStatus(ctx context.Context, state localState, result
 	return result, nil
 }
 
-func (m *Manager) StartPairing(ctx context.Context, nodeName string) (PairingCode, error) {
+func (manager *Manager) StartPairing(ctx context.Context, nodeName string) (PairingCode, error) {
 	nodeName, err := normalizePairingNodeName(nodeName)
 	if err != nil {
 		return PairingCode{}, err
 	}
-	state, err := m.preparePairingState(ctx, nodeName)
+	state, err := manager.preparePairingState(ctx, nodeName)
 	if err != nil {
 		return PairingCode{}, err
 	}
 	if state.ConfigRevision < 1 {
 		return PairingCode{}, errors.New("DNS configuration could not be prepared for synchronization")
 	}
-	return m.createPairingCode()
+	return manager.createPairingCode()
 }
 
 func normalizePairingNodeName(nodeName string) (string, error) {
@@ -178,8 +178,8 @@ func normalizePairingNodeName(nodeName string) (string, error) {
 	return nodeName, nil
 }
 
-func (m *Manager) preparePairingState(ctx context.Context, nodeName string) (localState, error) {
-	state, err := m.readState(ctx)
+func (manager *Manager) preparePairingState(ctx context.Context, nodeName string) (localState, error) {
+	state, err := manager.readState(ctx)
 	if err != nil {
 		return localState{}, err
 	}
@@ -191,25 +191,25 @@ func (m *Manager) preparePairingState(ctx context.Context, nodeName string) (loc
 		if err != nil {
 			return localState{}, err
 		}
-		if err := m.initializeController(ctx, state, homeID, nodeName); err != nil {
+		if err := manager.initializeController(ctx, state, homeID, nodeName); err != nil {
 			return localState{}, err
 		}
-		return m.readState(ctx)
+		return manager.readState(ctx)
 	}
 	// Faro versions before compressed snapshots could leave the role set to
 	// controller while revision 0 had never actually been captured. Repair
 	// that state before issuing another pairing code.
 	if state.ConfigRevision == 0 {
-		if err := m.captureSnapshot(ctx, state); err != nil {
+		if err := manager.captureSnapshot(ctx, state); err != nil {
 			return localState{}, err
 		}
-		state, err = m.readState(ctx)
+		state, err = manager.readState(ctx)
 		if err != nil {
 			return localState{}, err
 		}
 	}
 	if state.NodeName != nodeName {
-		if _, err := m.store.DB.ExecContext(ctx, `UPDATE redundancy_state SET node_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, nodeName); err != nil {
+		if _, err := manager.store.DB.ExecContext(ctx, `UPDATE redundancy_state SET node_name = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, nodeName); err != nil {
 			return localState{}, err
 		}
 		state.NodeName = nodeName
@@ -217,7 +217,7 @@ func (m *Manager) preparePairingState(ctx context.Context, nodeName string) (loc
 	return state, nil
 }
 
-func (m *Manager) createPairingCode() (PairingCode, error) {
+func (manager *Manager) createPairingCode() (PairingCode, error) {
 	id, err := randomID(8)
 	if err != nil {
 		return PairingCode{}, err
@@ -230,27 +230,27 @@ func (m *Manager) createPairingCode() (PairingCode, error) {
 	if err != nil {
 		return PairingCode{}, err
 	}
-	expires := m.now().UTC().Add(10 * time.Minute)
-	m.mu.Lock()
-	m.pairings[id] = pairingSession{
+	expires := manager.now().UTC().Add(10 * time.Minute)
+	manager.mu.Lock()
+	manager.pairings[id] = pairingSession{
 		Token: token, PrivateKey: private.Bytes(), PublicKey: private.PublicKey().Bytes(), ExpiresAt: expires,
 	}
-	m.mu.Unlock()
+	manager.mu.Unlock()
 	return PairingCode{Code: encodePairingCode(id, token, private.PublicKey().Bytes()), ExpiresAt: expires.Format(time.RFC3339)}, nil
 }
 
-func (m *Manager) initializeController(ctx context.Context, state localState, homeID, nodeName string) error {
+func (manager *Manager) initializeController(ctx context.Context, state localState, homeID, nodeName string) error {
 	state.Role = RoleController
 	state.HomeID = homeID
 	state.NodeName = nodeName
 	state.ConfigRevision = 0
 	revision := int64(1)
-	payload, err := m.buildSnapshot(ctx, state, revision)
+	payload, err := manager.buildSnapshot(ctx, state, revision)
 	if err != nil {
 		return err
 	}
 
-	tx, err := m.store.DB.BeginTx(ctx, nil)
+	tx, err := manager.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -280,34 +280,34 @@ func (m *Manager) initializeController(ctx context.Context, state localState, ho
 	return tx.Commit()
 }
 
-func (m *Manager) buildSnapshot(ctx context.Context, state localState, revision int64) ([]byte, error) {
-	files, err := readGeneratedFiles(m.configDir)
+func (manager *Manager) buildSnapshot(ctx context.Context, state localState, revision int64) ([]byte, error) {
+	files, err := readGeneratedFiles(manager.configDir)
 	if err != nil {
 		return nil, err
 	}
 	runtime := map[string]string{}
 	for _, key := range []string{"upstream_dns", "upstream_transport"} {
 		var value string
-		if err := m.store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value); err != nil {
+		if err := manager.store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, key).Scan(&value); err != nil {
 			return nil, err
 		}
 		runtime[key] = value
 	}
 	snapshot := ConfigSnapshot{
 		SchemaVersion: snapshotSchemaVersion,
-		HomeID:        state.HomeID, Revision: revision, CreatedAt: m.now().UTC().Format(time.RFC3339),
+		HomeID:        state.HomeID, Revision: revision, CreatedAt: manager.now().UTC().Format(time.RFC3339),
 		RuntimeSettings: runtime, Files: files,
 	}
 	return encodeSnapshot(snapshot, maxSnapshotTransportBytes)
 }
 
-func (m *Manager) captureSnapshot(ctx context.Context, state localState) error {
+func (manager *Manager) captureSnapshot(ctx context.Context, state localState) error {
 	revision := state.ConfigRevision + 1
-	payload, err := m.buildSnapshot(ctx, state, revision)
+	payload, err := manager.buildSnapshot(ctx, state, revision)
 	if err != nil {
 		return err
 	}
-	tx, err := m.store.DB.BeginTx(ctx, nil)
+	tx, err := manager.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -376,8 +376,8 @@ func readGeneratedFiles(configDir string) (map[string]string, error) {
 	return files, nil
 }
 
-func (m *Manager) Join(ctx context.Context, input JoinInput) (JoinResult, error) {
-	state, err := m.readState(ctx)
+func (manager *Manager) Join(ctx context.Context, input JoinInput) (JoinResult, error) {
+	state, err := manager.readState(ctx)
 	if err != nil {
 		return JoinResult{}, err
 	}
@@ -388,7 +388,7 @@ func (m *Manager) Join(ctx context.Context, input JoinInput) (JoinResult, error)
 	if err != nil {
 		return JoinResult{}, err
 	}
-	pairResult, err := m.requestPairing(ctx, parameters)
+	pairResult, err := manager.requestPairing(ctx, parameters)
 	if err != nil {
 		return JoinResult{}, err
 	}
@@ -396,13 +396,13 @@ func (m *Manager) Join(ctx context.Context, input JoinInput) (JoinResult, error)
 	if err != nil {
 		return JoinResult{}, err
 	}
-	if err := m.persistReplicaState(ctx, parameters, payload, nodeSecret); err != nil {
+	if err := manager.persistReplicaState(ctx, parameters, payload, nodeSecret); err != nil {
 		return JoinResult{}, err
 	}
-	if err := m.syncReplica(ctx); err != nil {
-		m.recordReplicaError(context.WithoutCancel(ctx), err)
+	if err := manager.syncReplica(ctx); err != nil {
+		manager.recordReplicaError(context.WithoutCancel(ctx), err)
 	}
-	status, statusErr := m.PublicStatus(ctx)
+	status, statusErr := manager.PublicStatus(ctx)
 	return JoinResult{Status: status}, statusErr
 }
 
@@ -443,7 +443,7 @@ func prepareJoinParameters(ctx context.Context, input JoinInput, state localStat
 	return joinParameters{controllerURL: controllerURL, code: code, nodeName: nodeName, privateKey: private, request: request}, nil
 }
 
-func (m *Manager) requestPairing(ctx context.Context, parameters joinParameters) (PairResponse, error) {
+func (manager *Manager) requestPairing(ctx context.Context, parameters joinParameters) (PairResponse, error) {
 	encoded, err := json.Marshal(parameters.request)
 	if err != nil {
 		return PairResponse{}, fmt.Errorf("encode pairing request: %w", err)
@@ -453,7 +453,7 @@ func (m *Manager) requestPairing(ctx context.Context, parameters joinParameters)
 		return PairResponse{}, err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := m.client.Do(request)
+	response, err := manager.client.Do(request)
 	if err != nil {
 		return PairResponse{}, fmt.Errorf("connect to the Faro controller: %w", err)
 	}
@@ -492,8 +492,8 @@ func decodePairingResponse(pairResult PairResponse, private *ecdh.PrivateKey, co
 	return payload, nodeSecret, nil
 }
 
-func (m *Manager) persistReplicaState(ctx context.Context, parameters joinParameters, payload pairPayload, nodeSecret []byte) error {
-	masterKey, err := secrets.LoadOrCreateKey(m.secretKeyPath)
+func (manager *Manager) persistReplicaState(ctx context.Context, parameters joinParameters, payload pairPayload, nodeSecret []byte) error {
+	masterKey, err := secrets.LoadOrCreateKey(manager.secretKeyPath)
 	if err != nil {
 		return err
 	}
@@ -501,7 +501,7 @@ func (m *Manager) persistReplicaState(ctx context.Context, parameters joinParame
 	if err != nil {
 		return err
 	}
-	_, err = m.store.DB.ExecContext(ctx, `
+	_, err = manager.store.DB.ExecContext(ctx, `
 		UPDATE redundancy_state
 		SET role = ?, home_id = ?, node_name = ?, controller_url = ?, secret_ciphertext = ?,
 		    config_revision = 0, last_sync_at = NULL, last_error = '', updated_at = CURRENT_TIMESTAMP
@@ -510,15 +510,15 @@ func (m *Manager) persistReplicaState(ctx context.Context, parameters joinParame
 	return err
 }
 
-func (m *Manager) RemoveNode(ctx context.Context, nodeID string) error {
-	state, err := m.readState(ctx)
+func (manager *Manager) RemoveNode(ctx context.Context, nodeID string) error {
+	state, err := manager.readState(ctx)
 	if err != nil {
 		return err
 	}
 	if state.Role != RoleController {
 		return errors.New("only the controller can remove replica servers")
 	}
-	result, err := m.store.DB.ExecContext(ctx, `DELETE FROM redundancy_nodes WHERE node_id = ?`, strings.TrimSpace(nodeID))
+	result, err := manager.store.DB.ExecContext(ctx, `DELETE FROM redundancy_nodes WHERE node_id = ?`, strings.TrimSpace(nodeID))
 	if err != nil {
 		return err
 	}
@@ -535,46 +535,46 @@ func (m *Manager) RemoveNode(ctx context.Context, nodeID string) error {
 // Leave returns this installation to standalone mode. A replica first renders
 // and validates its own database-backed DNS configuration so the UI and the
 // running DNS engine cannot be left describing different configurations.
-func (m *Manager) Leave(ctx context.Context) (PublicStatus, error) {
-	m.operationMu.Lock()
-	defer m.operationMu.Unlock()
+func (manager *Manager) Leave(ctx context.Context) (PublicStatus, error) {
+	manager.operationMu.Lock()
+	defer manager.operationMu.Unlock()
 
-	previous, err := m.readState(ctx)
+	previous, err := manager.readState(ctx)
 	if err != nil {
 		return PublicStatus{}, err
 	}
 	if previous.Role == RoleStandalone {
 		return PublicStatus{}, errors.New("this Faro server is not using redundancy")
 	}
-	if previous.Role == RoleReplica && m.applier == nil {
+	if previous.Role == RoleReplica && manager.applier == nil {
 		return PublicStatus{}, errors.New("DNS configuration manager is unavailable")
 	}
 
-	if err := m.setStandalone(ctx); err != nil {
+	if err := manager.setStandalone(ctx); err != nil {
 		return PublicStatus{}, err
 	}
 	if previous.Role == RoleReplica {
-		if err := m.applier.Apply(ctx); err != nil {
-			if restoreErr := m.restoreState(context.WithoutCancel(ctx), previous); restoreErr != nil {
+		if err := manager.applier.Apply(ctx); err != nil {
+			if restoreErr := manager.restoreState(context.WithoutCancel(ctx), previous); restoreErr != nil {
 				return PublicStatus{}, fmt.Errorf("restore standalone DNS configuration: %v; restore redundancy state: %w", err, restoreErr)
 			}
 			return PublicStatus{}, fmt.Errorf("restore standalone DNS configuration: %w", err)
 		}
 	}
 
-	m.mu.Lock()
-	m.pairings = map[string]pairingSession{}
-	m.replays = map[string]map[string]time.Time{}
-	m.mu.Unlock()
-	state, err := m.readState(ctx)
+	manager.mu.Lock()
+	manager.pairings = map[string]pairingSession{}
+	manager.replays = map[string]map[string]time.Time{}
+	manager.mu.Unlock()
+	state, err := manager.readState(ctx)
 	if err != nil {
 		return PublicStatus{}, err
 	}
 	return publicStatus(state), nil
 }
 
-func (m *Manager) setStandalone(ctx context.Context) error {
-	tx, err := m.store.DB.BeginTx(ctx, nil)
+func (manager *Manager) setStandalone(ctx context.Context) error {
+	tx, err := manager.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -596,8 +596,8 @@ func (m *Manager) setStandalone(ctx context.Context) error {
 	return tx.Commit()
 }
 
-func (m *Manager) restoreState(ctx context.Context, state localState) error {
-	_, err := m.store.DB.ExecContext(ctx, `
+func (manager *Manager) restoreState(ctx context.Context, state localState) error {
+	_, err := manager.store.DB.ExecContext(ctx, `
 		UPDATE redundancy_state
 		SET role = ?, home_id = ?, node_id = ?, node_name = ?, controller_url = ?,
 		    secret_ciphertext = ?, config_revision = ?,
@@ -608,9 +608,9 @@ func (m *Manager) restoreState(ctx context.Context, state localState) error {
 	return err
 }
 
-func (m *Manager) readState(ctx context.Context) (localState, error) {
+func (manager *Manager) readState(ctx context.Context) (localState, error) {
 	var state localState
-	err := m.store.DB.QueryRowContext(ctx, `
+	err := manager.store.DB.QueryRowContext(ctx, `
 		SELECT role, home_id, node_id, node_name, controller_url, secret_ciphertext,
 		       config_revision, COALESCE(last_sync_at, ''), last_error
 		FROM redundancy_state WHERE id = 1`).Scan(
@@ -627,30 +627,30 @@ func publicStatus(state localState) PublicStatus {
 	}
 }
 
-func (m *Manager) triggerSync() {
+func (manager *Manager) triggerSync() {
 	select {
-	case m.syncNow <- struct{}{}:
+	case manager.syncNow <- struct{}{}:
 	default:
 	}
 }
 
-func (m *Manager) expirePairings() {
-	now := m.now()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for id, pairing := range m.pairings {
+func (manager *Manager) expirePairings() {
+	now := manager.now()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	for id, pairing := range manager.pairings {
 		if !pairing.ExpiresAt.After(now) {
-			delete(m.pairings, id)
+			delete(manager.pairings, id)
 		}
 	}
-	for nodeID, nonces := range m.replays {
+	for nodeID, nonces := range manager.replays {
 		for nonce, seen := range nonces {
 			if now.Sub(seen) > 5*time.Minute {
 				delete(nonces, nonce)
 			}
 		}
 		if len(nonces) == 0 {
-			delete(m.replays, nodeID)
+			delete(manager.replays, nodeID)
 		}
 	}
 }
@@ -720,8 +720,8 @@ func cleanHTTPError(body []byte, fallback string) string {
 	return fallback
 }
 
-func (m *Manager) recordReplicaError(ctx context.Context, err error) {
-	if _, updateErr := m.store.DB.ExecContext(ctx, `
+func (manager *Manager) recordReplicaError(ctx context.Context, err error) {
+	if _, updateErr := manager.store.DB.ExecContext(ctx, `
 		UPDATE redundancy_state SET last_error = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = 1 AND role = ?`, truncate(err.Error(), 500), RoleReplica); updateErr != nil {
 		log.Printf("record redundancy replica error: %v", updateErr)

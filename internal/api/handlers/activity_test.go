@@ -136,3 +136,72 @@ func TestEventsPaginationMergesPersistedAndDerivedActivity(t *testing.T) {
 		t.Fatalf("unexpected merged counts: %#v", first.Counts)
 	}
 }
+
+func TestEventsRangeFiltersRowsAndBuildsTimeline(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	queries := []struct {
+		timestamp string
+		domain    string
+		action    string
+	}{
+		{timestamp: "2026-07-12T12:05:00Z", domain: "inside-allowed.example", action: "allowed"},
+		{timestamp: "2026-07-12T12:15:00Z", domain: "inside-blocked.example", action: "blocked"},
+		{timestamp: "2026-07-12T12:30:00Z", domain: "outside.example", action: "allowed"},
+	}
+	for _, query := range queries {
+		if _, err := store.DB.Exec(`
+			INSERT INTO dns_queries(timestamp, client_ip, domain, query_type, action, source)
+			VALUES(?, '192.168.7.22', ?, 'A', ?, 'upstream')
+		`, query.timestamp, query.domain, query.action); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	handler := &Handler{store: store}
+	request := httptest.NewRequest(http.MethodGet, "/api/events?scope=dns&range=custom&from=2026-07-12T12:00:00Z&to=2026-07-12T12:30:00Z", nil)
+	response := httptest.NewRecorder()
+	handler.events(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Items []struct {
+			Domain string `json:"domain"`
+		} `json:"items"`
+		Total    int            `json:"total"`
+		Counts   map[string]int `json:"counts"`
+		Timeline *struct {
+			BucketSeconds int `json:"bucket_seconds"`
+			Buckets       []struct {
+				Total   int `json:"total"`
+				Blocked int `json:"blocked"`
+			} `json:"buckets"`
+		} `json:"timeline"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Total != 2 || payload.Counts["dns"] != 2 || payload.Counts["blocked"] != 1 {
+		t.Fatalf("unexpected ranged activity metadata: %#v", payload)
+	}
+	if len(payload.Items) != 2 || payload.Items[0].Domain != "inside-blocked.example" || payload.Items[1].Domain != "inside-allowed.example" {
+		t.Fatalf("unexpected ranged activity: %#v", payload.Items)
+	}
+	if payload.Timeline == nil || payload.Timeline.BucketSeconds != 60 || len(payload.Timeline.Buckets) != 30 {
+		t.Fatalf("unexpected timeline shape: %#v", payload.Timeline)
+	}
+	total, blocked := 0, 0
+	for _, bucket := range payload.Timeline.Buckets {
+		total += bucket.Total
+		blocked += bucket.Blocked
+	}
+	if total != 2 || blocked != 1 {
+		t.Fatalf("unexpected timeline totals: total=%d blocked=%d", total, blocked)
+	}
+}

@@ -84,7 +84,7 @@ function AuthLayout({ mode, onJoinExisting, ...formProps }: AuthLayoutProps) {
       <section className="auth-main" aria-labelledby="auth-title">
         <div className="auth-form-wrap">
           <AuthForm mode={mode} {...formProps} />
-          {isSetup && onJoinExisting && <JoinExisting onJoinExisting={onJoinExisting} />}
+          {onJoinExisting && <JoinExisting onJoinExisting={onJoinExisting} />}
         </div>
       </section>
     </main>

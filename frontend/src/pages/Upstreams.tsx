@@ -1,8 +1,9 @@
 import { AlertTriangle, Check, Gauge, LockKeyhole, Network, Plus, RefreshCw, RotateCcw, Save, Server, ShieldCheck, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useMemo, useState, type SubmitEvent } from "react";
 import { api, type EncryptedUpstreamEndpoint, type Setting, type UpstreamProbe } from "../api/client";
-import { allCatalogAddresses, findUpstreamAddress, parseUpstreamServers, upstreamProviders, type ResolverProfile } from "../data/upstreams";
+import { allCatalogAddresses, encryptedEndpointForAddresses, encryptedEndpointIndex, findUpstreamAddress, parseUpstreamServers, upstreamProviders, type ResolverProfile } from "../data/upstreams";
 import { ProviderLogo } from "../components/ProviderLogo";
+import { formatLatency, latencyTone } from "../utils/formatting";
 
 type UpstreamsProps = {
   readonly settings: Setting[];
@@ -237,7 +238,7 @@ function ResolverProfileButton({ profile, probes, selectedSet, fastestProfileID,
   const fullySelected = selectedCount === profile.addresses.length;
   const partiallySelected = selectedCount > 0 && !fullySelected;
   const profileProbe = bestProbe(profile.addresses, probes);
-  const encryptedEndpoint = encryptedEndpointForProfile(profile, encryptedByAddress);
+  const encryptedEndpoint = encryptedEndpointForAddresses(profile.addresses, encryptedByAddress);
   const encryptedUnavailable = transport === "encrypted" && catalogLoaded && !encryptedEndpoint;
   const endpointText = encryptedEndpoint?.url ?? (catalogLoaded ? "Not offered by Faro" : "Checking support…");
   return <button className={`resolver-profile ${fullySelected ? "selected" : ""} ${partiallySelected ? "partial" : ""} ${encryptedUnavailable ? "unavailable" : ""}`} type="button" onClick={() => onToggle(profile)} aria-pressed={fullySelected} disabled={encryptedUnavailable}>{(fullySelected || partiallySelected) && <span className="profile-check" aria-hidden="true">{fullySelected ? <Check size={16} /> : selectedCount}</span>}<span className="profile-copy"><span className="profile-title-row"><strong>{profile.name}</strong><span className="profile-title-badges">{profile.id === fastestProfileID && <em className="fastest">Fastest</em>}{profile.recommended && <em>Recommended</em>}{transport === "encrypted" && encryptedEndpoint && <em className="encrypted"><LockKeyhole size={11} /> HTTPS available</em>}{transport === "encrypted" && !catalogLoaded && <em>Checking HTTPS</em>}{encryptedUnavailable && <em className="standard-only">Standard only</em>}</span></span><span>{profile.description}</span><span className="profile-latency"><Gauge size={14} /><ProbeText probe={profileProbe} loading={probing && !profileProbe} /></span><ProfileEndpoint profile={profile} transport={transport} endpoint={encryptedEndpoint} endpointText={endpointText} probes={probes} probing={probing} /></span><span className="profile-badges">{profile.badges.map((badge) => <span key={badge}>{badge}</span>)}</span></button>;
@@ -299,19 +300,6 @@ function pluralize(label: string, count: number) {
   return `${label}${count === 1 ? "" : "s"}`;
 }
 
-function encryptedEndpointIndex(endpoints: EncryptedUpstreamEndpoint[]) {
-  const index = new Map<string, EncryptedUpstreamEndpoint>();
-  endpoints.forEach((endpoint) => endpoint.bootstrap_ips.forEach((address) => index.set(address, endpoint)));
-  return index;
-}
-
-function encryptedEndpointForProfile(profile: ResolverProfile, index: Map<string, EncryptedUpstreamEndpoint>) {
-  const endpoints = profile.addresses.map((address) => index.get(address));
-  const first = endpoints[0];
-  if (!first || endpoints.some((endpoint) => endpoint?.url !== first.url)) return null;
-  return first;
-}
-
 function isIPAddress(value: string) {
   if (value.includes(":")) {
     try {
@@ -361,14 +349,4 @@ function probeState(probe?: UpstreamProbe, loading = false) {
   if (!probe) return { label: loading ? "Testing" : "Not tested", tone: "pending" };
   if (probe.status === "online" && probe.latency_ms !== null) return { label: `${formatLatency(probe.latency_ms)} ms`, tone: latencyTone(probe.latency_ms) };
   return { label: "Unavailable", tone: "offline" };
-}
-
-function formatLatency(value: number) {
-  return value >= 100 ? Math.round(value).toString() : value.toFixed(value >= 10 ? 0 : 1);
-}
-
-function latencyTone(value: number) {
-  if (value < 40) return "fast";
-  if (value < 100) return "moderate";
-  return "slow";
 }

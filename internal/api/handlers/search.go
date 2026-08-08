@@ -1,18 +1,23 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 )
 
-func (s *Handler) search(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
+func (handler *Handler) search(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(responseWriter)
 		return
 	}
-	q := strings.TrimSpace(r.URL.Query().Get("q"))
-	if q == "" {
-		writeJSON(w, http.StatusOK, map[string]any{
+	query := strings.TrimSpace(request.URL.Query().Get("q"))
+	if len(query) > maxActivitySearchLength {
+		writeBadRequest(responseWriter, errors.New("search must be 100 characters or fewer"))
+		return
+	}
+	if query == "" {
+		writeJSON(responseWriter, http.StatusOK, map[string]any{
 			"domains":       []map[string]any{},
 			"devices":       []map[string]any{},
 			"events":        []map[string]any{},
@@ -22,16 +27,16 @@ func (s *Handler) search(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	like := "%" + q + "%"
-	writeJSON(w, http.StatusOK, map[string]any{
-		"domains": grouped(r.Context(), s.store.DB, `
+	like := "%" + query + "%"
+	writeJSON(responseWriter, http.StatusOK, map[string]any{
+		"domains": grouped(request.Context(), handler.store.DB, `
 			SELECT domain, COUNT(*) FROM dns_queries
 			WHERE domain LIKE ?
 			GROUP BY domain
 			ORDER BY MAX(timestamp) DESC
 			LIMIT 8
 		`, like),
-		"devices": searchRows(r.Context(), s.store.DB, `
+		"devices": searchRows(request.Context(), handler.store.DB, `
 			SELECT
 				(SELECT address FROM device_addresses WHERE device_id = d.id ORDER BY last_seen_at DESC, id DESC LIMIT 1) AS label,
 				COALESCE(NULLIF(d.name, ''), 'Observed device') AS subtitle
@@ -40,21 +45,21 @@ func (s *Handler) search(w http.ResponseWriter, r *http.Request) {
 			ORDER BY COALESCE(NULLIF(d.name, ''), label)
 			LIMIT 8
 		`, like, like),
-		"events": searchRows(r.Context(), s.store.DB, `
+		"events": searchRows(request.Context(), handler.store.DB, `
 			SELECT title AS label, type || ' · ' || description AS subtitle
 			FROM events
 			WHERE title LIKE ? OR description LIKE ? OR type LIKE ? OR domain LIKE ? OR client_ip LIKE ?
 			ORDER BY timestamp DESC
 			LIMIT 8
 		`, like, like, like, like, like),
-		"local_records": searchRows(r.Context(), s.store.DB, `
+		"local_records": searchRows(request.Context(), handler.store.DB, `
 			SELECT hostname AS label, type || ' ' || value AS subtitle
 			FROM dns_records
 			WHERE hostname LIKE ? OR value LIKE ? OR description LIKE ?
 			ORDER BY hostname
 			LIMIT 8
 		`, like, like, like),
-		"rules": searchRows(r.Context(), s.store.DB, `
+		"rules": searchRows(request.Context(), handler.store.DB, `
 			SELECT e.domain AS label, 'Allowed in ' || p.name AS subtitle
 			FROM protection_allow_entries e JOIN protection_profiles p ON p.id = e.protection_id
 			WHERE e.domain LIKE ?
@@ -65,7 +70,7 @@ func (s *Handler) search(w http.ResponseWriter, r *http.Request) {
 			ORDER BY label
 			LIMIT 8
 		`, like, like),
-		"blocklists": searchRows(r.Context(), s.store.DB, `
+		"blocklists": searchRows(request.Context(), handler.store.DB, `
 			SELECT name AS label, url AS subtitle
 			FROM blocklists
 			WHERE name LIKE ? OR url LIKE ?

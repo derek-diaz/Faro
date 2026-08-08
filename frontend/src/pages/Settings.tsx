@@ -1,8 +1,10 @@
-import { AlertTriangle, Cable, Check, CheckCircle2, Clock3, Cpu, Database, Download, Eye, EyeOff, FileArchive, Gauge, Globe2, HardDrive, Image, KeyRound, LockKeyhole, Network, RefreshCw, RotateCw, Save, Server, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react";
+import { AlertTriangle, Cable, Check, CheckCircle2, Clock3, Code2, Cpu, Database, Download, Eye, EyeOff, FileArchive, Gauge, Globe2, HardDrive, Image, KeyRound, LockKeyhole, Network, RefreshCw, RotateCw, Save, Server, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode, type SubmitEvent } from "react";
-import { api, type MaintenanceStatus, type PruneResult, type Setting } from "../api/client";
-import { UnifiIntegration } from "../components/UnifiIntegration";
+import { api, type CoreDNSDiagnosticFile, type CoreDNSDiagnostics, type MaintenanceStatus, type PruneResult, type Setting } from "../api/client";
+import { LoadingState } from "../components/LoadingState";
 import { RedundancySettings } from "../components/RedundancySettings";
+import { UnifiIntegration } from "../components/UnifiIntegration";
+import { formatNumber } from "../utils/formatting";
 
 type SettingsProps = {
   readonly settings: Setting[];
@@ -10,7 +12,7 @@ type SettingsProps = {
   readonly onManageUpstreams: () => void;
 };
 
-type SettingsTab = "general" | "redundancy" | "integrations" | "data" | "account";
+type SettingsTab = "general" | "redundancy" | "integrations" | "data" | "advanced" | "account";
 type ActionState = "idle" | "working" | "done" | "error";
 
 export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps) {
@@ -213,7 +215,7 @@ type SettingsWorkspaceProps = {
 
 function SettingsWorkspace(props: SettingsWorkspaceProps) {
   const { tab, setTab, message, actionState } = props;
-  return <div className="settings-workspace"><div className="settings-tabs" role="tablist" aria-label="Settings sections"><button type="button" role="tab" aria-selected={tab === "general"} className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}><Gauge size={16} /> DNS & interface</button><button type="button" role="tab" aria-selected={tab === "data"} className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}><Database size={16} /> Health & data</button><button type="button" role="tab" aria-selected={tab === "redundancy"} className={tab === "redundancy" ? "active" : ""} onClick={() => setTab("redundancy")}><Network size={16} /> Redundancy</button><button type="button" role="tab" aria-selected={tab === "integrations"} className={tab === "integrations" ? "active" : ""} onClick={() => setTab("integrations")}><Cable size={16} /> Integrations</button><button type="button" role="tab" aria-selected={tab === "account"} className={tab === "account" ? "active" : ""} onClick={() => setTab("account")}><UserRound size={16} /> Account</button></div>{message && <div className={`settings-feedback ${actionState === "error" ? "error" : "success"}`}><CheckCircle2 size={16} /><span>{message}</span></div>}<SettingsTabContent {...props} /></div>;
+  return <div className="settings-workspace"><div className="settings-tabs" role="tablist" aria-label="Settings sections"><button type="button" role="tab" aria-selected={tab === "general"} className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}><Gauge size={16} /> DNS & interface</button><button type="button" role="tab" aria-selected={tab === "data"} className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}><Database size={16} /> Health & data</button><button type="button" role="tab" aria-selected={tab === "advanced"} className={tab === "advanced" ? "active" : ""} onClick={() => setTab("advanced")}><Code2 size={16} /> Advanced</button><button type="button" role="tab" aria-selected={tab === "redundancy"} className={tab === "redundancy" ? "active" : ""} onClick={() => setTab("redundancy")}><Network size={16} /> Redundancy</button><button type="button" role="tab" aria-selected={tab === "integrations"} className={tab === "integrations" ? "active" : ""} onClick={() => setTab("integrations")}><Cable size={16} /> Integrations</button><button type="button" role="tab" aria-selected={tab === "account"} className={tab === "account" ? "active" : ""} onClick={() => setTab("account")}><UserRound size={16} /> Account</button></div>{message && <div className={`settings-feedback ${actionState === "error" ? "error" : "success"}`}><CheckCircle2 size={16} /><span>{message}</span></div>}<SettingsTabContent {...props} /></div>;
 }
 
 function SettingsTabContent(props: SettingsWorkspaceProps) {
@@ -224,6 +226,8 @@ function SettingsTabContent(props: SettingsWorkspaceProps) {
       return <RedundancySettings />;
     case "data":
       return <DataAndHealth maintenance={props.maintenance} loading={props.maintenanceLoading} retentionDays={props.form.retention_days || "30"} setRetentionDays={(value) => props.setForm({ ...props.form, retention_days: value })} saveRetention={props.saveRetention} pruneDays={props.pruneDays} setPruneDays={props.setPruneDays} compact={props.compact} setCompact={props.setCompact} prune={props.prune} refresh={props.refreshMaintenance} busy={props.actionState === "working"} result={props.pruneResult} />;
+    case "advanced":
+      return <AdvancedSettings />;
     case "integrations":
       return <UnifiIntegration onChanged={props.refresh} />;
     case "account":
@@ -340,6 +344,7 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
           <HealthMetric icon={<HardDrive size={18} />} label="Database storage" value={storage ? formatBytes(storage.database_bytes) : "—"} detail={storage ? `${formatBytes(storage.database_reclaimable_bytes)} reclaimable` : "SQLite file allocation"} />
           <HealthMetric icon={<Database size={18} />} label="Activity records" value={storage ? formatNumber(storage.query_count + storage.event_count) : "—"} detail={storage ? `${formatNumber(storage.query_count)} DNS · ${formatNumber(storage.event_count)} system` : "Queries and system events"} />
         </div>
+        {storage?.activity_storage && storage.activity_storage.status !== "healthy" && <div className="activity-storage-status" role="status"><AlertTriangle size={17} /><div><strong>Activity storage: {storage.activity_storage.status === "paused" ? "Paused" : "Unavailable"}</strong><span>Reason: {storage.activity_storage.reason || "Database write failed"}. DNS resolution continues normally.</span></div></div>}
       </section>
 
       <div className="maintenance-columns">
@@ -381,16 +386,192 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
           </div>
 
           <div className="backup-action-card restore-card">
-            <div className="backup-card-heading"><Upload size={19} /><div><strong>Restore encrypted backup</strong><span>This replaces the live database and reloads DNS configuration.</span></div></div>
+            <div className="backup-card-heading"><Upload size={19} /><div><strong>Restore encrypted backup</strong><span>This replaces the existing Faro configuration, records, rules, and query history, then reloads DNS.</span></div></div>
             <label><span>Backup file</span><input type="file" accept=".faro-backup,application/octet-stream" onChange={(event) => setRestoreFile(event.target.files?.[0] ?? null)} /></label>
             <label><span>Backup passphrase</span><input type="password" minLength={12} autoComplete="off" value={restorePassphrase} onChange={(event) => setRestorePassphrase(event.target.value)} /></label>
-            <label className="restore-confirmation"><input type="checkbox" checked={restoreConfirmed} onChange={(event) => setRestoreConfirmed(event.target.checked)} /><span>I understand this replaces current data and signs out every session.</span></label>
+            <div className="restore-impact-note">
+              <strong>Before you restore</strong>
+              <ul>
+                <li>Existing backup-covered state will be replaced.</li>
+                <li>UniFi credentials and replica relationships are not included; any local ones stay unchanged.</li>
+                <li>All active sessions will be invalidated, so you will sign in again.</li>
+                <li>The backup passphrase cannot be recovered.</li>
+              </ul>
+            </div>
+            <label className="restore-confirmation"><input type="checkbox" checked={restoreConfirmed} onChange={(event) => setRestoreConfirmed(event.target.checked)} /><span>I understand this replaces the backup-covered state and signs out every session.</span></label>
             <button type="button" className="danger-outline icon-text-button" onClick={() => void restoreBackup()} disabled={busy || backupBusy !== null || !restoreConfirmed}><Upload size={16} /><span>{backupBusy === "restore" ? "Validating and restoring" : "Restore backup"}</span></button>
           </div>
         </div>
       </section>
+
     </div>
   );
+}
+
+function AdvancedSettings() {
+  return <div className="settings-advanced-layout"><CoreDNSDiagnosticsPanel /></div>;
+}
+
+function CoreDNSDiagnosticsPanel() {
+  const [loading, setLoading] = useState(true);
+  const [diagnostics, setDiagnostics] = useState<CoreDNSDiagnostics | null>(null);
+  const [error, setError] = useState("");
+  const [expandedFile, setExpandedFile] = useState<string | null>(null);
+  const [comparisonFile, setComparisonFile] = useState<string | null>(null);
+
+  useEffect(() => {
+    void refreshDiagnostics();
+  }, []);
+
+  useEffect(() => {
+    if (!diagnostics) return;
+    const mismatch = diagnostics.status === "drifted" ? diagnostics.files.find((file) => file.referenced && !file.matches) : undefined;
+    if (mismatch) {
+      setExpandedFile(mismatch.name);
+      setComparisonFile(mismatch.name);
+      return;
+    }
+    setExpandedFile(null);
+    setComparisonFile(null);
+  }, [diagnostics]);
+
+  useEffect(() => {
+    if (!expandedFile) return;
+    document.getElementById(diagnosticFileId(expandedFile))?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [expandedFile]);
+
+  async function refreshDiagnostics() {
+    setLoading(true);
+    setError("");
+    try {
+      setDiagnostics(await api.corednsDiagnostics());
+    } catch (error_) {
+      setError(error_ instanceof Error ? error_.message : "CoreDNS diagnostics could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function viewActiveCorefile() {
+    const corefile = diagnostics?.files.find((file) => file.name === "Corefile");
+    if (!corefile) return;
+    setExpandedFile(corefile.name);
+    setComparisonFile(null);
+  }
+
+  function viewDifferences() {
+    const mismatch = diagnostics?.files.find((file) => file.referenced && !file.matches);
+    if (!mismatch) return;
+    setExpandedFile(mismatch.name);
+    setComparisonFile(mismatch.name);
+  }
+
+  const corefile = diagnostics?.files.find((file) => file.name === "Corefile");
+  const activeFiles = diagnostics?.files.filter((file) => file.referenced) ?? [];
+
+  return (
+    <div className="advanced-diagnostics-page">
+      <section className="panel configuration-panel">
+        <div className="maintenance-section-heading"><ShieldCheck size={20} /><div><h2>CoreDNS configuration</h2><p>Faro manages CoreDNS automatically. Inspect the configuration and supporting files currently used by the DNS server.</p></div></div>
+        {loading ? <LoadingState title="Inspecting DNS state" description="Comparing accepted CoreDNS files with Faro’s generated candidate…" /> : <>
+          {error && <DiagnosticsRequestError message={error} onRetry={() => void refreshDiagnostics()} />}
+          {diagnostics && <ConfigurationHealth diagnostics={diagnostics} corefile={corefile} loading={loading} onRefresh={() => void refreshDiagnostics()} onViewCorefile={viewActiveCorefile} onViewDifferences={viewDifferences} />}
+        </>}
+      </section>
+
+      {!loading && diagnostics && <>
+        <section className="panel generated-files-panel">
+          <div className="generated-files-heading"><div className="maintenance-section-heading"><Code2 size={19} /><div><h2>Active configuration files</h2><p>Files currently used by Faro’s DNS server.</p></div></div></div>
+          <div className="diagnostics-safety-note"><ShieldCheck size={15} /><span>Read-only inspection. These files may contain local hostnames and network details.</span></div>
+          <div className="generated-files-list">
+            {activeFiles.map((file) => <GeneratedDNSFileRow key={file.name} file={file} expanded={expandedFile === file.name} comparing={comparisonFile === file.name} onToggle={() => setExpandedFile((current) => current === file.name ? null : file.name)} onCompare={() => setComparisonFile((current) => current === file.name ? null : file.name)} />)}
+            {activeFiles.length === 0 && <div className="diagnostics-empty">No CoreDNS-referenced files are present yet.</div>}
+          </div>
+        </section>
+
+      </>}
+    </div>
+  );
+}
+
+function DiagnosticsRequestError({ message, onRetry }: { readonly message: string; readonly onRetry: () => void }) {
+  return <div className="diagnostics-request-error" role="alert"><AlertTriangle size={17} /><div><strong>CoreDNS diagnostics are unavailable</strong><span>{message}</span></div><button type="button" className="secondary" onClick={onRetry}>Try again</button></div>;
+}
+
+function ConfigurationHealth({ diagnostics, corefile, loading, onRefresh, onViewCorefile, onViewDifferences }: { readonly diagnostics: CoreDNSDiagnostics; readonly corefile?: CoreDNSDiagnosticFile; readonly loading: boolean; readonly onRefresh: () => void; readonly onViewCorefile: () => void; readonly onViewDifferences: () => void }) {
+  const health = configurationHealthCopy(diagnostics);
+  const hasMismatch = diagnostics.status === "drifted" && diagnostics.files.some((file) => file.referenced && !file.matches);
+  return <div className={`configuration-health ${health.tone}`}><span className="configuration-health-icon">{health.tone === "healthy" ? <CheckCircle2 size={21} /> : <AlertTriangle size={20} />}</span><div className="configuration-health-copy"><strong>{health.title}</strong><span>{health.description}</span></div><div className="configuration-health-actions"><button type="button" className="secondary icon-text-button" onClick={onRefresh} disabled={loading}><RefreshCw size={15} /><span>Refresh</span></button><button type="button" className="secondary" onClick={hasMismatch ? onViewDifferences : onViewCorefile} disabled={hasMismatch ? false : !corefile}>{hasMismatch ? "View differences" : "View active Corefile"}</button></div></div>;
+}
+
+function configurationHealthCopy(diagnostics: CoreDNSDiagnostics): { readonly title: string; readonly description: string; readonly tone: "healthy" | "warning" | "error" } {
+  switch (diagnostics.status) {
+    case "healthy":
+      return { title: "Configuration healthy", description: "CoreDNS is running the latest configuration generated by Faro.", tone: "healthy" };
+    case "drifted":
+      return { title: "Configuration mismatch", description: "One or more active files differ from Faro’s generated configuration. Review the differences below.", tone: "warning" };
+    case "not_initialized":
+      return { title: "Configuration not initialized", description: "Faro has not accepted a CoreDNS configuration yet.", tone: "warning" };
+    case "generator_error":
+      return { title: "Configuration generation failed", description: diagnostics.error ? `${diagnostics.error} Faro is keeping the last accepted DNS files.` : "Faro could not generate a current candidate. The last accepted DNS files remain in use.", tone: "error" };
+    default:
+      return { title: "Configuration unavailable", description: "Faro could not read the current CoreDNS state.", tone: "error" };
+  }
+}
+
+function GeneratedDNSFileRow({ file, expanded, comparing, onToggle, onCompare }: { readonly file: CoreDNSDiagnosticFile; readonly expanded: boolean; readonly comparing: boolean; readonly onToggle: () => void; readonly onCompare: () => void }) {
+  return <div id={diagnosticFileId(file.name)} className={`generated-file-item ${expanded ? "expanded" : ""} ${file.matches ? "current" : "different"}`}><button type="button" className="generated-file-row" aria-expanded={expanded} onClick={onToggle}><span className="generated-file-name"><Code2 size={15} /><strong>{file.name}</strong></span><span className={`generated-file-state ${file.matches ? "current" : "different"}`}>{diagnosticFileState(file)}</span><span className="generated-file-chevron" aria-hidden="true">{expanded ? "−" : "+"}</span></button>{expanded && <div className="generated-file-inspector"><div className="generated-file-inspector-meta"><span>Active file · {formatBytes(file.active_bytes)}</span><span>Read only</span></div><pre>{file.active || "File not present."}</pre>{file.active_truncated && <small>Preview truncated at 1 MiB; the byte count and hash cover the full file.</small>}<div className="generated-file-inspector-footer"><span className={file.matches ? "" : "different"}>{file.matches ? "Active file matches Faro’s generated output." : "Active file differs from Faro’s generated output."}</span><button type="button" className="secondary" onClick={onCompare}>{comparing ? "Hide comparison" : "Compare configurations"}</button></div>{comparing && <CoreDNSComparison file={file} />}</div>}</div>;
+}
+
+function diagnosticFileState(file: CoreDNSDiagnosticFile) {
+  if (!file.active_hash) return "Not active";
+  if (!file.generated_hash) return "Not generated";
+  return file.matches ? "Current" : "Differs";
+}
+
+function CoreDNSComparison({ file }: { readonly file: CoreDNSDiagnosticFile }) {
+  const diff = createLineDiff(file.active, file.generated);
+  return <div className="diagnostics-comparison"><div className="diagnostics-comparison-heading"><strong>Accepted vs generated</strong><span>{diff ? "Line-level comparison" : "Large file comparison"}</span></div>{diff ? <><div className="diagnostics-diff-legend"><span className="removed">Removed from active</span><span className="added">Added in generated</span></div><pre className="diagnostics-line-diff">{diff.map((line, index) => <span key={`${line.kind}-${index}`} className={`diagnostics-diff-line ${line.kind}`}><b>{line.kind === "removed" ? "−" : line.kind === "added" ? "+" : " "}</b><i>{line.oldLine ?? ""}/{line.newLine ?? ""}</i>{line.text || " "}</span>)}</pre></> : <div className="diagnostics-code-grid"><div><h3>Accepted active</h3><pre>{file.active || "File not present."}</pre></div><div><h3>Faro generated</h3><pre>{file.generated || "File not generated."}</pre></div></div>}</div>;
+}
+
+type LineDiff = { readonly kind: "same" | "added" | "removed"; readonly text: string; readonly oldLine: number | null; readonly newLine: number | null };
+
+function createLineDiff(active: string, generated: string): LineDiff[] | null {
+  const oldLines = active.split(/\r?\n/);
+  const newLines = generated.split(/\r?\n/);
+  if (oldLines.length > 600 || newLines.length > 600) return null;
+  const table = Array.from({ length: oldLines.length + 1 }, () => new Uint16Array(newLines.length + 1));
+  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
+    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
+      table[oldIndex][newIndex] = oldLines[oldIndex] === newLines[newIndex] ? table[oldIndex + 1][newIndex + 1] + 1 : Math.max(table[oldIndex + 1][newIndex], table[oldIndex][newIndex + 1]);
+    }
+  }
+  const result: LineDiff[] = [];
+  let oldIndex = 0;
+  let newIndex = 0;
+  while (oldIndex < oldLines.length || newIndex < newLines.length) {
+    if (oldIndex < oldLines.length && newIndex < newLines.length && oldLines[oldIndex] === newLines[newIndex]) {
+      result.push({ kind: "same", text: oldLines[oldIndex], oldLine: oldIndex + 1, newLine: newIndex + 1 });
+      oldIndex += 1;
+      newIndex += 1;
+    } else if (newIndex >= newLines.length || (oldIndex < oldLines.length && table[oldIndex + 1][newIndex] >= table[oldIndex][newIndex + 1])) {
+      result.push({ kind: "removed", text: oldLines[oldIndex], oldLine: oldIndex + 1, newLine: null });
+      oldIndex += 1;
+    } else {
+      result.push({ kind: "added", text: newLines[newIndex], oldLine: null, newLine: newIndex + 1 });
+      newIndex += 1;
+    }
+  }
+  return result;
+}
+
+function diagnosticFileId(name: string) {
+  return `coredns-file-${name.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+}
+
+function shortHash(value?: string) {
+  if (!value) return "—";
+  return value.length > 12 ? `${value.slice(0, 12)}…` : value;
 }
 
 function SettingRow({ icon, title, description, children }: { readonly icon: ReactNode; readonly title: string; readonly description: string; readonly children: ReactNode }) {
@@ -411,10 +592,6 @@ function formatBytes(value: number) {
   const index = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
   const amount = value / 1024 ** index;
   return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
-}
-
-function formatNumber(value: number) {
-  return value.toLocaleString();
 }
 
 function formatTimestamp(value?: string) {

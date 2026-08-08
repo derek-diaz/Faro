@@ -39,8 +39,8 @@ page.example##.advert
 }
 
 func TestEmptyRefreshPreservesLastKnownGoodEntries(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
@@ -65,9 +65,37 @@ func TestEmptyRefreshPreservesLastKnownGoodEntries(t *testing.T) {
 	}
 }
 
+func TestInvalidRefreshPreservesLastKnownGoodEntries(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		_, _ = responseWriter.Write([]byte("/unsupported-regex/\n||bad.example/path.js\n@@||allowed.example^\nexample..com\n"))
+	}))
+	defer server.Close()
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	result, err := store.DB.Exec(`INSERT INTO blocklists(name, url, enabled) VALUES('test', ?, 1)`, server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := result.LastInsertId()
+	if _, err := store.DB.Exec(`INSERT INTO blocklist_entries(blocklist_id, domain) VALUES(?, 'ads.example')`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (Refresher{Store: store}).Refresh(context.Background(), id); err == nil {
+		t.Fatal("invalid blocklist refresh unexpectedly succeeded")
+	}
+	var domain string
+	if err := store.DB.QueryRow(`SELECT domain FROM blocklist_entries WHERE blocklist_id = ?`, id).Scan(&domain); err != nil || domain != "ads.example" {
+		t.Fatalf("last-known-good domain = %q, err = %v", domain, err)
+	}
+}
+
 func TestApplyFailureRestoresPreviousEntries(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("new.example\n"))
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		_, _ = responseWriter.Write([]byte("new.example\n"))
 	}))
 	defer server.Close()
 	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
@@ -97,8 +125,8 @@ func TestApplyFailureRestoresPreviousEntries(t *testing.T) {
 
 func TestRefreshUsesExplicitDNSUpstream(t *testing.T) {
 	dnsServer, queries := startBlocklistTestDNSServer(t)
-	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte("ads.example\ntelemetry.example\n"))
+	httpServer := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		_, _ = responseWriter.Write([]byte("ads.example\ntelemetry.example\n"))
 	}))
 	defer httpServer.Close()
 	parsed, err := url.Parse(httpServer.URL)
@@ -158,8 +186,8 @@ func TestBlocklistDNSUpstreamsExcludeFaro(t *testing.T) {
 }
 
 func TestRefreshDueReportsFailuresForEarlyRetry(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		http.Error(responseWriter, "not ready", http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
 	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))

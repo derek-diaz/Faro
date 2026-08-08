@@ -74,257 +74,257 @@ func NewManager(store *db.Store) *Manager {
 	return &Manager{store: store, now: time.Now, dummyHash: dummyHash, trustProxy: strings.EqualFold(os.Getenv("FARO_TRUST_PROXY"), "true"), failures: map[string]failureState{}}
 }
 
-func (m *Manager) Status(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
+func (manager *Manager) Status(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(responseWriter)
 		return
 	}
-	configured, err := m.configured(r.Context())
+	configured, err := manager.configured(request.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(responseWriter, http.StatusInternalServerError, err.Error())
 		return
 	}
-	user, authenticated := m.authenticate(r)
+	user, authenticated := manager.authenticate(request)
 	payload := map[string]any{
 		"configured":          configured,
 		"authenticated":       authenticated,
-		"onboarding_complete": m.OnboardingComplete(r.Context()),
+		"onboarding_complete": manager.OnboardingComplete(request.Context()),
 	}
 	if authenticated {
 		payload["username"] = user.Username
 	}
-	writeJSON(w, http.StatusOK, payload)
+	writeJSON(responseWriter, http.StatusOK, payload)
 }
 
-func (m *Manager) OnboardingComplete(ctx context.Context) bool {
+func (manager *Manager) OnboardingComplete(ctx context.Context) bool {
 	var value string
-	if err := m.store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'onboarding_completed'`).Scan(&value); err != nil {
+	if err := manager.store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'onboarding_completed'`).Scan(&value); err != nil {
 		return false
 	}
 	return value == "true"
 }
 
-func (m *Manager) Setup(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
+func (manager *Manager) Setup(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(responseWriter)
 		return
 	}
 	var redundancyRole string
-	if err := m.store.DB.QueryRowContext(r.Context(), `SELECT role FROM redundancy_state WHERE id = 1`).Scan(&redundancyRole); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not verify this Faro server's role")
+	if err := manager.store.DB.QueryRowContext(request.Context(), `SELECT role FROM redundancy_state WHERE id = 1`).Scan(&redundancyRole); err != nil {
+		writeError(responseWriter, http.StatusInternalServerError, "could not verify this Faro server's role")
 		return
 	}
 	if redundancyRole == "replica" {
-		writeError(w, http.StatusConflict, "replica servers are managed by the primary Faro server")
+		writeError(responseWriter, http.StatusConflict, "replica servers are managed by the primary Faro server")
 		return
 	}
-	configured, err := m.configured(r.Context())
+	configured, err := manager.configured(request.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(responseWriter, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if configured {
-		writeError(w, http.StatusConflict, "Faro authentication is already configured")
+		writeError(responseWriter, http.StatusConflict, "Faro authentication is already configured")
 		return
 	}
-	input, ok := decodeCredentials(w, r)
+	input, ok := decodeCredentials(responseWriter, request)
 	if !ok {
 		return
 	}
 	if err := validateCredentials(input); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(responseWriter, http.StatusBadRequest, err.Error())
 		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not secure the password")
+		writeError(responseWriter, http.StatusInternalServerError, "could not secure the password")
 		return
 	}
-	result, err := m.store.DB.ExecContext(r.Context(), `INSERT INTO users(username, password_hash) VALUES(?, ?)`, strings.TrimSpace(input.Username), string(hash))
+	result, err := manager.store.DB.ExecContext(request.Context(), `INSERT INTO users(username, password_hash) VALUES(?, ?)`, strings.TrimSpace(input.Username), string(hash))
 	if err != nil {
-		writeError(w, http.StatusConflict, "Faro authentication is already configured")
+		writeError(responseWriter, http.StatusConflict, "Faro authentication is already configured")
 		return
 	}
 	userID, err := result.LastInsertId()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(responseWriter, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := m.createSession(w, r, userID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if err := manager.createSession(responseWriter, request, userID); err != nil {
+		writeError(responseWriter, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "username": strings.TrimSpace(input.Username)})
+	writeJSON(responseWriter, http.StatusCreated, map[string]any{"ok": true, "username": strings.TrimSpace(input.Username)})
 }
 
-func (m *Manager) Login(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
+func (manager *Manager) Login(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(responseWriter)
 		return
 	}
-	input, ok := decodeCredentials(w, r)
+	input, ok := decodeCredentials(responseWriter, request)
 	if !ok {
 		return
 	}
-	key := m.failureKey(r, input.Username)
-	if retryAfter, blocked := m.blocked(key); blocked {
-		w.Header().Set("Retry-After", retryAfter)
-		writeError(w, http.StatusTooManyRequests, "too many login attempts; try again shortly")
+	key := manager.failureKey(request, input.Username)
+	if retryAfter, blocked := manager.blocked(key); blocked {
+		responseWriter.Header().Set("Retry-After", retryAfter)
+		writeError(responseWriter, http.StatusTooManyRequests, "too many login attempts; try again shortly")
 		return
 	}
 	var userID int64
 	var username, passwordHash string
-	err := m.store.DB.QueryRowContext(r.Context(), `SELECT id, username, password_hash FROM users WHERE username = ?`, strings.TrimSpace(input.Username)).Scan(&userID, &username, &passwordHash)
-	hash := m.dummyHash
+	err := manager.store.DB.QueryRowContext(request.Context(), `SELECT id, username, password_hash FROM users WHERE username = ?`, strings.TrimSpace(input.Username)).Scan(&userID, &username, &passwordHash)
+	hash := manager.dummyHash
 	if err == nil {
 		hash = []byte(passwordHash)
 	}
 	passwordMatches := bcrypt.CompareHashAndPassword(hash, []byte(input.Password)) == nil
 	if err != nil || !passwordMatches {
-		m.recordFailure(key)
-		writeError(w, http.StatusUnauthorized, "invalid username or password")
+		manager.recordFailure(key)
+		writeError(responseWriter, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
-	m.clearFailures(key)
-	if err := m.createSession(w, r, userID); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	manager.clearFailures(key)
+	if err := manager.createSession(responseWriter, request, userID); err != nil {
+		writeError(responseWriter, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "username": username})
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true, "username": username})
 }
 
-func (m *Manager) Logout(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
+func (manager *Manager) Logout(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(responseWriter)
 		return
 	}
-	if cookie, err := r.Cookie(cookieName); err == nil && cookie.Value != "" {
-		_, _ = m.store.DB.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE token_hash = ?`, tokenHash(cookie.Value))
+	if cookie, err := request.Cookie(cookieName); err == nil && cookie.Value != "" {
+		_, _ = manager.store.DB.ExecContext(request.Context(), `DELETE FROM auth_sessions WHERE token_hash = ?`, tokenHash(cookie.Value))
 	}
-	m.expireCookie(w, r)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	manager.expireCookie(responseWriter, request)
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (m *Manager) ChangePassword(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
+func (manager *Manager) ChangePassword(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(responseWriter)
 		return
 	}
-	user, authenticated := m.authenticate(r)
+	user, authenticated := manager.authenticate(request)
 	if !authenticated {
-		writeError(w, http.StatusUnauthorized, authenticationRequiredMessage)
+		writeError(responseWriter, http.StatusUnauthorized, authenticationRequiredMessage)
 		return
 	}
-	defer func() { _ = r.Body.Close() }()
+	defer func() { _ = request.Body.Close() }()
 	var input passwordChange
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	decoder := json.NewDecoder(http.MaxBytesReader(responseWriter, request.Body, 4096))
 	if err := decoder.Decode(&input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request")
+		writeError(responseWriter, http.StatusBadRequest, "invalid request")
 		return
 	}
 	if err := validatePassword(input.NewPassword); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(responseWriter, http.StatusBadRequest, err.Error())
 		return
 	}
 	if input.CurrentPassword == input.NewPassword {
-		writeError(w, http.StatusBadRequest, "new password must be different from the current password")
+		writeError(responseWriter, http.StatusBadRequest, "new password must be different from the current password")
 		return
 	}
-	key := m.failureKey(r, user.Username)
-	if retryAfter, blocked := m.blocked(key); blocked {
-		w.Header().Set("Retry-After", retryAfter)
-		writeError(w, http.StatusTooManyRequests, "too many password attempts; try again shortly")
+	key := manager.failureKey(request, user.Username)
+	if retryAfter, blocked := manager.blocked(key); blocked {
+		responseWriter.Header().Set("Retry-After", retryAfter)
+		writeError(responseWriter, http.StatusTooManyRequests, "too many password attempts; try again shortly")
 		return
 	}
 	var passwordHash string
-	if err := m.store.DB.QueryRowContext(r.Context(), `SELECT password_hash FROM users WHERE id = ?`, user.ID).Scan(&passwordHash); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not verify the current password")
+	if err := manager.store.DB.QueryRowContext(request.Context(), `SELECT password_hash FROM users WHERE id = ?`, user.ID).Scan(&passwordHash); err != nil {
+		writeError(responseWriter, http.StatusInternalServerError, "could not verify the current password")
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(input.CurrentPassword)) != nil {
-		m.recordFailure(key)
-		writeError(w, http.StatusForbidden, "current password is incorrect")
+		manager.recordFailure(key)
+		writeError(responseWriter, http.StatusForbidden, "current password is incorrect")
 		return
 	}
 	newHash, err := bcrypt.GenerateFromPassword([]byte(input.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not secure the new password")
+		writeError(responseWriter, http.StatusInternalServerError, "could not secure the new password")
 		return
 	}
-	cookie, err := r.Cookie(cookieName)
+	cookie, err := request.Cookie(cookieName)
 	if err != nil || cookie.Value == "" {
-		writeError(w, http.StatusUnauthorized, authenticationRequiredMessage)
+		writeError(responseWriter, http.StatusUnauthorized, authenticationRequiredMessage)
 		return
 	}
-	tx, err := m.store.DB.BeginTx(r.Context(), nil)
+	tx, err := manager.store.DB.BeginTx(request.Context(), nil)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(responseWriter, http.StatusInternalServerError, err.Error())
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(r.Context(), `UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, string(newHash), user.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not update the password")
+	if _, err := tx.ExecContext(request.Context(), `UPDATE users SET password_hash = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, string(newHash), user.ID); err != nil {
+		writeError(responseWriter, http.StatusInternalServerError, "could not update the password")
 		return
 	}
-	if _, err := tx.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE user_id = ? AND token_hash <> ?`, user.ID, tokenHash(cookie.Value)); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not close other sessions")
+	if _, err := tx.ExecContext(request.Context(), `DELETE FROM auth_sessions WHERE user_id = ? AND token_hash <> ?`, user.ID, tokenHash(cookie.Value)); err != nil {
+		writeError(responseWriter, http.StatusInternalServerError, "could not close other sessions")
 		return
 	}
 	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(responseWriter, http.StatusInternalServerError, err.Error())
 		return
 	}
-	m.clearFailures(key)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	manager.clearFailures(key)
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (m *Manager) Require(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		publicRedundancy := r.URL.Path == "/api/redundancy/public" ||
-			r.URL.Path == "/api/redundancy/join" ||
-			r.URL.Path == "/api/redundancy/pair" ||
-			r.URL.Path == "/api/redundancy/replica/snapshot" ||
-			r.URL.Path == "/api/redundancy/replica/ack"
-		if r.Method == http.MethodOptions || r.URL.Path == "/healthz" || r.URL.Path == "/metrics" || r.URL.Path == "/api/version" || r.URL.Path == "/api/version/check" || strings.HasPrefix(r.URL.Path, "/api/auth/") || publicRedundancy {
-			next.ServeHTTP(w, r)
+func (manager *Manager) Require(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		publicRedundancy := request.URL.Path == "/api/redundancy/public" ||
+			request.URL.Path == "/api/redundancy/join" ||
+			request.URL.Path == "/api/redundancy/pair" ||
+			request.URL.Path == "/api/redundancy/replica/snapshot" ||
+			request.URL.Path == "/api/redundancy/replica/ack"
+		if request.Method == http.MethodOptions || request.URL.Path == "/healthz" || request.URL.Path == "/metrics" || request.URL.Path == "/api/version" || request.URL.Path == "/api/version/check" || request.URL.Path == "/api/upgrade" || strings.HasPrefix(request.URL.Path, "/api/auth/") || publicRedundancy {
+			next.ServeHTTP(responseWriter, request)
 			return
 		}
-		if r.Method == http.MethodDelete && r.URL.Path == "/api/redundancy" {
-			configured, err := m.configured(r.Context())
+		if request.Method == http.MethodDelete && request.URL.Path == "/api/redundancy" {
+			configured, err := manager.configured(request.Context())
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "could not verify Faro authentication")
+				writeError(responseWriter, http.StatusInternalServerError, "could not verify Faro authentication")
 				return
 			}
 			if !configured {
-				next.ServeHTTP(w, r)
+				next.ServeHTTP(responseWriter, request)
 				return
 			}
 		}
-		user, ok := m.authenticate(r)
+		user, ok := manager.authenticate(request)
 		if !ok {
-			writeError(w, http.StatusUnauthorized, authenticationRequiredMessage)
+			writeError(responseWriter, http.StatusUnauthorized, authenticationRequiredMessage)
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userContextKey, user)))
+		next.ServeHTTP(responseWriter, request.WithContext(context.WithValue(request.Context(), userContextKey, user)))
 	})
 }
 
-func (m *Manager) configured(ctx context.Context) (bool, error) {
+func (manager *Manager) configured(ctx context.Context) (bool, error) {
 	var count int
-	if err := m.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+	if err := manager.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
 		return false, err
 	}
 	return count > 0, nil
 }
 
-func (m *Manager) authenticate(r *http.Request) (sessionUser, bool) {
-	cookie, err := r.Cookie(cookieName)
+func (manager *Manager) authenticate(request *http.Request) (sessionUser, bool) {
+	cookie, err := request.Cookie(cookieName)
 	if err != nil || cookie.Value == "" {
 		return sessionUser{}, false
 	}
-	now := m.now().UTC().Format(time.RFC3339)
+	now := manager.now().UTC().Format(time.RFC3339)
 	var user sessionUser
-	err = m.store.DB.QueryRowContext(r.Context(), `
+	err = manager.store.DB.QueryRowContext(request.Context(), `
 		SELECT u.id, u.username
 		FROM auth_sessions s
 		JOIN users u ON u.id = s.user_id
@@ -332,40 +332,40 @@ func (m *Manager) authenticate(r *http.Request) (sessionUser, bool) {
 	`, tokenHash(cookie.Value), now).Scan(&user.ID, &user.Username)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			_, _ = m.store.DB.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE token_hash = ?`, tokenHash(cookie.Value))
+			_, _ = manager.store.DB.ExecContext(request.Context(), `DELETE FROM auth_sessions WHERE token_hash = ?`, tokenHash(cookie.Value))
 		}
 		return sessionUser{}, false
 	}
-	_, _ = m.store.DB.ExecContext(r.Context(), `UPDATE auth_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?`, tokenHash(cookie.Value))
+	_, _ = manager.store.DB.ExecContext(request.Context(), `UPDATE auth_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?`, tokenHash(cookie.Value))
 	return user, true
 }
 
-func (m *Manager) createSession(w http.ResponseWriter, r *http.Request, userID int64) error {
+func (manager *Manager) createSession(responseWriter http.ResponseWriter, request *http.Request, userID int64) error {
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return err
 	}
 	token := hex.EncodeToString(tokenBytes)
-	expires := m.now().UTC().Add(sessionLifetime)
-	_, _ = m.store.DB.ExecContext(r.Context(), `DELETE FROM auth_sessions WHERE datetime(expires_at) <= datetime(?)`, m.now().UTC().Format(time.RFC3339))
-	if _, err := m.store.DB.ExecContext(r.Context(), `INSERT INTO auth_sessions(user_id, token_hash, expires_at) VALUES(?, ?, ?)`, userID, tokenHash(token), expires.Format(time.RFC3339)); err != nil {
+	expires := manager.now().UTC().Add(sessionLifetime)
+	_, _ = manager.store.DB.ExecContext(request.Context(), `DELETE FROM auth_sessions WHERE datetime(expires_at) <= datetime(?)`, manager.now().UTC().Format(time.RFC3339))
+	if _, err := manager.store.DB.ExecContext(request.Context(), `INSERT INTO auth_sessions(user_id, token_hash, expires_at) VALUES(?, ?, ?)`, userID, tokenHash(token), expires.Format(time.RFC3339)); err != nil {
 		return err
 	}
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(responseWriter, &http.Cookie{
 		Name:     cookieName,
 		Value:    token,
 		Path:     "/",
 		Expires:  expires,
 		MaxAge:   int(sessionLifetime.Seconds()),
 		HttpOnly: true,
-		Secure:   requestIsSecure(r),
+		Secure:   requestIsSecure(request),
 		SameSite: http.SameSiteLaxMode,
 	})
 	return nil
 }
 
-func (m *Manager) expireCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(1, 0), HttpOnly: true, Secure: requestIsSecure(r), SameSite: http.SameSiteLaxMode})
+func (manager *Manager) expireCookie(responseWriter http.ResponseWriter, request *http.Request) {
+	http.SetCookie(responseWriter, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(1, 0), HttpOnly: true, Secure: requestIsSecure(request), SameSite: http.SameSiteLaxMode})
 }
 
 func validateCredentials(input credentials) error {
@@ -386,12 +386,12 @@ func validatePassword(password string) error {
 	return nil
 }
 
-func decodeCredentials(w http.ResponseWriter, r *http.Request) (credentials, bool) {
-	defer func() { _ = r.Body.Close() }()
+func decodeCredentials(responseWriter http.ResponseWriter, request *http.Request) (credentials, bool) {
+	defer func() { _ = request.Body.Close() }()
 	var input credentials
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	decoder := json.NewDecoder(http.MaxBytesReader(responseWriter, request.Body, 4096))
 	if err := decoder.Decode(&input); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request")
+		writeError(responseWriter, http.StatusBadRequest, "invalid request")
 		return credentials{}, false
 	}
 	return input, true
@@ -402,65 +402,65 @@ func tokenHash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func requestIsSecure(r *http.Request) bool {
-	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+func requestIsSecure(request *http.Request) bool {
+	return request.TLS != nil || strings.EqualFold(request.Header.Get("X-Forwarded-Proto"), "https")
 }
 
-func (m *Manager) failureKey(r *http.Request, username string) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
+func (manager *Manager) failureKey(request *http.Request, username string) string {
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
 	if err != nil {
-		host = r.RemoteAddr
+		host = request.RemoteAddr
 	}
-	if m.trustProxy {
-		if forwarded := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); forwarded != nil {
+	if manager.trustProxy {
+		if forwarded := net.ParseIP(strings.TrimSpace(request.Header.Get("X-Real-IP"))); forwarded != nil {
 			host = forwarded.String()
 		}
 	}
 	return strings.ToLower(strings.TrimSpace(username)) + "|" + host
 }
 
-func (m *Manager) blocked(key string) (string, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	state := m.failures[key]
-	if state.LockedUntil.After(m.now()) {
-		seconds := int(state.LockedUntil.Sub(m.now()).Seconds())
+func (manager *Manager) blocked(key string) (string, bool) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	state := manager.failures[key]
+	if state.LockedUntil.After(manager.now()) {
+		seconds := int(state.LockedUntil.Sub(manager.now()).Seconds())
 		seconds = max(seconds, 1)
 		return strconv.Itoa(seconds), true
 	}
 	if !state.LockedUntil.IsZero() {
-		delete(m.failures, key)
+		delete(manager.failures, key)
 	}
 	return "", false
 }
 
-func (m *Manager) recordFailure(key string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	state := m.failures[key]
+func (manager *Manager) recordFailure(key string) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	state := manager.failures[key]
 	state.Count++
 	if state.Count >= maxFailures {
-		state.LockedUntil = m.now().Add(lockoutDuration)
+		state.LockedUntil = manager.now().Add(lockoutDuration)
 	}
-	m.failures[key] = state
+	manager.failures[key] = state
 }
 
-func (m *Manager) clearFailures(key string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.failures, key)
+func (manager *Manager) clearFailures(key string) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	delete(manager.failures, key)
 }
 
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(payload)
+func writeJSON(responseWriter http.ResponseWriter, status int, payload any) {
+	responseWriter.Header().Set("Content-Type", "application/json")
+	responseWriter.WriteHeader(status)
+	_ = json.NewEncoder(responseWriter).Encode(payload)
 }
 
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]any{"error": message})
+func writeError(responseWriter http.ResponseWriter, status int, message string) {
+	writeJSON(responseWriter, status, map[string]any{"error": message})
 }
 
-func methodNotAllowed(w http.ResponseWriter) {
-	writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+func methodNotAllowed(responseWriter http.ResponseWriter) {
+	writeError(responseWriter, http.StatusMethodNotAllowed, "method not allowed")
 }

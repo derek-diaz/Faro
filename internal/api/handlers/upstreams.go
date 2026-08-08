@@ -11,26 +11,26 @@ import (
 	"github.com/derek/faro/internal/upstreamhealth"
 )
 
-func (s *Handler) upstreamCatalog(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
+func (handler *Handler) upstreamCatalog(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(responseWriter)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writeJSON(responseWriter, http.StatusOK, map[string]any{
 		"encrypted_endpoints": dohproxy.Catalog(),
 	})
 }
 
-func (s *Handler) upstreamProbes(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
+func (handler *Handler) upstreamProbes(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(responseWriter)
 		return
 	}
 	var input struct {
 		Addresses []string `json:"addresses"`
 		Transport string   `json:"transport"`
 	}
-	if !decode(w, r, &input) {
+	if !decode(responseWriter, request, &input) {
 		return
 	}
 	addresses := make([]string, 0, len(input.Addresses))
@@ -41,18 +41,18 @@ func (s *Handler) upstreamProbes(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if net.ParseIP(address) == nil {
-			writeBadRequest(w, fmt.Errorf("invalid upstream IP address: %s", address))
+			writeBadRequest(responseWriter, fmt.Errorf("invalid upstream IP address: %s", address))
 			return
 		}
 		seen[address] = true
 		addresses = append(addresses, address)
 	}
 	if len(addresses) == 0 {
-		writeBadRequest(w, errors.New("at least one upstream IP address is required"))
+		writeBadRequest(responseWriter, errors.New("at least one upstream IP address is required"))
 		return
 	}
 	if len(addresses) > 32 {
-		writeBadRequest(w, errors.New("a maximum of 32 upstreams can be probed at once"))
+		writeBadRequest(responseWriter, errors.New("a maximum of 32 upstreams can be probed at once"))
 		return
 	}
 
@@ -60,9 +60,9 @@ func (s *Handler) upstreamProbes(w http.ResponseWriter, r *http.Request) {
 	if input.Transport == "encrypted" {
 		probe = upstreamhealth.ProbeEncryptedAddress
 	} else if input.Transport != "" && input.Transport != "standard" {
-		writeBadRequest(w, errors.New("transport must be encrypted or standard"))
+		writeBadRequest(responseWriter, errors.New("transport must be encrypted or standard"))
 		return
 	}
-	results := upstreamhealth.ProbeAddresses(r.Context(), addresses, probe)
-	writeJSON(w, http.StatusOK, map[string]any{"items": results})
+	results := upstreamhealth.ProbeAddresses(request.Context(), addresses, probe)
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"items": results})
 }

@@ -36,51 +36,51 @@ const (
 
 var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
 
-func (s *Handler) favicon(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		methodNotAllowed(w)
+func (handler *Handler) favicon(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodGet {
+		methodNotAllowed(responseWriter)
 		return
 	}
-	if settingValue(r.Context(), s.store.DB, "favicon_fetching_enabled") != "true" {
-		http.NotFound(w, r)
+	if settingValue(request.Context(), handler.store.DB, "favicon_fetching_enabled") != "true" {
+		http.NotFound(responseWriter, request)
 		return
 	}
-	domain, err := db.NormalizeDomain(strings.TrimPrefix(r.URL.Path, "/api/favicons/"))
+	domain, err := db.NormalizeDomain(strings.TrimPrefix(request.URL.Path, "/api/favicons/"))
 	if err != nil || !isSafeFaviconDomain(domain) {
-		http.NotFound(w, r)
+		http.NotFound(responseWriter, request)
 		return
 	}
 
-	localPath, cached, err := s.cachedFavicon(r.Context(), domain)
+	localPath, cached, err := handler.cachedFavicon(request.Context(), domain)
 	if err == nil && cached {
-		serveCachedFavicon(w, r, domain, localPath)
+		serveCachedFavicon(responseWriter, request, domain, localPath)
 		return
 	}
 
-	lock := s.faviconLock(domain)
+	lock := handler.faviconLock(domain)
 	lock.Lock()
 	defer lock.Unlock()
 
 	// Multiple rows can request the same icon at once. Recheck after taking the
 	// per-domain shard lock so only one request performs network I/O.
-	localPath, cached, err = s.cachedFavicon(r.Context(), domain)
+	localPath, cached, err = handler.cachedFavicon(request.Context(), domain)
 	if err == nil && cached {
-		serveCachedFavicon(w, r, domain, localPath)
+		serveCachedFavicon(responseWriter, request, domain, localPath)
 		return
 	}
 
-	localPath, err = s.fetchFavicon(r.Context(), domain)
+	localPath, err = handler.fetchFavicon(request.Context(), domain)
 	if err != nil {
-		serveFaviconPlaceholder(w, domain)
+		serveFaviconPlaceholder(responseWriter, domain)
 		return
 	}
-	serveFaviconFile(w, r, localPath, "fetched")
+	serveFaviconFile(responseWriter, request, localPath, "fetched")
 }
 
-func (s *Handler) cachedFavicon(ctx context.Context, domain string) (string, bool, error) {
+func (handler *Handler) cachedFavicon(ctx context.Context, domain string) (string, bool, error) {
 	var localPath string
 	var recentlyChecked int
-	err := s.store.DB.QueryRowContext(ctx, `
+	err := handler.store.DB.QueryRowContext(ctx, `
 		SELECT local_path, COALESCE(last_checked_at >= datetime('now', ?), 0)
 		FROM domain_favicons
 		WHERE domain = ?
@@ -100,27 +100,27 @@ func (s *Handler) cachedFavicon(ctx context.Context, domain string) (string, boo
 	return localPath, true, nil
 }
 
-func (s *Handler) fetchFavicon(ctx context.Context, domain string) (string, error) {
-	if err := os.MkdirAll(s.faviconDir, 0o755); err != nil {
+func (handler *Handler) fetchFavicon(ctx context.Context, domain string) (string, error) {
+	if err := os.MkdirAll(handler.faviconDir, 0o755); err != nil {
 		return "", err
 	}
 	fetchCtx, cancelFetch := context.WithTimeout(ctx, 12*time.Second)
 	defer cancelFetch()
-	client := s.faviconHTTPClient(ctx)
+	client := handler.faviconHTTPClient(ctx)
 	candidates, pages := faviconCandidates(domain)
 	for _, candidate := range candidates {
-		if localPath, err := s.downloadAndCacheFavicon(fetchCtx, &client, domain, candidate); err == nil {
+		if localPath, err := handler.downloadAndCacheFavicon(fetchCtx, &client, domain, candidate); err == nil {
 			return localPath, nil
 		}
 	}
 	for _, page := range pages {
 		for _, candidate := range discoverFaviconCandidates(fetchCtx, &client, page) {
-			if localPath, err := s.downloadAndCacheFavicon(fetchCtx, &client, domain, candidate); err == nil {
+			if localPath, err := handler.downloadAndCacheFavicon(fetchCtx, &client, domain, candidate); err == nil {
 				return localPath, nil
 			}
 		}
 	}
-	_, _ = s.store.DB.ExecContext(ctx, `
+	_, _ = handler.store.DB.ExecContext(ctx, `
 		INSERT INTO domain_favicons(domain, favicon_url, local_path, last_checked_at, updated_at)
 		VALUES(?, '', '', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(domain) DO UPDATE SET last_checked_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
@@ -128,16 +128,16 @@ func (s *Handler) fetchFavicon(ctx context.Context, domain string) (string, erro
 	return "", errors.New("favicon not found")
 }
 
-func (s *Handler) downloadAndCacheFavicon(ctx context.Context, client *http.Client, domain, candidate string) (string, error) {
+func (handler *Handler) downloadAndCacheFavicon(ctx context.Context, client *http.Client, domain, candidate string) (string, error) {
 	body, resolvedURL, err := downloadFavicon(ctx, client, candidate)
 	if err != nil {
 		return "", err
 	}
-	localPath := filepath.Join(s.faviconDir, safeFaviconFilename(domain))
+	localPath := filepath.Join(handler.faviconDir, safeFaviconFilename(domain))
 	if err := os.WriteFile(localPath, body, 0o644); err != nil {
 		return "", err
 	}
-	if _, err := s.store.DB.ExecContext(ctx, `
+	if _, err := handler.store.DB.ExecContext(ctx, `
 		INSERT INTO domain_favicons(domain, favicon_url, local_path, last_checked_at, updated_at)
 		VALUES(?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 		ON CONFLICT(domain) DO UPDATE SET
@@ -347,42 +347,42 @@ func uniqueStringsInOrder(values []string) []string {
 	return result
 }
 
-func serveCachedFavicon(w http.ResponseWriter, r *http.Request, domain, localPath string) {
+func serveCachedFavicon(responseWriter http.ResponseWriter, request *http.Request, domain, localPath string) {
 	if localPath == "" {
-		serveFaviconPlaceholder(w, domain)
+		serveFaviconPlaceholder(responseWriter, domain)
 		return
 	}
-	serveFaviconFile(w, r, localPath, "cache")
+	serveFaviconFile(responseWriter, request, localPath, "cache")
 }
 
-func serveFaviconFile(w http.ResponseWriter, r *http.Request, localPath, source string) {
-	w.Header().Set("Cache-Control", "public, max-age=86400")
-	w.Header().Set("X-Faro-Favicon", source)
-	http.ServeFile(w, r, localPath)
+func serveFaviconFile(responseWriter http.ResponseWriter, request *http.Request, localPath, source string) {
+	responseWriter.Header().Set("Cache-Control", "public, max-age=86400")
+	responseWriter.Header().Set("X-Faro-Favicon", source)
+	http.ServeFile(responseWriter, request, localPath)
 }
 
-func (s *Handler) faviconLock(domain string) *sync.Mutex {
+func (handler *Handler) faviconLock(domain string) *sync.Mutex {
 	var hash uint32 = 2166136261
 	for index := range domain {
 		hash ^= uint32(domain[index])
 		hash *= 16777619
 	}
-	return &s.faviconLocks[hash%uint32(len(s.faviconLocks))]
+	return &handler.faviconLocks[hash%uint32(len(handler.faviconLocks))]
 }
 
 // faviconHTTPClient keeps Faro's own favicon lookups out of the monitored DNS
 // path. Resolving them through the host resolver would create a query-log row,
 // which renders another favicon and can recursively generate www/search labels.
-func (s *Handler) faviconHTTPClient(ctx context.Context) http.Client {
-	resolver := newUpstreamResolver(s.faviconDNSUpstreams(ctx))
+func (handler *Handler) faviconHTTPClient(ctx context.Context) http.Client {
+	resolver := newUpstreamResolver(handler.faviconDNSUpstreams(ctx))
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = faviconDialContext(resolver)
 	return http.Client{Transport: transport, Timeout: 5 * time.Second}
 }
 
-func (s *Handler) faviconDNSUpstreams(ctx context.Context) []string {
-	configured := strings.Split(settingValue(ctx, s.store.DB, "upstream_dns"), ",")
-	faroIP := strings.TrimSpace(settingValue(ctx, s.store.DB, "faro_lan_ip"))
+func (handler *Handler) faviconDNSUpstreams(ctx context.Context) []string {
+	configured := strings.Split(settingValue(ctx, handler.store.DB, "upstream_dns"), ",")
+	faroIP := strings.TrimSpace(settingValue(ctx, handler.store.DB, "faro_lan_ip"))
 	upstreams := make([]string, 0, len(configured))
 	for _, raw := range configured {
 		address := strings.TrimSpace(raw)
@@ -514,13 +514,13 @@ func safeFaviconFilename(domain string) string {
 	return replacer.Replace(domain) + ".ico"
 }
 
-func serveFaviconPlaceholder(w http.ResponseWriter, domain string) {
+func serveFaviconPlaceholder(responseWriter http.ResponseWriter, domain string) {
 	initial := "?"
 	if domain != "" {
 		initial = strings.ToUpper(domain[:1])
 	}
-	w.Header().Set(contentTypeHeader, "image/svg+xml")
-	w.Header().Set("Cache-Control", "public, max-age=3600")
-	w.Header().Set("X-Faro-Favicon", "placeholder")
-	_, _ = fmt.Fprintf(w, `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><circle cx="16" cy="16" r="16" fill="#e8eef5"/><text x="16" y="21" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#617085">%s</text></svg>`, initial)
+	responseWriter.Header().Set(contentTypeHeader, "image/svg+xml")
+	responseWriter.Header().Set("Cache-Control", "public, max-age=3600")
+	responseWriter.Header().Set("X-Faro-Favicon", "placeholder")
+	_, _ = fmt.Fprintf(responseWriter, `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><circle cx="16" cy="16" r="16" fill="#e8eef5"/><text x="16" y="21" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#617085">%s</text></svg>`, initial)
 }

@@ -9,79 +9,79 @@ import (
 
 const unifiUnavailableMessage = "UniFi integration is unavailable"
 
-func (s *Handler) unifiIntegration(w http.ResponseWriter, r *http.Request) {
-	if s.unifi == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": unifiUnavailableMessage})
+func (handler *Handler) unifiIntegration(responseWriter http.ResponseWriter, request *http.Request) {
+	if handler.unifi == nil {
+		writeJSON(responseWriter, http.StatusServiceUnavailable, map[string]any{"error": unifiUnavailableMessage})
 		return
 	}
-	switch r.Method {
+	switch request.Method {
 	case http.MethodGet:
-		status, err := s.unifi.Status(r.Context())
+		status, err := handler.unifi.Status(request.Context())
 		if err != nil {
-			writeError(w, err)
+			writeError(responseWriter, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, status)
+		writeJSON(responseWriter, http.StatusOK, status)
 	case http.MethodPut:
 		var input unifi.ConfigureInput
-		if !decode(w, r, &input) {
+		if !decode(responseWriter, request, &input) {
 			return
 		}
-		status, err := s.unifi.Configure(r.Context(), input)
+		status, err := handler.unifi.Configure(request.Context(), input)
 		if err != nil {
-			writeBadRequest(w, err)
+			writeBadRequest(responseWriter, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, status)
+		writeJSON(responseWriter, http.StatusOK, status)
 	case http.MethodDelete:
-		if err := s.unifi.Disconnect(r.Context()); err != nil {
-			writeError(w, err)
+		if err := handler.unifi.Disconnect(request.Context()); err != nil {
+			writeError(responseWriter, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true})
 	default:
-		methodNotAllowed(w)
+		methodNotAllowed(responseWriter)
 	}
 }
 
-func (s *Handler) unifiTest(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
+func (handler *Handler) unifiTest(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(responseWriter)
 		return
 	}
-	if s.unifi == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": unifiUnavailableMessage})
+	if handler.unifi == nil {
+		writeJSON(responseWriter, http.StatusServiceUnavailable, map[string]any{"error": unifiUnavailableMessage})
 		return
 	}
 	var input unifi.TestInput
-	if !decode(w, r, &input) {
+	if !decode(responseWriter, request, &input) {
 		return
 	}
-	result, err := s.unifi.Test(r.Context(), input)
+	result, err := handler.unifi.Test(request.Context(), input)
 	if err != nil {
-		writeBadRequest(w, err)
+		writeBadRequest(responseWriter, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(responseWriter, http.StatusOK, result)
 }
 
-func (s *Handler) unifiSync(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		methodNotAllowed(w)
+func (handler *Handler) unifiSync(responseWriter http.ResponseWriter, request *http.Request) {
+	if request.Method != http.MethodPost {
+		methodNotAllowed(responseWriter)
 		return
 	}
-	if s.unifi == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": unifiUnavailableMessage})
+	if handler.unifi == nil {
+		writeJSON(responseWriter, http.StatusServiceUnavailable, map[string]any{"error": unifiUnavailableMessage})
 		return
 	}
-	result, err := s.unifi.Sync(r.Context())
+	result, err := handler.unifi.Sync(request.Context())
 	if errors.Is(err, unifi.ErrNotConfigured) {
-		writeBadRequest(w, err)
+		writeBadRequest(responseWriter, err)
 		return
 	}
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		writeJSON(responseWriter, http.StatusBadGateway, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(responseWriter, http.StatusOK, result)
 }

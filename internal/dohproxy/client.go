@@ -83,8 +83,8 @@ func bootstrapDialer(endpointHost string, addresses []string) func(context.Conte
 	}
 }
 
-func (c *endpointClient) exchange(ctx context.Context, query []byte) ([]byte, error) {
-	return exchangeWithClient(ctx, c.endpoint.URL, query, c.client)
+func (endpointClient *endpointClient) exchange(ctx context.Context, query []byte) ([]byte, error) {
+	return exchangeWithClient(ctx, endpointClient.endpoint.URL, query, endpointClient.client)
 }
 
 func exchangeWithClient(ctx context.Context, endpointURL string, query []byte, client *http.Client) (message []byte, err error) {

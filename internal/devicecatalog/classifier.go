@@ -30,12 +30,12 @@ func NewClassifier(store *db.Store, catalog *Manager) *Classifier {
 	return &Classifier{store: store, catalog: catalog}
 }
 
-func (c *Classifier) Catalog() *Manager {
-	return c.catalog
+func (classifier *Classifier) Catalog() *Manager {
+	return classifier.catalog
 }
 
-func (c *Classifier) Run(ctx context.Context) {
-	c.classifyAvailable(ctx)
+func (classifier *Classifier) Run(ctx context.Context) {
+	classifier.classifyAvailable(ctx)
 	ticker := time.NewTicker(classificationInterval)
 	defer ticker.Stop()
 	for {
@@ -43,14 +43,14 @@ func (c *Classifier) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.classifyAvailable(ctx)
+			classifier.classifyAvailable(ctx)
 		}
 	}
 }
 
-func (c *Classifier) classifyAvailable(ctx context.Context) {
+func (classifier *Classifier) classifyAvailable(ctx context.Context) {
 	for range 4 {
-		count, err := c.ClassifyPending(ctx, classificationBatch)
+		count, err := classifier.ClassifyPending(ctx, classificationBatch)
 		if err != nil || count < classificationBatch {
 			return
 		}
@@ -59,12 +59,12 @@ func (c *Classifier) classifyAvailable(ctx context.Context) {
 
 // ClassifyPending evaluates a bounded batch and returns the number processed.
 // It is exported so startup checks and tests can run a batch synchronously.
-func (c *Classifier) ClassifyPending(ctx context.Context, limit int) (processed int, err error) {
+func (classifier *Classifier) ClassifyPending(ctx context.Context, limit int) (processed int, err error) {
 	if limit < 1 {
 		return 0, nil
 	}
-	info := c.catalog.Info()
-	rows, err := c.store.DB.QueryContext(ctx, `
+	info := classifier.catalog.Info()
+	rows, err := classifier.store.DB.QueryContext(ctx, `
 		WITH activity AS (
 			SELECT device_id, MAX(id) AS query_id
 			FROM dns_queries
@@ -128,15 +128,15 @@ func (c *Classifier) ClassifyPending(ctx context.Context, limit int) (processed 
 	}
 
 	for _, item := range candidates {
-		if err := c.classify(ctx, item.deviceID, item.address, item.name, item.queryID); err != nil {
+		if err := classifier.classify(ctx, item.deviceID, item.address, item.name, item.queryID); err != nil {
 			return 0, err
 		}
 	}
 	return len(candidates), nil
 }
 
-func (c *Classifier) classify(ctx context.Context, deviceID int64, address, name string, queryID int64) error {
-	rows, err := c.store.DB.QueryContext(ctx, `
+func (classifier *Classifier) classify(ctx context.Context, deviceID int64, address, name string, queryID int64) error {
+	rows, err := classifier.store.DB.QueryContext(ctx, `
 		SELECT domain
 		FROM dns_queries
 		WHERE device_id = ?
@@ -160,12 +160,12 @@ func (c *Classifier) classify(ctx context.Context, deviceID int64, address, name
 		return err
 	}
 
-	prediction := c.catalog.Predict(name, address, domains)
+	prediction := classifier.catalog.Predict(name, address, domains)
 	evidence, err := json.Marshal(prediction.Evidence)
 	if err != nil {
 		return err
 	}
-	_, err = c.store.DB.ExecContext(ctx, `
+	_, err = classifier.store.DB.ExecContext(ctx, `
 		INSERT INTO device_classifications(
 			device_id, catalog_version, definition_id, predicted_type, category, icon,
 			confidence, score, signal_hash, evidence_json, evaluated_at, classified_query_id, updated_at

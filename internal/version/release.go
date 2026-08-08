@@ -45,21 +45,21 @@ func NewChecker() *Checker {
 	return &Checker{client: &http.Client{Timeout: 5 * time.Second}}
 }
 
-func (c *Checker) Latest(ctx context.Context) *Release {
+func (checker *Checker) Latest(ctx context.Context) *Release {
 	now := time.Now()
-	c.mu.Lock()
-	if !c.checkedAt.IsZero() && now.Sub(c.checkedAt) < releaseCheckInterval {
-		latest := c.latest
-		c.mu.Unlock()
+	checker.mu.Lock()
+	if !checker.checkedAt.IsZero() && now.Sub(checker.checkedAt) < releaseCheckInterval {
+		latest := checker.latest
+		checker.mu.Unlock()
 		return latest
 	}
-	c.mu.Unlock()
+	checker.mu.Unlock()
 
-	latest := fetchLatestRelease(ctx, c.client)
-	c.mu.Lock()
-	c.checkedAt = now
-	c.latest = latest
-	c.mu.Unlock()
+	latest := fetchLatestRelease(ctx, checker.client)
+	checker.mu.Lock()
+	checker.checkedAt = now
+	checker.latest = latest
+	checker.mu.Unlock()
 	return latest
 }
 

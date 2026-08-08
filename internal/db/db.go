@@ -8,22 +8,35 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 
 	_ "github.com/mattn/go-sqlite3"
 )
 
 type Store struct {
-	DB *sql.DB
+	DB               *sql.DB
+	Path             string
+	UpgradeStatePath string
+	migrationHook    func(int, string) error
+	activityMu       sync.RWMutex
+	activity         activityStorageState
 }
 
 func Open(path string) (*Store, error) {
-	database, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_busy_timeout=5000")
+	if err := recoverInterruptedMigration(path); err != nil {
+		return nil, err
+	}
+	database, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000")
 	if err != nil {
 		return nil, err
 	}
 	database.SetMaxOpenConns(1)
 
-	store := &Store{DB: database}
+	store := &Store{
+		DB:               database,
+		Path:             path,
+		UpgradeStatePath: upgradeStatePath(path),
+	}
 	if err := store.migrate(context.Background()); err != nil {
 		_ = database.Close()
 		return nil, err
@@ -35,11 +48,31 @@ func Open(path string) (*Store, error) {
 	return store, nil
 }
 
-func (s *Store) Close() error {
-	return s.DB.Close()
+// OpenReadOnly opens an existing database without running migrations or seed
+// work. Runtime services that only need to observe accepted configuration use
+// this so they cannot become an independent control plane.
+func OpenReadOnly(path string) (*Store, error) {
+	database, err := sql.Open("sqlite3", path+"?mode=ro&_query_only=1&_foreign_keys=on&_busy_timeout=5000")
+	if err != nil {
+		return nil, err
+	}
+	database.SetMaxOpenConns(1)
+	if err := database.PingContext(context.Background()); err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	return &Store{
+		DB:               database,
+		Path:             path,
+		UpgradeStatePath: upgradeStatePath(path),
+	}, nil
 }
 
-func (s *Store) migrate(ctx context.Context) error {
+func (store *Store) Close() error {
+	return store.DB.Close()
+}
+
+func (store *Store) ensureSchema(ctx context.Context) error {
 	schema := []string{
 		`CREATE TABLE IF NOT EXISTS dns_records (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -357,38 +390,27 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_notification_states_updated_at ON notification_states(updated_at);`,
 	}
 	for _, stmt := range schema {
-		if _, err := s.DB.ExecContext(ctx, stmt); err != nil {
+		if _, err := store.DB.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
 	}
-	if err := s.migrateDNSRecords(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateProtection(ctx); err != nil {
-		return err
-	}
-	if err := s.migrateBlocklistSources(ctx); err != nil {
-		return err
-	}
-	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE dns_queries ADD COLUMN upstream TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		return err
-	}
-	for _, column := range []string{
-		`ALTER TABLE dns_queries ADD COLUMN rcode TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE dns_queries ADD COLUMN decision_reason TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE dns_queries ADD COLUMN decision_metadata TEXT NOT NULL DEFAULT '{}'`,
-		`ALTER TABLE dns_queries ADD COLUMN device_id INTEGER`,
-		`ALTER TABLE device_classifications ADD COLUMN classified_query_id INTEGER NOT NULL DEFAULT 0`,
+	return nil
+}
+
+func (store *Store) ensureHistoryIndexes(ctx context.Context) error {
+	for _, statement := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_timestamp_action ON dns_queries(timestamp, action);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_timestamp_source ON dns_queries(timestamp, source);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_device_timestamp_id ON dns_queries(device_id, timestamp, id);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_domain_timestamp ON dns_queries(domain, timestamp);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_activity_order ON dns_queries(julianday(timestamp) DESC, id DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_retention ON dns_queries(datetime(timestamp), id);`,
+		`CREATE INDEX IF NOT EXISTS idx_events_activity_order ON events(julianday(timestamp) DESC, id DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_events_retention ON events(datetime(timestamp), id);`,
 	} {
-		if _, err := s.DB.ExecContext(ctx, column); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+		if _, err := store.DB.ExecContext(ctx, statement); err != nil {
 			return err
 		}
-	}
-	if _, err := s.DB.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_dns_queries_device_timestamp ON dns_queries(device_id, timestamp)`); err != nil {
-		return err
-	}
-	if err := s.migrateDeviceIdentities(ctx); err != nil {
-		return err
 	}
 	return nil
 }
@@ -404,20 +426,20 @@ type legacyDeviceIdentity struct {
 
 // migrateDeviceIdentities moves the original IP-keyed device data into stable device records.
 // The original tables remain available so older backups and clients can be restored during the transition.
-func (s *Store) migrateDeviceIdentities(ctx context.Context) error {
+func (store *Store) migrateDeviceIdentities(ctx context.Context) error {
 	var completed string
-	err := s.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'device_identity_migration_completed'`).Scan(&completed)
+	err := store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'device_identity_migration_completed'`).Scan(&completed)
 	if err == nil && completed == "true" {
 		return nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	identities, err := s.loadLegacyDeviceIdentities(ctx)
+	identities, err := store.loadLegacyDeviceIdentities(ctx)
 	if err != nil {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -433,8 +455,8 @@ func (s *Store) migrateDeviceIdentities(ctx context.Context) error {
 	return tx.Commit()
 }
 
-func (s *Store) loadLegacyDeviceIdentities(ctx context.Context) ([]legacyDeviceIdentity, error) {
-	rows, err := s.DB.QueryContext(ctx, `
+func (store *Store) loadLegacyDeviceIdentities(ctx context.Context) ([]legacyDeviceIdentity, error) {
+	rows, err := store.DB.QueryContext(ctx, `
 		WITH known_addresses AS (
 			SELECT client_ip FROM dns_queries
 			UNION SELECT client_ip FROM device_aliases
@@ -524,19 +546,19 @@ func completeDeviceIdentityMigration(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-func (s *Store) migrateProtection(ctx context.Context) error {
-	if _, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO protection_profiles(name, icon, is_default) VALUES('Home', 'house', 1)`); err != nil {
+func (store *Store) migrateProtection(ctx context.Context) error {
+	if _, err := store.DB.ExecContext(ctx, `INSERT OR IGNORE INTO protection_profiles(name, icon, is_default) VALUES('Home', 'house', 1)`); err != nil {
 		return err
 	}
 	var completed string
-	err := s.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'protection_migration_completed'`).Scan(&completed)
+	err := store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'protection_migration_completed'`).Scan(&completed)
 	if err == nil && completed == "true" {
 		return nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -592,9 +614,9 @@ var movedBlocklistSources = []blocklistSourceMigration{
 	},
 }
 
-func (s *Store) migrateBlocklistSources(ctx context.Context) error {
+func (store *Store) migrateBlocklistSources(ctx context.Context) error {
 	for _, migration := range movedBlocklistSources {
-		if _, err := s.DB.ExecContext(ctx, `
+		if _, err := store.DB.ExecContext(ctx, `
 			UPDATE blocklists
 			SET url = ?, updated_at = CURRENT_TIMESTAMP
 			WHERE url = ?`, migration.to, migration.from); err != nil {
@@ -604,7 +626,7 @@ func (s *Store) migrateBlocklistSources(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) seed(ctx context.Context) error {
+func (store *Store) seed(ctx context.Context) error {
 	defaults := map[string]string{
 		"upstream_dns": "1.1.1.1,9.9.9.9",
 		// Keep upgrades on their existing transport. New onboarding explicitly
@@ -619,36 +641,36 @@ func (s *Store) seed(ctx context.Context) error {
 		"allowed_client_cidrs":     "127.0.0.0/8,10.0.0.0/8,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7,fe80::/10",
 	}
 	for key, value := range defaults {
-		if _, err := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)`, key, value); err != nil {
+		if _, err := store.DB.ExecContext(ctx, `INSERT OR IGNORE INTO settings(key, value) VALUES(?, ?)`, key, value); err != nil {
 			return err
 		}
 	}
-	if err := s.removeLegacyDemoRecords(ctx); err != nil {
+	if err := store.removeLegacyDemoRecords(ctx); err != nil {
 		return err
 	}
-	if err := s.removeLegacyDemoQueries(ctx); err != nil {
+	if err := store.removeLegacyDemoQueries(ctx); err != nil {
 		return err
 	}
-	if err := s.removeLegacyDemoRules(ctx); err != nil {
+	if err := store.removeLegacyDemoRules(ctx); err != nil {
 		return err
 	}
 
 	if os.Getenv("FARO_SEED_DEMO_QUERIES") == "true" {
-		return s.seedDemoQueries(ctx)
+		return store.seedDemoQueries(ctx)
 	}
 	return nil
 }
 
-func (s *Store) removeLegacyDemoRecords(ctx context.Context) error {
+func (store *Store) removeLegacyDemoRecords(ctx context.Context) error {
 	var marker string
-	err := s.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'legacy_demo_records_removed'`).Scan(&marker)
+	err := store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'legacy_demo_records_removed'`).Scan(&marker)
 	if err == nil && marker == "true" {
 		return nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -667,16 +689,16 @@ func (s *Store) removeLegacyDemoRecords(ctx context.Context) error {
 	return tx.Commit()
 }
 
-func (s *Store) removeLegacyDemoRules(ctx context.Context) error {
+func (store *Store) removeLegacyDemoRules(ctx context.Context) error {
 	var marker string
-	err := s.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'legacy_demo_rules_removed'`).Scan(&marker)
+	err := store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'legacy_demo_rules_removed'`).Scan(&marker)
 	if err == nil && marker == "true" {
 		return nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -693,8 +715,8 @@ func (s *Store) removeLegacyDemoRules(ctx context.Context) error {
 	return tx.Commit()
 }
 
-func (s *Store) removeLegacyDemoQueries(ctx context.Context) error {
-	_, err := s.DB.ExecContext(ctx, `
+func (store *Store) removeLegacyDemoQueries(ctx context.Context) error {
+	_, err := store.DB.ExecContext(ctx, `
 		DELETE FROM dns_queries
 		WHERE domain IN ('plex.home', 'nas.home', 'ads.example.com', 'tracker.example.net', 'api.github.com')
 		  AND client_ip IN ('192.168.7.44', '192.168.7.21', '192.168.7.36', '192.168.7.55', '127.0.0.1')
@@ -702,9 +724,9 @@ func (s *Store) removeLegacyDemoQueries(ctx context.Context) error {
 	return err
 }
 
-func (s *Store) seedDemoQueries(ctx context.Context) error {
+func (store *Store) seedDemoQueries(ctx context.Context) error {
 	var count int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM dns_queries`).Scan(&count); err != nil {
+	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM dns_queries`).Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {
@@ -724,9 +746,9 @@ func (s *Store) seedDemoQueries(ctx context.Context) error {
 		{"192.168.7.44", "nas.home", "A", "allowed", "local", 1.1},
 		{"192.168.7.55", "tracker.example.net", "AAAA", "blocked", "blocklist", 0.7},
 	}
-	for _, q := range seed {
-		if _, err := s.DB.ExecContext(ctx, `INSERT INTO dns_queries(timestamp, client_ip, domain, query_type, action, source, latency_ms) VALUES(datetime('now'), ?, ?, ?, ?, ?, ?)`,
-			q.client, q.domain, q.qtype, q.action, q.source, q.latency); err != nil {
+	for _, seedQuery := range seed {
+		if _, err := store.DB.ExecContext(ctx, `INSERT INTO dns_queries(timestamp, client_ip, domain, query_type, action, source, latency_ms) VALUES(datetime('now'), ?, ?, ?, ?, ?, ?)`,
+			seedQuery.client, seedQuery.domain, seedQuery.qtype, seedQuery.action, seedQuery.source, seedQuery.latency); err != nil {
 			return err
 		}
 	}
@@ -788,15 +810,15 @@ func NormalizeRecord(hostname, typ, value string) (string, string, string, error
 
 // migrateDNSRecords replaces the original hostname-only uniqueness constraint
 // with record-level uniqueness so a hostname can be genuinely dual-stack.
-func (s *Store) migrateDNSRecords(ctx context.Context) error {
-	hasHostnameOnlyUnique, err := s.hasHostnameOnlyUniqueIndex(ctx)
+func (store *Store) migrateDNSRecords(ctx context.Context) error {
+	hasHostnameOnlyUnique, err := store.hasHostnameOnlyUniqueIndex(ctx)
 	if err != nil {
 		return err
 	}
 	if !hasHostnameOnlyUnique {
 		return nil
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -826,8 +848,8 @@ func (s *Store) migrateDNSRecords(ctx context.Context) error {
 	return tx.Commit()
 }
 
-func (s *Store) hasHostnameOnlyUniqueIndex(ctx context.Context) (bool, error) {
-	rows, err := s.DB.QueryContext(ctx, `PRAGMA index_list(dns_records)`)
+func (store *Store) hasHostnameOnlyUniqueIndex(ctx context.Context) (bool, error) {
+	rows, err := store.DB.QueryContext(ctx, `PRAGMA index_list(dns_records)`)
 	if err != nil {
 		return false, err
 	}
@@ -851,7 +873,7 @@ func (s *Store) hasHostnameOnlyUniqueIndex(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	for _, name := range uniqueIndexes {
-		columns, columnErr := s.DB.QueryContext(ctx, `PRAGMA index_info(`+quoteIdentifier(name)+`)`)
+		columns, columnErr := store.DB.QueryContext(ctx, `PRAGMA index_info(`+quoteIdentifier(name)+`)`)
 		if columnErr != nil {
 			return false, columnErr
 		}

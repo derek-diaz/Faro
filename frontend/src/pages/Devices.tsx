@@ -35,7 +35,9 @@ import {
   Tv,
   X
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject, type SubmitEvent } from "react";
+import { rowSortingFeature, tableFeatures, useTable } from "@tanstack/react-table";
+import type { Column, ColumnDef, SortingState } from "@tanstack/react-table";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject, type SubmitEvent } from "react";
 import { api, type DeviceInventoryPage, type DeviceReplay as DeviceReplayData, type DeviceSummary, type DNSQuery, type Protection, type ReplayBucket } from "../api/client";
 import { DeviceReplay } from "../components/DeviceReplay";
 import { DomainFavicon } from "../components/DomainFavicon";
@@ -57,6 +59,12 @@ type DeviceView = "overview" | "replay";
 type DeviceEditForm = { name: string; location: string; notes: string; device_type: string };
 type DeviceSortKey = "device" | "requests" | "blocked" | "last_seen" | "protection";
 type SortDirection = "asc" | "desc";
+
+function isDeviceSortKey(value: string): value is DeviceSortKey {
+  return value === "device" || value === "requests" || value === "blocked" || value === "last_seen" || value === "protection";
+}
+
+const deviceTableFeatures = tableFeatures({ rowSortingFeature });
 
 const deviceTypeChoices = [
   "Computer",
@@ -84,7 +92,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
   const [view, setView] = useState<DeviceView>("overview");
   const [search, setSearch] = useState("");
   const [activeTodayOnly, setActiveTodayOnly] = useState(false);
-  const [sort, setSort] = useState<{ key: DeviceSortKey; direction: SortDirection }>({ key: "device", direction: "asc" });
+  const [sorting, setSorting] = useState<SortingState>([{ id: "device", desc: false }]);
   const [page, setPage] = useState(1);
   const [inventory, setInventory] = useState<DeviceInventoryPage>(() => inventoryFromDevices(devices));
   const [inventoryLoading, setInventoryLoading] = useState(true);
@@ -98,6 +106,63 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
   const inventoryDevices = inventory.items;
   const activeProtection = detail ? protections.find((protection) => protection.id === detail.protection_id) : null;
   const activeProtectionName = activeProtection?.name ?? detail?.protection ?? detail?.profile ?? "Protection";
+  const sort = useMemo<{ key: DeviceSortKey; direction: SortDirection }>(() => {
+    const current = sorting[0];
+    return {
+      key: current && isDeviceSortKey(current.id) ? current.id : "device",
+      direction: current?.desc ? "desc" : "asc"
+    };
+  }, [sorting]);
+
+  const deviceColumns = useMemo<ColumnDef<typeof deviceTableFeatures, DeviceSummary>[]>(() => [
+    {
+      id: "device",
+      accessorFn: (device) => deviceDisplayName(device),
+      header: ({ column }) => <DeviceSortHeader column={column} label="Device" />,
+      cell: ({ row }) => (
+        <span className="device-table-identity">
+          <span className="device-icon">{deviceTypeIcon(row.original.device_type)}</span>
+          <span className="device-main">
+            <strong>{deviceDisplayName(row.original)}</strong>
+            <small>{row.original.device_type} <i /> {deviceIdentityCaption(row.original)}{row.original.location ? ` · ${row.original.location}` : ""}</small>
+          </span>
+        </span>
+      )
+    },
+    {
+      id: "requests",
+      accessorKey: "total_queries_today",
+      sortDescFirst: true,
+      header: ({ column }) => <DeviceSortHeader column={column} label="Requests today" />,
+      cell: ({ row }) => <span className="device-table-value"><small>Requests today</small><strong>{row.original.total_queries_today.toLocaleString()}</strong></span>
+    },
+    {
+      id: "blocked",
+      accessorKey: "blocked_queries_today",
+      sortDescFirst: true,
+      header: ({ column }) => <DeviceSortHeader column={column} label="Blocked" />,
+      cell: ({ row }) => <span className={`device-table-value ${row.original.blocked_queries_today > 0 ? "blocked" : ""}`}><small>Blocked</small><strong>{row.original.blocked_queries_today.toLocaleString()} <em>{row.original.block_percentage.toFixed(1)}%</em></strong></span>
+    },
+    {
+      id: "last_seen",
+      accessorKey: "last_seen",
+      sortDescFirst: true,
+      header: ({ column }) => <DeviceSortHeader column={column} label="Last seen" />,
+      cell: ({ row }) => <span className="device-table-value"><small>Last seen</small><strong>{formatLastSeen(row.original.last_seen)}</strong></span>
+    },
+    {
+      id: "protection",
+      accessorKey: "profile",
+      header: ({ column }) => <DeviceSortHeader column={column} label="Protection" />,
+      cell: ({ row }) => <span className="device-profile-badge">{row.original.profile}</span>
+    },
+    {
+      id: "actions",
+      header: () => <span aria-hidden="true" />,
+      enableSorting: false,
+      cell: () => <ChevronRight className="device-row-arrow" size={17} />
+    }
+  ], []);
 
   const loadInventory = useCallback(async (conditional: boolean) => {
     if (conditional && inventoryBusy.current) return;
@@ -151,7 +216,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
 
   useEffect(() => {
     setPage(1);
-  }, [activeTodayOnly, search, sort]);
+  }, [activeTodayOnly, search, sorting]);
 
   useEffect(() => {
     if (!selectedClientIP) {
@@ -211,11 +276,17 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [protectionMenuOpen]);
 
-  function changeSort(key: DeviceSortKey) {
-    setSort((current) => current.key === key
-      ? { key, direction: current.direction === "asc" ? "desc" : "asc" }
-      : { key, direction: key === "device" || key === "protection" ? "asc" : "desc" });
-  }
+  const deviceTable = useTable({
+    features: deviceTableFeatures,
+    data: inventoryDevices,
+    columns: deviceColumns,
+    getRowId: (device) => device.device_id ? String(device.device_id) : device.client_ip,
+    manualSorting: true,
+    state: { sorting },
+    onSortingChange: setSorting,
+    enableSortingRemoval: false,
+    enableMultiSort: false
+  });
 
   const totals = {
     active: inventory.summary.active_today,
@@ -310,34 +381,28 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
 
         {inventoryError && <div className="device-inventory-error" role="alert">{inventoryError}</div>}
         <div className="device-table">
-          <div className="device-table-header">
-            <DeviceSortHeader label="Device" sortKey="device" sort={sort} onSort={changeSort} />
-            <DeviceSortHeader label="Requests today" sortKey="requests" sort={sort} onSort={changeSort} />
-            <DeviceSortHeader label="Blocked" sortKey="blocked" sort={sort} onSort={changeSort} />
-            <DeviceSortHeader label="Last seen" sortKey="last_seen" sort={sort} onSort={changeSort} />
-            <DeviceSortHeader label="Protection" sortKey="protection" sort={sort} onSort={changeSort} />
-            <span aria-hidden="true" />
-          </div>
-          {inventoryDevices.map((device) => (
+          {deviceTable.getHeaderGroups().map((headerGroup) => (
+            <div className="device-table-header" key={headerGroup.id}>
+              {headerGroup.headers.map((header) => (
+                <Fragment key={header.id}>
+                  {header.isPlaceholder ? null : <deviceTable.FlexRender header={header} />}
+                </Fragment>
+              ))}
+            </div>
+          ))}
+          {deviceTable.getRowModel().rows.map((row) => (
             <button
-              className={selectedClientIP === device.client_ip ? "device-table-row active" : "device-table-row"}
-              key={device.device_id || device.client_ip}
+              className={selectedClientIP === row.original.client_ip ? "device-table-row active" : "device-table-row"}
+              key={row.id}
               type="button"
-              onClick={() => onSelectClient(device.client_ip)}
-              aria-pressed={selectedClientIP === device.client_ip}
+              onClick={() => onSelectClient(row.original.client_ip)}
+              aria-pressed={selectedClientIP === row.original.client_ip}
             >
-              <span className="device-table-identity">
-                <span className="device-icon">{deviceTypeIcon(device.device_type)}</span>
-                <span className="device-main">
-                  <strong>{deviceDisplayName(device)}</strong>
-                  <small>{device.device_type} <i /> {deviceIdentityCaption(device)}{device.location ? ` · ${device.location}` : ""}</small>
-                </span>
-              </span>
-              <span className="device-table-value"><small>Requests today</small><strong>{device.total_queries_today.toLocaleString()}</strong></span>
-              <span className={`device-table-value ${device.blocked_queries_today > 0 ? "blocked" : ""}`}><small>Blocked</small><strong>{device.blocked_queries_today.toLocaleString()} <em>{device.block_percentage.toFixed(1)}%</em></strong></span>
-              <span className="device-table-value"><small>Last seen</small><strong>{formatLastSeen(device.last_seen)}</strong></span>
-              <span className="device-profile-badge">{device.profile}</span>
-              <ChevronRight className="device-row-arrow" size={17} />
+              {row.getAllCells().map((cell) => (
+                <Fragment key={cell.id}>
+                  <deviceTable.FlexRender cell={cell} />
+                </Fragment>
+              ))}
             </button>
           ))}
         </div>
@@ -432,12 +497,13 @@ function DeviceProtectionPicker({ detail, protections, activeProtection, activeP
   return <div className="device-protection-picker" ref={protectionMenuRef}><button type="button" className="device-protection-trigger" aria-label={`Protection: ${activeProtectionName}`} aria-haspopup="true" aria-expanded={protectionMenuOpen} aria-controls="device-protection-options" disabled={protectionBusy || protections.length === 0} onClick={() => setProtectionMenuOpen(!protectionMenuOpen)}><ProtectionIcon name={activeProtection?.icon ?? detail.protection_icon} size={15} /><span>{protectionBusy ? "Applying…" : activeProtectionName}</span><ChevronDown className={protectionMenuOpen ? "open" : ""} size={14} /></button>{protectionMenuOpen && <div className="device-protection-menu" id="device-protection-options" aria-label="Choose protection"><div className="device-protection-menu-heading"><strong>Choose protection</strong><span>Changes apply to this device immediately.</span></div>{protections.map((protection) => <button type="button" aria-pressed={protection.id === detail.protection_id} className={protection.id === detail.protection_id ? "selected" : ""} key={protection.id} onClick={() => void changeProtection(protection.id)}><span className="device-protection-option-icon"><ProtectionIcon name={protection.icon} size={17} /></span><span><strong>{protection.name}</strong><small>{protectionAssignmentLabel(protection.is_default, protection.device_ips.length)}</small></span><Check size={15} /></button>)}</div>}</div>;
 }
 
-function DeviceSortHeader({ label, sortKey, sort, onSort }: { readonly label: string; readonly sortKey: DeviceSortKey; readonly sort: { readonly key: DeviceSortKey; readonly direction: SortDirection }; readonly onSort: (key: DeviceSortKey) => void }) {
-  const active = sort.key === sortKey;
-  const DirectionIcon = sort.direction === "asc" ? ArrowUp : ArrowDown;
-  const directionLabel = sort.direction === "asc" ? "ascending" : "descending";
+function DeviceSortHeader({ column, label }: { readonly column: Column<typeof deviceTableFeatures, DeviceSummary, unknown>; readonly label: string }) {
+  const sorted = column.getIsSorted();
+  const active = sorted !== false;
+  const DirectionIcon = sorted === "desc" ? ArrowDown : ArrowUp;
+  const directionLabel = sorted === "desc" ? "descending" : "ascending";
   const sortLabel = active ? `Sort by ${label}, currently ${directionLabel}` : `Sort by ${label}`;
-  return <button type="button" className={active ? "device-sort-header active" : "device-sort-header"} onClick={() => onSort(sortKey)} aria-label={sortLabel}>
+  return <button type="button" className={active ? "device-sort-header active" : "device-sort-header"} onClick={column.getToggleSortingHandler()} aria-label={sortLabel}>
     <span>{label}</span>{active && <DirectionIcon size={13} strokeWidth={2.5} aria-hidden="true" />}
   </button>;
 }

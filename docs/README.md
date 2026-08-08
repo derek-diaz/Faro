@@ -18,7 +18,9 @@ Faro reads optional deployment settings from a `.env` file beside `docker-compos
 | `FARO_DOCKER_LOG_BACKUPS` | `3` | Number of rotated Docker log files retained per container |
 | `FARO_DEVICE_CATALOG_PATH` | `/config/device-catalog.json` | Optional custom device-recognition catalog; the bundled catalog is used when this file does not exist |
 | `FARO_IMAGE_NAMESPACE` | `tabierto` | Docker Hub image namespace |
-| `FARO_VERSION` | `latest` | Faro image tag |
+| `FARO_VERSION` | `latest` | Optional image tag override; leave unset for normal upgrades |
+| `FARO_MIGRATION_BACKUP_DIR` | `/config/migrations` | Directory for automatic pre-migration SQLite backups |
+| `FARO_UPGRADE_STATE_PATH` | `/config/faro-upgrade.json` | Durable upgrade status file |
 
 Example:
 
@@ -32,7 +34,9 @@ FARO_QUERY_LOG_BACKUPS=2
 FARO_DOCKER_LOG_MAX_SIZE=10m
 FARO_DOCKER_LOG_BACKUPS=3
 FARO_DEVICE_CATALOG_PATH=/config/device-catalog.json
-FARO_VERSION=latest
+# FARO_VERSION=0.9.0
+FARO_MIGRATION_BACKUP_DIR=/config/migrations
+FARO_UPGRADE_STATE_PATH=/config/faro-upgrade.json
 ```
 
 The API remains internal to the Faro container and is accessed through its web server. It is not exposed as a separate host port. Use a nonstandard DNS port only for testing because routers normally cannot specify a port other than `53`.
@@ -57,13 +61,22 @@ The built-in Cloudflare, Google Public DNS, Quad9, AdGuard DNS, and OpenDNS prof
 
 ## Deployment model
 
-Faro always runs as one application container. The web interface, API, CoreDNS resolver, encrypted upstream gateway, and bounded query logger remain separate internal responsibilities, but they install, restart, and upgrade atomically. Standard Docker Compose and Unraid run the same `tabierto/faro` image; Unraid's XML file is only an installation template for that image. Development follows the same topology with Air and Vite added for hot reload.
+Faro always runs as one application container. The web interface, API, CoreDNS resolver, standalone encrypted upstream gateway, and bounded query logger remain separate supervised processes, but they install, restart, and upgrade atomically. Standard Docker Compose and Unraid run the same `tabierto/faro` image; Unraid's XML file is only an installation template for that image. Development follows the same topology with Air and Vite added for hot reload.
 
 Run the published image:
 
 ```sh
+docker compose pull
 docker compose up -d
 ```
+
+The Compose file follows the current `latest` release by default. Normal
+upgrades are therefore just `docker compose pull` followed by
+`docker compose up -d`; no version editing is required. Set `FARO_VERSION`
+only when deliberately rolling back or pinning an image, for example
+`FARO_VERSION=0.9.0` or an immutable `sha-...` tag. Faro's automatic database
+backup, migration rollback, and last-known-good DNS state protect the simple
+upgrade path.
 
 Build the same production container from a repository checkout:
 
@@ -79,7 +92,7 @@ Faro can synchronize one primary server with any number of read-only DNS replica
 
 To add a server:
 
-1. Install Faro normally on another machine with a fixed LAN IP, but do not create its administrator account.
+1. Install Faro normally on another machine with a fixed LAN IP. On the setup, login, or initial DNS configuration screen, choose **Join an existing Faro home** instead of creating a standalone administrator account. If an administrator was already created by mistake, the same join action remains available; there is no need to delete `/config`.
 2. On the primary, open **Settings → Redundancy**, choose **Set up redundancy** or **Add DNS server**, and copy the temporary pairing code.
 3. Open the fresh Faro server, choose **Join an existing Faro home**, and enter the primary's private Faro URL, pairing code, server name, and the new server's LAN IP.
 4. Wait for both servers to show the same configuration revision, then advertise both LAN IPs as DNS servers through the router's DHCP settings.
@@ -168,7 +181,24 @@ Useful endpoints:
 
 - Web interface: `http://YOUR-FARO-IP:1787`
 - Health check: `http://YOUR-FARO-IP:1787/healthz`
+- Upgrade state: `http://YOUR-FARO-IP:1787/api/upgrade`
+- CoreDNS diagnostics: **Settings → Advanced → DNS diagnostics** (or `GET /api/diagnostics/coredns` after signing in)
 - Prometheus metrics: `http://YOUR-FARO-IP:1787/metrics`
+
+### CoreDNS diagnostics
+
+The **Advanced → DNS diagnostics** section is a read-only troubleshooting view
+for administrators. It compares the accepted CoreDNS files on disk with
+the candidate Faro would generate from the current database state, shows the
+complete-file hashes and reload counters, and identifies drift or a generation
+failure. Large files such as blocklists are shown as bounded previews; their
+reported byte counts and hashes still cover the complete file.
+
+The panel cannot edit or apply CoreDNS configuration. Use the regular Faro
+settings and reload flow so staged validation, atomic replacement, live
+verification, and rollback remain in control of DNS state. The view may contain
+local hostnames and network details and is protected by the normal Faro admin
+session.
 
 ## Operations
 
@@ -179,7 +209,7 @@ docker compose logs -f
 # Show recent application logs
 docker compose logs --tail=200
 
-# Pull and run the latest configured release
+# Pull and run the current release
 docker compose pull
 docker compose up -d
 
@@ -197,11 +227,80 @@ Favicon fetching is disabled by default because it makes outbound requests based
 
 Faro stores its database, generated resolver configuration, cached icons, and bounded raw query logs in the `faro-config` volume mounted at `/config`.
 
+The live SQLite database uses WAL mode, a 5-second busy timeout, and
+foreign-key enforcement. Keep the `faro.db`, `faro.db-wal`, and `faro.db-shm`
+files together if you copy a live volume; for routine backups, use Faro's
+encrypted backup instead. Faro's DNS control plane does not depend on writing
+query history. If the history database cannot be written, the UI reports
+`Activity storage: Paused` (with `Reason: Insufficient disk space` for a full
+disk) while DNS remains healthy. History writes retry automatically after the
+storage problem is cleared.
+
+History API requests are bounded: query responses return at most 500 rows,
+activity pages accept at most 200 rows and page 10,000, and search terms are
+limited to 100 characters. Faro does not provide an unbounded activity export;
+the encrypted backup remains the controlled path for moving retained history.
+
 For routine Faro backups, open **Settings → Health & data → Encrypted backup & restore**. Faro downloads a portable `.faro-backup` file containing the SQLite database, including DNS settings, local records, rules, blocklists, account data, and retained history. The file is protected with a passphrase-derived key using Argon2id and AES-256-GCM.
 
 Keep the backup passphrase separately: Faro cannot recover it. During restore, Faro retains a private snapshot of the current database until the generated configuration has been validated and the running CoreDNS instance accepts it. If DNS rejects the restored configuration, Faro restores the previous database and DNS configuration and reports that the restore failed; the UI cannot continue showing settings that DNS did not accept. A successful restore signs out every browser session. Active login sessions, integration credentials and derived router observations, cached favicon files, and the bounded raw query-log buffer are deliberately excluded; Faro recreates or re-synchronizes those operational files as needed.
 
+Before starting a restore, the UI calls out the impact: the existing backup-covered state will be replaced, UniFi credentials and replica relationships are not part of the backup, all active sessions will be invalidated, and the passphrase cannot be recovered. On an existing installation, excluded local integration and replica state remains local to that installation; on a fresh installation, it must be configured again.
+
+### Database upgrades and recovery
+
+Faro upgrades SQLite with numbered migrations tracked in both `PRAGMA
+user_version` and the `faro_schema_migrations` table. Before changing an
+existing database, startup writes a consistent copy to
+`FARO_MIGRATION_BACKUP_DIR` and records progress in
+`FARO_UPGRADE_STATE_PATH`. The state file reports `in_progress`, `complete`,
+`failed`, `recovered`, or `incompatible`; it remains readable even when the
+API cannot start. The same state is available at `GET /api/upgrade` after the
+database opens.
+
+If a migration fails, Faro closes the database, restores the pre-migration
+copy, retains the failed database with a `.failed-*` suffix for investigation,
+and refuses to start the control plane with an actionable error. CoreDNS is
+not asked to apply a new control-plane configuration until the database
+upgrade succeeds, so the last accepted DNS state remains the recovery
+boundary.
+
+For a normal retry, keep the backup and start the last known-good image first.
+This is the advanced recovery path; routine upgrades do not need a version:
+
+```sh
+docker compose stop faro
+FARO_VERSION=0.9.0 docker compose up -d
+docker compose exec faro cat /config/faro-upgrade.json
+docker compose logs --tail=200 faro
+```
+
+If automatic restoration reports that it could not complete, stop Faro,
+copy the chosen file from `/config/migrations/` over `/config/faro.db`, and
+start the pinned image again. Preserve both the failed database and the
+backup before copying; never delete the only migration backup while
+diagnosing an upgrade. When the state is `incompatible`, use a newer image
+that supports the recorded schema version or restore a backup made by a
+compatible release; do not force the newer database through an older image.
+
 Volume-level backups are still useful for full host disaster recovery, especially if you also want cached favicons and generated runtime files. Back up `faro-config` as part of the Docker host's normal backup process.
+
+### Database durability scale test
+
+The release test suite includes an opt-in history benchmark. Run each target
+on a machine with enough free space and allow the test to complete its SQLite
+integrity check:
+
+```sh
+FARO_QUERY_SCALE_ROWS=1000000 go test ./internal/db -run TestQueryHistoryScale -count=1
+FARO_QUERY_SCALE_ROWS=10000000 go test ./internal/db -run TestQueryHistoryScale -count=1
+FARO_QUERY_SCALE_ROWS=50000000 go test ./internal/db -run TestQueryHistoryScale -count=1 -timeout 60m
+```
+
+The test inserts the requested history volume, verifies the dashboard and
+retention indexes are present, runs representative query plans, and executes
+`PRAGMA integrity_check`. The benchmark is skipped when
+`FARO_QUERY_SCALE_ROWS` is not set.
 
 ## Troubleshooting
 
@@ -305,9 +404,17 @@ To run the full development stack in containers with hot reload:
 docker compose -f docker-compose.dev.yml up --build
 ```
 
-Development also runs as one container, matching the production and Unraid process topology. Open `http://localhost:1787`. Vite applies frontend edits with hot module replacement, while Air rebuilds and restarts the Go API after Go source changes. CoreDNS and the bounded query logger run alongside them under the same supervisor. Both source watchers use polling for reliable Windows and macOS bind-mount detection through Docker Desktop. Stop the stack with `Ctrl-C`, or run `make dev-down` from another terminal.
+Development also runs as one container, matching the production and Unraid process topology. Open `http://localhost:1787`. Vite applies frontend edits with hot module replacement, while Air rebuilds and restarts the Go API after Go source changes. CoreDNS, the standalone encrypted gateway, and the bounded query logger run alongside them under the same supervisor. Both source watchers use polling for reliable Windows and macOS bind-mount detection through Docker Desktop. Stop the stack with `Ctrl-C`, or run `make dev-down` from another terminal.
 
 Development DNS is published on host port `5354` by default to avoid privileged/system DNS listeners. Test it with `dig @127.0.0.1 -p 5354 example.com`, or set `FARO_DEV_DNS_PORT` to another available port. You can also use `make dev` as a shortcut for the command above.
+
+To run the disposable production-container DNS smoke test (requires Docker and either `dig` or Node.js):
+
+```sh
+make dns-reliability
+```
+
+It verifies startup, container restart, and DNS continuity while the web proxy and API processes are unavailable. The in-process Go tests cover the hostile configuration, blocklist, DoH, replica, and database-cleanup cases.
 
 To run the API and frontend directly on the host instead, use the following commands.
 
@@ -335,22 +442,22 @@ docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 
 ## Architecture
 
-Faro uses a Go API, React and TypeScript frontend, SQLite database, and CoreDNS. Before replacing active files, the API starts the same CoreDNS binary against a private staged copy of the complete generated configuration. After replacement, it verifies CoreDNS's SHA-512 reload hash through the resolver's metrics endpoint. If the live resolver does not accept the new Corefile, Faro restores and verifies the previous configuration. CoreDNS handles local records, blocked domains, caching, forwarding into Faro's selected upstream transport, query logs, metrics, and configuration reloads. The Go process owns the loopback-only DNS-over-HTTPS gateway used by encrypted mode.
+Faro uses a Go API, React and TypeScript frontend, SQLite database, and CoreDNS. Before replacing active files, the API starts the same CoreDNS binary against a private staged copy of the complete generated configuration. After replacement, it verifies CoreDNS's SHA-512 reload hash through the resolver's metrics endpoint. If the live resolver does not accept the new Corefile, Faro restores and verifies the previous configuration. CoreDNS handles local records, blocked domains, caching, forwarding into Faro's selected upstream transport, query logs, metrics, and configuration reloads. Encrypted mode uses a separate loopback-only DNS-over-HTTPS gateway. The API publishes a small runtime snapshot only after CoreDNS accepts a revision; the gateway rejects malformed snapshots and keeps its last-known-good provider set.
 
 The application keeps four internal responsibilities:
 
 - `api`: Faro's control plane, persistence, and configuration generation
 - `ui`: the web application and reverse proxy for the API
 - `dns`: CoreDNS resolution and filtering engine
-- `encrypted upstream`: the loopback-only DNS-over-HTTPS gateway owned by the API process
+- `encrypted upstream`: the standalone loopback-only DNS-over-HTTPS gateway
 
-The production and development images supervise those responsibilities together and expose only the web and DNS ports. If any required infrastructure process exits, the container stops so Docker can restart the complete application. In development, Air and Vite retain backend and frontend hot reload inside that same topology.
+The production and development images supervise those responsibilities together and expose only the web and DNS ports. CoreDNS and the encrypted gateway are the DNS availability boundary: if the UI, reverse proxy, or API exits, the container leaves both DNS processes serving their last-known-good state while health checks report the control-plane failure. If CoreDNS or the encrypted gateway exits, the container stops so Docker can restart DNS. An API crash cannot cause encrypted mode to fall back to plaintext because the gateway does not read live control-plane edits; it reloads only the accepted runtime snapshot. In development, Air and Vite retain backend and frontend hot reload inside that same topology.
 
 ## Publishing Docker releases
 
 ### Application version
 
-Faro's runtime version is defined in [`internal/version/version.go`](../internal/version/version.go). Update the `Number` constant there for the next release; the API and the frontend sidebar derive their displayed version from that value. The current release is `v0.9.0`.
+Faro's runtime version is defined in [`internal/version/version.go`](../internal/version/version.go). Update the release default there for the next release; release image builds inject the exact version into the API and companion binaries, and OCI labels record that version and the project source. The current release is `v0.9.0`.
 
 The authenticated UI also checks the public [Faro GitHub releases](https://github.com/derek-diaz/Faro/releases) periodically. When a newer semantic-versioned release is available, Faro shows a banner with a direct release link. If GitHub cannot be reached, the check fails quietly and does not affect DNS or the rest of the interface.
 
@@ -371,4 +478,7 @@ git tag v1.0.0
 git push origin v1.0.0
 ```
 
-The workflow publishes `latest`, the full version such as `1.0.0`, and the minor version such as `1.0` for `linux/amd64` and `linux/arm64`.
+The workflow publishes `latest`, the full version such as `1.0.0`, and the
+minor version such as `1.0` for `linux/amd64` and `linux/arm64`. Use the full
+or minor version tag when deliberately pinning an image; `latest` is the
+normal mutable upgrade path.

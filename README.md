@@ -141,6 +141,14 @@ docker compose pull
 docker compose up -d
 ```
 
+Faro follows the current release by default, so normal upgrades do not require
+editing a version number. `FARO_VERSION` remains available as an advanced
+override for rollback or deliberately pinned deployments. Faro creates a
+pre-migration SQLite backup and records upgrade progress before changing an
+existing database. See the
+[upgrade recovery procedure](docs/README.md#database-upgrades-and-recovery)
+for failure recovery.
+
 For port customization, verification, troubleshooting, backups, local development, architecture, and release publishing, see the [technical and deployment guide](docs/README.md).
 
 ## Unraid

@@ -10,10 +10,11 @@ import (
 	"time"
 
 	"github.com/derek/faro/internal/db"
+	"github.com/derek/faro/internal/devicecatalog"
 	deviceidentity "github.com/derek/faro/internal/devices"
 )
 
-func TestClassifyDevicePersistsCatalogEvidence(t *testing.T) {
+func TestDeviceEndpointIncludesCatalogEvidence(t *testing.T) {
 	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -34,8 +35,15 @@ func TestClassifyDevicePersistsCatalogEvidence(t *testing.T) {
 		}
 	}
 
-	handler := &Handler{store: store}
-	prediction, err := handler.classifyDevice(context.Background(), deviceID, "192.168.1.23", "")
+	classifier := devicecatalog.NewClassifier(store, devicecatalog.NewManager(""))
+	processed, err := classifier.ClassifyPending(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed devices = %d, want 1", processed)
+	}
+	prediction, err := devicecatalog.Classification(context.Background(), store.DB, deviceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,6 +66,7 @@ func TestClassifyDevicePersistsCatalogEvidence(t *testing.T) {
 		t.Fatalf("stored classification = type %q catalog %q evidence %#v", storedType, catalogVersion, evidence)
 	}
 
+	handler := &Handler{store: store}
 	response := httptest.NewRecorder()
 	handler.device(response, httptest.NewRequest(http.MethodGet, "/api/devices/192.168.1.23", nil))
 	if response.Code != http.StatusOK {

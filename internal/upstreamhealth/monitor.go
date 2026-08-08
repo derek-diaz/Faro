@@ -57,37 +57,37 @@ func NewMonitor(store *db.Store, interval time.Duration, probe ProbeFunc) *Monit
 	}
 }
 
-func (m *Monitor) Run(ctx context.Context) {
-	m.CheckNow(ctx)
-	ticker := time.NewTicker(m.interval)
+func (monitor *Monitor) Run(ctx context.Context) {
+	monitor.CheckNow(ctx)
+	ticker := time.NewTicker(monitor.interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.CheckNow(ctx)
-		case <-m.trigger:
-			m.CheckNow(ctx)
+			monitor.CheckNow(ctx)
+		case <-monitor.trigger:
+			monitor.CheckNow(ctx)
 		}
 	}
 }
 
-func (m *Monitor) Trigger() {
+func (monitor *Monitor) Trigger() {
 	select {
-	case m.trigger <- struct{}{}:
+	case monitor.trigger <- struct{}{}:
 	default:
 	}
 }
 
-func (m *Monitor) CheckNow(ctx context.Context) Snapshot {
-	m.checkMu.Lock()
-	defer m.checkMu.Unlock()
+func (monitor *Monitor) CheckNow(ctx context.Context) Snapshot {
+	monitor.checkMu.Lock()
+	defer monitor.checkMu.Unlock()
 
-	addresses := configuredAddresses(ctx, m.store)
-	probe := m.probe
+	addresses := configuredAddresses(ctx, monitor.store)
+	probe := monitor.probe
 	if probe == nil {
-		if configuredTransport(ctx, m.store) == "encrypted" {
+		if configuredTransport(ctx, monitor.store) == "encrypted" {
 			probe = ProbeEncryptedAddress
 		} else {
 			probe = ProbeAddress
@@ -96,16 +96,16 @@ func (m *Monitor) CheckNow(ctx context.Context) Snapshot {
 	checkedAt := time.Now().UTC().Format(time.RFC3339)
 	items := ProbeAddresses(ctx, addresses, probe)
 	next := summarize(items, checkedAt)
-	m.mu.Lock()
-	m.snapshot = next
-	m.mu.Unlock()
+	monitor.mu.Lock()
+	monitor.snapshot = next
+	monitor.mu.Unlock()
 	return cloneSnapshot(next)
 }
 
-func (m *Monitor) Snapshot() Snapshot {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return cloneSnapshot(m.snapshot)
+func (monitor *Monitor) Snapshot() Snapshot {
+	monitor.mu.RLock()
+	defer monitor.mu.RUnlock()
+	return cloneSnapshot(monitor.snapshot)
 }
 
 func ProbeAddresses(ctx context.Context, addresses []string, probe ProbeFunc) []Probe {

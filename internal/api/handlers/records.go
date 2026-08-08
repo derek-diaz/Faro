@@ -11,113 +11,113 @@ import (
 	"github.com/derek/faro/internal/db"
 )
 
-func (s *Handler) dnsRecords(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
+func (handler *Handler) dnsRecords(responseWriter http.ResponseWriter, request *http.Request) {
+	switch request.Method {
 	case http.MethodGet:
-		rows, err := s.store.DB.QueryContext(r.Context(), `SELECT id, hostname, type, value, description, created_at, updated_at FROM dns_records ORDER BY hostname, type, value`)
+		rows, err := handler.store.DB.QueryContext(request.Context(), `SELECT id, hostname, type, value, description, created_at, updated_at FROM dns_records ORDER BY hostname, type, value`)
 		if err != nil {
-			writeError(w, err)
+			writeError(responseWriter, err)
 			return
 		}
 		defer logActionError("close DNS record rows", rows.Close)
-		writeRows(w, rows)
+		writeRows(responseWriter, rows)
 	case http.MethodPost:
-		s.configMu.Lock()
-		defer s.configMu.Unlock()
+		handler.configMu.Lock()
+		defer handler.configMu.Unlock()
 		var input dnsRecordInput
-		if !decode(w, r, &input) {
+		if !decode(responseWriter, request, &input) {
 			return
 		}
-		host, typ, value, err := s.normalizeLocalRecord(r, input)
+		host, typ, value, err := handler.normalizeLocalRecord(request, input)
 		if err != nil {
-			writeBadRequest(w, err)
+			writeBadRequest(responseWriter, err)
 			return
 		}
-		result, err := s.store.DB.ExecContext(r.Context(), `INSERT INTO dns_records(hostname, type, value, description) VALUES(?, ?, ?, ?)`, host, typ, value, strings.TrimSpace(input.Description))
+		result, err := handler.store.DB.ExecContext(request.Context(), `INSERT INTO dns_records(hostname, type, value, description) VALUES(?, ?, ?, ?)`, host, typ, value, strings.TrimSpace(input.Description))
 		if err != nil {
-			writeError(w, err)
+			writeError(responseWriter, err)
 			return
 		}
 		id, _ := result.LastInsertId()
-		if err := s.reloader.Apply(r.Context()); err != nil {
-			rollbackCtx := context.WithoutCancel(r.Context())
-			_, _ = s.store.DB.ExecContext(rollbackCtx, `DELETE FROM dns_records WHERE id = ?`, id)
-			_ = s.reloader.Apply(rollbackCtx)
-			writeError(w, fmt.Errorf("record was not saved because CoreDNS rejected the configuration: %w", err))
+		if err := handler.reloader.Apply(request.Context()); err != nil {
+			rollbackCtx := context.WithoutCancel(request.Context())
+			_, _ = handler.store.DB.ExecContext(rollbackCtx, `DELETE FROM dns_records WHERE id = ?`, id)
+			_ = handler.reloader.Apply(rollbackCtx)
+			writeError(responseWriter, fmt.Errorf("record was not saved because CoreDNS rejected the configuration: %w", err))
 			return
 		}
-		writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+		writeJSON(responseWriter, http.StatusCreated, map[string]any{"id": id})
 	default:
-		methodNotAllowed(w)
+		methodNotAllowed(responseWriter)
 	}
 }
 
-func (s *Handler) dnsRecord(w http.ResponseWriter, r *http.Request) {
-	id, ok := idFromPath(w, r, "/api/dns-records/")
+func (handler *Handler) dnsRecord(responseWriter http.ResponseWriter, request *http.Request) {
+	id, ok := idFromPath(responseWriter, request, "/api/dns-records/")
 	if !ok {
 		return
 	}
-	switch r.Method {
+	switch request.Method {
 	case http.MethodPut:
-		s.updateDNSRecord(w, r, id)
+		handler.updateDNSRecord(responseWriter, request, id)
 	case http.MethodDelete:
-		s.deleteDNSRecord(w, r, id)
+		handler.deleteDNSRecord(responseWriter, request, id)
 	default:
-		methodNotAllowed(w)
+		methodNotAllowed(responseWriter)
 	}
 }
 
-func (s *Handler) updateDNSRecord(w http.ResponseWriter, r *http.Request, id int64) {
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
+func (handler *Handler) updateDNSRecord(responseWriter http.ResponseWriter, request *http.Request, id int64) {
+	handler.configMu.Lock()
+	defer handler.configMu.Unlock()
 	var input dnsRecordInput
-	if !decode(w, r, &input) {
+	if !decode(responseWriter, request, &input) {
 		return
 	}
-	host, typ, value, err := s.normalizeLocalRecord(r, input)
+	host, typ, value, err := handler.normalizeLocalRecord(request, input)
 	if err != nil {
-		writeBadRequest(w, err)
+		writeBadRequest(responseWriter, err)
 		return
 	}
-	previous, err := s.readDNSRecord(r.Context(), id)
+	previous, err := handler.readDNSRecord(request.Context(), id)
 	if err != nil {
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return
 	}
-	if _, err := s.store.DB.ExecContext(r.Context(), `UPDATE dns_records SET hostname = ?, type = ?, value = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, host, typ, value, strings.TrimSpace(input.Description), id); err != nil {
-		writeError(w, err)
+	if _, err := handler.store.DB.ExecContext(request.Context(), `UPDATE dns_records SET hostname = ?, type = ?, value = ?, description = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, host, typ, value, strings.TrimSpace(input.Description), id); err != nil {
+		writeError(responseWriter, err)
 		return
 	}
-	if err := s.reloader.Apply(r.Context()); err != nil {
-		rollbackCtx := context.WithoutCancel(r.Context())
-		s.restoreDNSRecord(rollbackCtx, previous)
-		_ = s.reloader.Apply(rollbackCtx)
-		writeError(w, fmt.Errorf("record was not changed because CoreDNS rejected the configuration: %w", err))
+	if err := handler.reloader.Apply(request.Context()); err != nil {
+		rollbackCtx := context.WithoutCancel(request.Context())
+		handler.restoreDNSRecord(rollbackCtx, previous)
+		_ = handler.reloader.Apply(rollbackCtx)
+		writeError(responseWriter, fmt.Errorf("record was not changed because CoreDNS rejected the configuration: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Handler) deleteDNSRecord(w http.ResponseWriter, r *http.Request, id int64) {
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-	previous, err := s.readDNSRecord(r.Context(), id)
+func (handler *Handler) deleteDNSRecord(responseWriter http.ResponseWriter, request *http.Request, id int64) {
+	handler.configMu.Lock()
+	defer handler.configMu.Unlock()
+	previous, err := handler.readDNSRecord(request.Context(), id)
 	if err != nil {
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return
 	}
-	if _, err := s.store.DB.ExecContext(r.Context(), `DELETE FROM dns_records WHERE id = ?`, id); err != nil {
-		writeError(w, err)
+	if _, err := handler.store.DB.ExecContext(request.Context(), `DELETE FROM dns_records WHERE id = ?`, id); err != nil {
+		writeError(responseWriter, err)
 		return
 	}
-	if err := s.reloader.Apply(r.Context()); err != nil {
-		rollbackCtx := context.WithoutCancel(r.Context())
-		s.restoreDNSRecord(rollbackCtx, previous)
-		_ = s.reloader.Apply(rollbackCtx)
-		writeError(w, fmt.Errorf("record was not deleted because CoreDNS rejected the configuration: %w", err))
+	if err := handler.reloader.Apply(request.Context()); err != nil {
+		rollbackCtx := context.WithoutCancel(request.Context())
+		handler.restoreDNSRecord(rollbackCtx, previous)
+		_ = handler.reloader.Apply(rollbackCtx)
+		writeError(responseWriter, fmt.Errorf("record was not deleted because CoreDNS rejected the configuration: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true})
 }
 
 type storedDNSRecord struct {
@@ -130,10 +130,10 @@ type storedDNSRecord struct {
 	UpdatedAt   string
 }
 
-func (s *Handler) normalizeLocalRecord(r *http.Request, input dnsRecordInput) (string, string, string, error) {
+func (handler *Handler) normalizeLocalRecord(request *http.Request, input dnsRecordInput) (string, string, string, error) {
 	hostname := strings.TrimSpace(input.Hostname)
 	if !strings.Contains(strings.TrimSuffix(hostname, "."), ".") {
-		suffix := strings.Trim(strings.TrimSpace(settingValue(r.Context(), s.store.DB, "local_domain_suffix")), ".")
+		suffix := strings.Trim(strings.TrimSpace(settingValue(request.Context(), handler.store.DB, "local_domain_suffix")), ".")
 		if suffix != "" {
 			hostname = strings.TrimSuffix(hostname, ".") + "." + suffix
 		}
@@ -141,9 +141,9 @@ func (s *Handler) normalizeLocalRecord(r *http.Request, input dnsRecordInput) (s
 	return db.NormalizeRecord(hostname, input.Type, input.Value)
 }
 
-func (s *Handler) readDNSRecord(ctx context.Context, id int64) (storedDNSRecord, error) {
+func (handler *Handler) readDNSRecord(ctx context.Context, id int64) (storedDNSRecord, error) {
 	var record storedDNSRecord
-	err := s.store.DB.QueryRowContext(ctx, `SELECT id, hostname, type, value, description, created_at, updated_at FROM dns_records WHERE id = ?`, id).
+	err := handler.store.DB.QueryRowContext(ctx, `SELECT id, hostname, type, value, description, created_at, updated_at FROM dns_records WHERE id = ?`, id).
 		Scan(&record.ID, &record.Hostname, &record.Type, &record.Value, &record.Description, &record.CreatedAt, &record.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return record, fmt.Errorf("DNS record %d does not exist", id)
@@ -151,8 +151,8 @@ func (s *Handler) readDNSRecord(ctx context.Context, id int64) (storedDNSRecord,
 	return record, err
 }
 
-func (s *Handler) restoreDNSRecord(ctx context.Context, record storedDNSRecord) {
-	_, _ = s.store.DB.ExecContext(ctx, `
+func (handler *Handler) restoreDNSRecord(ctx context.Context, record storedDNSRecord) {
+	_, _ = handler.store.DB.ExecContext(ctx, `
 		INSERT INTO dns_records(id, hostname, type, value, description, created_at, updated_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET hostname=excluded.hostname, type=excluded.type, value=excluded.value,

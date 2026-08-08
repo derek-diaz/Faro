@@ -52,9 +52,6 @@ export function NotificationDrawer({ open, notifications, attentionCount, unread
       className="drawer-backdrop"
       open
       aria-label="Network updates"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
     >
       <aside className="notification-drawer network-updates-drawer">
         <header className="network-updates-header">

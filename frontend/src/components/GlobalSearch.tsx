@@ -90,9 +90,6 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
       className="modal-backdrop"
       open
       aria-label="Search Faro"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
     >
       <div className="search-modal command-palette">
         <div className="search-modal-bar">

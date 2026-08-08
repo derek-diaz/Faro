@@ -154,11 +154,11 @@ func normalizedIdentifiers(input []Identifier) []Identifier {
 		seen[key] = true
 		result = append(result, identifier)
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Kind == result[j].Kind {
-			return result[i].Value < result[j].Value
+	sort.Slice(result, func(leftIndex, rightIndex int) bool {
+		if result[leftIndex].Kind == result[rightIndex].Kind {
+			return result[leftIndex].Value < result[rightIndex].Value
 		}
-		return result[i].Kind < result[j].Kind
+		return result[leftIndex].Kind < result[rightIndex].Kind
 	})
 	return result
 }
@@ -222,7 +222,9 @@ func passiveIdentifiers(ctx context.Context, database *sql.DB, address string) (
 	if mac := arpMAC(address); mac != "" {
 		identifiers = append(identifiers, Identifier{Kind: "mac", Value: mac, Source: "neighbor_table", Confidence: "strong"})
 	}
-	sort.Slice(identifiers, func(i, j int) bool { return identifiers[i].Kind < identifiers[j].Kind })
+	sort.Slice(identifiers, func(leftIndex, rightIndex int) bool {
+		return identifiers[leftIndex].Kind < identifiers[rightIndex].Kind
+	})
 	return identifiers, nil
 }
 

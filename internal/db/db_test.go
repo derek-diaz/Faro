@@ -9,7 +9,8 @@ import (
 )
 
 func TestOpenDoesNotSeedDemoDNSRecords(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "faro.db"))
+	path := filepath.Join(t.TempDir(), "faro.db")
+	store, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,6 +22,33 @@ func TestOpenDoesNotSeedDemoDNSRecords(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("fresh database contains %d DNS records, want 0", count)
+	}
+	state, err := ReadUpgradeState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "complete" || state.BackupPath == "" {
+		t.Fatalf("fresh database did not record a completed upgrade backup: %+v", state)
+	}
+}
+
+func TestOpenReadOnlyDoesNotAllowControlPlaneWrites(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "faro.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	readonly, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readonly.Close()
+	if _, err := readonly.DB.Exec(`UPDATE settings SET value = 'encrypted' WHERE key = 'upstream_transport'`); err == nil {
+		t.Fatal("read-only runtime store accepted a control-plane write")
 	}
 }
 

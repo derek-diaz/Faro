@@ -47,127 +47,127 @@ type deviceProtectionAssignment struct {
 	ProtectionID int64
 }
 
-func (s *Handler) protections(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
+func (handler *Handler) protections(responseWriter http.ResponseWriter, request *http.Request) {
+	switch request.Method {
 	case http.MethodGet:
-		s.listProtections(w, r)
+		handler.listProtections(responseWriter, request)
 	case http.MethodPost:
-		s.configMu.Lock()
-		defer s.configMu.Unlock()
-		if scalarInt(r.Context(), s.store.DB, `SELECT COUNT(*) FROM protection_profiles`) >= maxProtectionProfiles {
-			writeBadRequest(w, fmt.Errorf("faro supports up to %d protection setups", maxProtectionProfiles))
+		handler.configMu.Lock()
+		defer handler.configMu.Unlock()
+		if scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM protection_profiles`) >= maxProtectionProfiles {
+			writeBadRequest(responseWriter, fmt.Errorf("faro supports up to %d protection setups", maxProtectionProfiles))
 			return
 		}
 		var input protectionInput
-		if !decode(w, r, &input) {
+		if !decode(responseWriter, request, &input) {
 			return
 		}
-		normalized, err := s.normalizeProtectionInput(r.Context(), input)
+		normalized, err := handler.normalizeProtectionInput(request.Context(), input)
 		if err != nil {
-			writeBadRequest(w, err)
+			writeBadRequest(responseWriter, err)
 			return
 		}
-		assignments := readDeviceProtectionAssignments(r.Context(), s.store.DB)
-		id, err := s.insertProtection(r.Context(), normalized)
+		assignments := readDeviceProtectionAssignments(request.Context(), handler.store.DB)
+		id, err := handler.insertProtection(request.Context(), normalized)
 		if err != nil {
-			writeBadRequest(w, err)
+			writeBadRequest(responseWriter, err)
 			return
 		}
-		if err := s.reloader.Apply(r.Context()); err != nil {
-			rollbackCtx := context.WithoutCancel(r.Context())
-			_, _ = s.store.DB.ExecContext(rollbackCtx, `DELETE FROM protection_profiles WHERE id = ?`, id)
-			restoreDeviceProtectionAssignments(rollbackCtx, s.store.DB, assignments)
-			_ = s.reloader.Apply(rollbackCtx)
-			writeError(w, fmt.Errorf("protection was not created because CoreDNS rejected the configuration: %w", err))
+		if err := handler.reloader.Apply(request.Context()); err != nil {
+			rollbackCtx := context.WithoutCancel(request.Context())
+			_, _ = handler.store.DB.ExecContext(rollbackCtx, `DELETE FROM protection_profiles WHERE id = ?`, id)
+			restoreDeviceProtectionAssignments(rollbackCtx, handler.store.DB, assignments)
+			_ = handler.reloader.Apply(rollbackCtx)
+			writeError(responseWriter, fmt.Errorf("protection was not created because CoreDNS rejected the configuration: %w", err))
 			return
 		}
-		s.recordEvent(r.Context(), eventInput{Type: "protection.created", Severity: "success", Title: "Protection created", Description: normalized.Name + " is ready to assign to devices.", Metadata: map[string]any{"protection_id": id, "icon": normalized.Icon}, Source: "protection"})
-		writeJSON(w, http.StatusCreated, map[string]any{"id": id})
+		handler.recordEvent(request.Context(), eventInput{Type: "protection.created", Severity: "success", Title: "Protection created", Description: normalized.Name + " is ready to assign to devices.", Metadata: map[string]any{"protection_id": id, "icon": normalized.Icon}, Source: "protection"})
+		writeJSON(responseWriter, http.StatusCreated, map[string]any{"id": id})
 	default:
-		methodNotAllowed(w)
+		methodNotAllowed(responseWriter)
 	}
 }
 
-func (s *Handler) protection(w http.ResponseWriter, r *http.Request) {
-	id, ok := idFromPath(w, r, "/api/protections/")
+func (handler *Handler) protection(responseWriter http.ResponseWriter, request *http.Request) {
+	id, ok := idFromPath(responseWriter, request, "/api/protections/")
 	if !ok {
 		return
 	}
-	if r.Method != http.MethodPut && r.Method != http.MethodDelete {
-		methodNotAllowed(w)
+	if request.Method != http.MethodPut && request.Method != http.MethodDelete {
+		methodNotAllowed(responseWriter)
 		return
 	}
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-	previous, err := s.readProtection(r.Context(), id)
+	handler.configMu.Lock()
+	defer handler.configMu.Unlock()
+	previous, err := handler.readProtection(request.Context(), id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeBadRequest(w, errors.New("protection does not exist"))
+			writeBadRequest(responseWriter, errors.New("protection does not exist"))
 		} else {
-			writeError(w, err)
+			writeError(responseWriter, err)
 		}
 		return
 	}
-	assignments := readDeviceProtectionAssignments(r.Context(), s.store.DB)
-	if r.Method == http.MethodDelete {
-		s.deleteProtection(w, r, id, previous, assignments)
+	assignments := readDeviceProtectionAssignments(request.Context(), handler.store.DB)
+	if request.Method == http.MethodDelete {
+		handler.deleteProtection(responseWriter, request, id, previous, assignments)
 		return
 	}
-	s.updateProtection(w, r, id, previous, assignments)
+	handler.updateProtection(responseWriter, request, id, previous, assignments)
 }
 
-func (s *Handler) deleteProtection(w http.ResponseWriter, r *http.Request, id int64, previous protectionSnapshot, assignments []deviceProtectionAssignment) {
+func (handler *Handler) deleteProtection(responseWriter http.ResponseWriter, request *http.Request, id int64, previous protectionSnapshot, assignments []deviceProtectionAssignment) {
 	if previous.IsDefault {
-		writeBadRequest(w, errors.New("home is Faro's default protection and cannot be deleted"))
+		writeBadRequest(responseWriter, errors.New("home is Faro's default protection and cannot be deleted"))
 		return
 	}
-	if _, err := s.store.DB.ExecContext(r.Context(), `DELETE FROM protection_profiles WHERE id = ?`, id); err != nil {
-		writeError(w, err)
+	if _, err := handler.store.DB.ExecContext(request.Context(), `DELETE FROM protection_profiles WHERE id = ?`, id); err != nil {
+		writeError(responseWriter, err)
 		return
 	}
-	if err := s.reloader.Apply(r.Context()); err != nil {
-		rollbackCtx := context.WithoutCancel(r.Context())
-		_ = s.restoreProtection(rollbackCtx, previous)
-		restoreDeviceProtectionAssignments(rollbackCtx, s.store.DB, assignments)
-		_ = s.reloader.Apply(rollbackCtx)
-		writeError(w, fmt.Errorf("protection was not deleted because CoreDNS rejected the configuration: %w", err))
+	if err := handler.reloader.Apply(request.Context()); err != nil {
+		rollbackCtx := context.WithoutCancel(request.Context())
+		_ = handler.restoreProtection(rollbackCtx, previous)
+		restoreDeviceProtectionAssignments(rollbackCtx, handler.store.DB, assignments)
+		_ = handler.reloader.Apply(rollbackCtx)
+		writeError(responseWriter, fmt.Errorf("protection was not deleted because CoreDNS rejected the configuration: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Handler) updateProtection(w http.ResponseWriter, r *http.Request, id int64, previous protectionSnapshot, assignments []deviceProtectionAssignment) {
+func (handler *Handler) updateProtection(responseWriter http.ResponseWriter, request *http.Request, id int64, previous protectionSnapshot, assignments []deviceProtectionAssignment) {
 	var input protectionInput
-	if !decode(w, r, &input) {
+	if !decode(responseWriter, request, &input) {
 		return
 	}
-	normalized, err := s.normalizeProtectionInput(r.Context(), input)
+	normalized, err := handler.normalizeProtectionInput(request.Context(), input)
 	if err != nil {
-		writeBadRequest(w, err)
+		writeBadRequest(responseWriter, err)
 		return
 	}
 	if previous.IsDefault {
 		normalized.Name = "Home"
 	}
-	if err := s.replaceProtection(r.Context(), id, previous.IsDefault, normalized); err != nil {
-		writeBadRequest(w, err)
+	if err := handler.replaceProtection(request.Context(), id, previous.IsDefault, normalized); err != nil {
+		writeBadRequest(responseWriter, err)
 		return
 	}
-	if err := s.reloader.Apply(r.Context()); err != nil {
-		rollbackCtx := context.WithoutCancel(r.Context())
-		_ = s.restoreProtection(rollbackCtx, previous)
-		restoreDeviceProtectionAssignments(rollbackCtx, s.store.DB, assignments)
-		_ = s.reloader.Apply(rollbackCtx)
-		writeError(w, fmt.Errorf("protection was not changed because CoreDNS rejected the configuration: %w", err))
+	if err := handler.reloader.Apply(request.Context()); err != nil {
+		rollbackCtx := context.WithoutCancel(request.Context())
+		_ = handler.restoreProtection(rollbackCtx, previous)
+		restoreDeviceProtectionAssignments(rollbackCtx, handler.store.DB, assignments)
+		_ = handler.reloader.Apply(rollbackCtx)
+		writeError(responseWriter, fmt.Errorf("protection was not changed because CoreDNS rejected the configuration: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true})
 }
 
-func (s *Handler) listProtections(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.store.DB.QueryContext(r.Context(), `SELECT id, name, icon, is_default, created_at, updated_at FROM protection_profiles ORDER BY is_default DESC, name`)
+func (handler *Handler) listProtections(responseWriter http.ResponseWriter, request *http.Request) {
+	rows, err := handler.store.DB.QueryContext(request.Context(), `SELECT id, name, icon, is_default, created_at, updated_at FROM protection_profiles ORDER BY is_default DESC, name`)
 	if err != nil {
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return
 	}
 	defer closeRows(rows)
@@ -181,32 +181,32 @@ func (s *Handler) listProtections(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var item protectionRow
 		if err := rows.Scan(&item.id, &item.name, &item.icon, &item.isDefault, &item.createdAt, &item.updatedAt); err != nil {
-			writeError(w, err)
+			writeError(responseWriter, err)
 			return
 		}
 		base = append(base, item)
 	}
 	if err := rows.Err(); err != nil {
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return
 	}
 	items := make([]map[string]any, 0, len(base))
 	for _, item := range base {
 		items = append(items, map[string]any{
 			"id": item.id, "name": item.name, "icon": item.icon, "is_default": item.isDefault,
-			"blocklist_ids": protectionIDs(r.Context(), s.store.DB, `SELECT blocklist_id FROM protection_blocklists WHERE protection_id = ? ORDER BY blocklist_id`, item.id),
-			"allow_entries": protectionDomains(r.Context(), s.store.DB, `SELECT id, domain, created_at FROM protection_allow_entries WHERE protection_id = ? ORDER BY domain`, item.id),
-			"block_entries": protectionDomains(r.Context(), s.store.DB, `SELECT id, domain, created_at FROM protection_block_entries WHERE protection_id = ? ORDER BY domain`, item.id),
-			"device_ips": protectionStrings(r.Context(), s.store.DB, `
+			"blocklist_ids": protectionIDs(request.Context(), handler.store.DB, `SELECT blocklist_id FROM protection_blocklists WHERE protection_id = ? ORDER BY blocklist_id`, item.id),
+			"allow_entries": protectionDomains(request.Context(), handler.store.DB, `SELECT id, domain, created_at FROM protection_allow_entries WHERE protection_id = ? ORDER BY domain`, item.id),
+			"block_entries": protectionDomains(request.Context(), handler.store.DB, `SELECT id, domain, created_at FROM protection_block_entries WHERE protection_id = ? ORDER BY domain`, item.id),
+			"device_ips": protectionStrings(request.Context(), handler.store.DB, `
 				SELECT address FROM device_addresses a JOIN device_protection_memberships m ON m.device_id = a.device_id WHERE m.protection_id = ?
 				UNION SELECT client_ip FROM device_protection_assignments WHERE protection_id = ? ORDER BY 1`, item.id, item.id),
 			"created_at": item.createdAt, "updated_at": item.updatedAt,
 		})
 	}
-	writeJSON(w, http.StatusOK, items)
+	writeJSON(responseWriter, http.StatusOK, items)
 }
 
-func (s *Handler) normalizeProtectionInput(ctx context.Context, input protectionInput) (protectionInput, error) {
+func (handler *Handler) normalizeProtectionInput(ctx context.Context, input protectionInput) (protectionInput, error) {
 	input.Name = strings.TrimSpace(input.Name)
 	if input.Name == "" || len([]rune(input.Name)) > 40 {
 		return input, errors.New("name must be between 1 and 40 characters")
@@ -216,7 +216,7 @@ func (s *Handler) normalizeProtectionInput(ctx context.Context, input protection
 		return input, errors.New("choose one of Faro's protection icons")
 	}
 	var err error
-	input.BlocklistIDs, err = s.normalizeProtectionBlocklists(ctx, input.BlocklistIDs)
+	input.BlocklistIDs, err = handler.normalizeProtectionBlocklists(ctx, input.BlocklistIDs)
 	if err != nil {
 		return input, err
 	}
@@ -228,14 +228,14 @@ func (s *Handler) normalizeProtectionInput(ctx context.Context, input protection
 	return input, err
 }
 
-func (s *Handler) normalizeProtectionBlocklists(ctx context.Context, values []int64) ([]int64, error) {
+func (handler *Handler) normalizeProtectionBlocklists(ctx context.Context, values []int64) ([]int64, error) {
 	values = uniqueInt64s(values)
 	if len(values) > 20 {
 		return values, errors.New("choose at most 20 blocklists")
 	}
 	for _, id := range values {
 		var exists bool
-		if err := s.store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM blocklists WHERE id = ?)`, id).Scan(&exists); err != nil || !exists {
+		if err := handler.store.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM blocklists WHERE id = ?)`, id).Scan(&exists); err != nil || !exists {
 			return values, fmt.Errorf("blocklist %d is not installed", id)
 		}
 	}
@@ -279,11 +279,11 @@ func normalizeProtectionDevices(values []string) ([]string, error) {
 	return uniqueStrings(values), nil
 }
 
-func (s *Handler) insertProtection(ctx context.Context, input protectionInput) (int64, error) {
-	if err := s.resolveProtectionDevices(ctx, input.DeviceIPs); err != nil {
+func (handler *Handler) insertProtection(ctx context.Context, input protectionInput) (int64, error) {
+	if err := handler.resolveProtectionDevices(ctx, input.DeviceIPs); err != nil {
 		return 0, err
 	}
-	tx, err := s.store.DB.BeginTx(ctx, nil)
+	tx, err := handler.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -302,11 +302,11 @@ func (s *Handler) insertProtection(ctx context.Context, input protectionInput) (
 	return id, tx.Commit()
 }
 
-func (s *Handler) replaceProtection(ctx context.Context, id int64, isDefault bool, input protectionInput) error {
-	if err := s.resolveProtectionDevices(ctx, input.DeviceIPs); err != nil {
+func (handler *Handler) replaceProtection(ctx context.Context, id int64, isDefault bool, input protectionInput) error {
+	if err := handler.resolveProtectionDevices(ctx, input.DeviceIPs); err != nil {
 		return err
 	}
-	tx, err := s.store.DB.BeginTx(ctx, nil)
+	tx, err := handler.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -323,25 +323,25 @@ func (s *Handler) replaceProtection(ctx context.Context, id int64, isDefault boo
 	return tx.Commit()
 }
 
-func (s *Handler) readProtection(ctx context.Context, id int64) (protectionSnapshot, error) {
+func (handler *Handler) readProtection(ctx context.Context, id int64) (protectionSnapshot, error) {
 	var snapshot protectionSnapshot
-	if err := s.store.DB.QueryRowContext(ctx, `SELECT id, name, icon, is_default, created_at, updated_at FROM protection_profiles WHERE id = ?`, id).Scan(&snapshot.ID, &snapshot.Name, &snapshot.Icon, &snapshot.IsDefault, &snapshot.CreatedAt, &snapshot.UpdatedAt); err != nil {
+	if err := handler.store.DB.QueryRowContext(ctx, `SELECT id, name, icon, is_default, created_at, updated_at FROM protection_profiles WHERE id = ?`, id).Scan(&snapshot.ID, &snapshot.Name, &snapshot.Icon, &snapshot.IsDefault, &snapshot.CreatedAt, &snapshot.UpdatedAt); err != nil {
 		return snapshot, err
 	}
 	snapshot.Input = protectionInput{
 		Name: snapshot.Name, Icon: snapshot.Icon,
-		BlocklistIDs: protectionIDs(ctx, s.store.DB, `SELECT blocklist_id FROM protection_blocklists WHERE protection_id = ?`, id),
-		AllowDomains: protectionDomainStrings(ctx, s.store.DB, `SELECT domain FROM protection_allow_entries WHERE protection_id = ?`, id),
-		BlockDomains: protectionDomainStrings(ctx, s.store.DB, `SELECT domain FROM protection_block_entries WHERE protection_id = ?`, id),
-		DeviceIPs: protectionStrings(ctx, s.store.DB, `
+		BlocklistIDs: protectionIDs(ctx, handler.store.DB, `SELECT blocklist_id FROM protection_blocklists WHERE protection_id = ?`, id),
+		AllowDomains: protectionDomainStrings(ctx, handler.store.DB, `SELECT domain FROM protection_allow_entries WHERE protection_id = ?`, id),
+		BlockDomains: protectionDomainStrings(ctx, handler.store.DB, `SELECT domain FROM protection_block_entries WHERE protection_id = ?`, id),
+		DeviceIPs: protectionStrings(ctx, handler.store.DB, `
 			SELECT address FROM device_addresses a JOIN device_protection_memberships m ON m.device_id = a.device_id WHERE m.protection_id = ?
 			UNION SELECT client_ip FROM device_protection_assignments WHERE protection_id = ?`, id, id),
 	}
 	return snapshot, nil
 }
 
-func (s *Handler) restoreProtection(ctx context.Context, snapshot protectionSnapshot) error {
-	tx, err := s.store.DB.BeginTx(ctx, nil)
+func (handler *Handler) restoreProtection(ctx context.Context, snapshot protectionSnapshot) error {
+	tx, err := handler.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -423,9 +423,9 @@ func insertProtectionDevices(ctx context.Context, tx *sql.Tx, id int64, addresse
 	return nil
 }
 
-func (s *Handler) resolveProtectionDevices(ctx context.Context, addresses []string) error {
+func (handler *Handler) resolveProtectionDevices(ctx context.Context, addresses []string) error {
 	for _, address := range addresses {
-		if _, err := deviceidentity.ResolveAddress(ctx, s.store, address, "assignment"); err != nil {
+		if _, err := deviceidentity.ResolveAddress(ctx, handler.store, address, "assignment"); err != nil {
 			return fmt.Errorf("identify device %s: %w", address, err)
 		}
 	}
@@ -599,56 +599,56 @@ func protectionForClient(ctx context.Context, database *sql.DB, clientIP string)
 	return id, name, icon
 }
 
-func (s *Handler) assignDeviceProtection(w http.ResponseWriter, r *http.Request, clientIP string) {
-	if r.Method != http.MethodPut {
-		methodNotAllowed(w)
+func (handler *Handler) assignDeviceProtection(responseWriter http.ResponseWriter, request *http.Request, clientIP string) {
+	if request.Method != http.MethodPut {
+		methodNotAllowed(responseWriter)
 		return
 	}
 	parsedClientIP := net.ParseIP(clientIP)
 	if parsedClientIP == nil {
-		writeBadRequest(w, errors.New("invalid client ip"))
+		writeBadRequest(responseWriter, errors.New("invalid client ip"))
 		return
 	}
 	clientIP = parsedClientIP.String()
 	var input struct {
 		ProtectionID int64 `json:"protection_id"`
 	}
-	if !decode(w, r, &input) {
+	if !decode(responseWriter, request, &input) {
 		return
 	}
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
+	handler.configMu.Lock()
+	defer handler.configMu.Unlock()
 	var isDefault bool
-	if err := s.store.DB.QueryRowContext(r.Context(), `SELECT is_default FROM protection_profiles WHERE id = ?`, input.ProtectionID).Scan(&isDefault); err != nil {
-		writeBadRequest(w, errors.New("protection does not exist"))
+	if err := handler.store.DB.QueryRowContext(request.Context(), `SELECT is_default FROM protection_profiles WHERE id = ?`, input.ProtectionID).Scan(&isDefault); err != nil {
+		writeBadRequest(responseWriter, errors.New("protection does not exist"))
 		return
 	}
-	deviceID, err := deviceidentity.ResolveAddress(r.Context(), s.store, clientIP, "assignment")
+	deviceID, err := deviceidentity.ResolveAddress(request.Context(), handler.store, clientIP, "assignment")
 	if err != nil {
-		writeError(w, err)
+		writeError(responseWriter, err)
 		return
 	}
 	var previousID sql.NullInt64
-	_ = s.store.DB.QueryRowContext(r.Context(), `SELECT protection_id FROM device_protection_memberships WHERE device_id = ?`, deviceID).Scan(&previousID)
+	_ = handler.store.DB.QueryRowContext(request.Context(), `SELECT protection_id FROM device_protection_memberships WHERE device_id = ?`, deviceID).Scan(&previousID)
 	if isDefault {
-		_, _ = s.store.DB.ExecContext(r.Context(), `DELETE FROM device_protection_memberships WHERE device_id = ?`, deviceID)
-		_, _ = s.store.DB.ExecContext(r.Context(), `DELETE FROM device_protection_assignments WHERE client_ip = ?`, clientIP)
+		_, _ = handler.store.DB.ExecContext(request.Context(), `DELETE FROM device_protection_memberships WHERE device_id = ?`, deviceID)
+		_, _ = handler.store.DB.ExecContext(request.Context(), `DELETE FROM device_protection_assignments WHERE client_ip = ?`, clientIP)
 	} else {
-		_, _ = s.store.DB.ExecContext(r.Context(), `INSERT INTO device_protection_memberships(device_id, protection_id) VALUES(?, ?) ON CONFLICT(device_id) DO UPDATE SET protection_id=excluded.protection_id, updated_at=CURRENT_TIMESTAMP`, deviceID, input.ProtectionID)
-		_, _ = s.store.DB.ExecContext(r.Context(), `INSERT INTO device_protection_assignments(client_ip, protection_id) VALUES(?, ?) ON CONFLICT(client_ip) DO UPDATE SET protection_id=excluded.protection_id, updated_at=CURRENT_TIMESTAMP`, clientIP, input.ProtectionID)
+		_, _ = handler.store.DB.ExecContext(request.Context(), `INSERT INTO device_protection_memberships(device_id, protection_id) VALUES(?, ?) ON CONFLICT(device_id) DO UPDATE SET protection_id=excluded.protection_id, updated_at=CURRENT_TIMESTAMP`, deviceID, input.ProtectionID)
+		_, _ = handler.store.DB.ExecContext(request.Context(), `INSERT INTO device_protection_assignments(client_ip, protection_id) VALUES(?, ?) ON CONFLICT(client_ip) DO UPDATE SET protection_id=excluded.protection_id, updated_at=CURRENT_TIMESTAMP`, clientIP, input.ProtectionID)
 	}
-	if err := s.reloader.Apply(r.Context()); err != nil {
-		rollbackCtx := context.WithoutCancel(r.Context())
+	if err := handler.reloader.Apply(request.Context()); err != nil {
+		rollbackCtx := context.WithoutCancel(request.Context())
 		if previousID.Valid {
-			_, _ = s.store.DB.ExecContext(rollbackCtx, `INSERT INTO device_protection_memberships(device_id, protection_id) VALUES(?, ?) ON CONFLICT(device_id) DO UPDATE SET protection_id=excluded.protection_id, updated_at=CURRENT_TIMESTAMP`, deviceID, previousID.Int64)
-			_, _ = s.store.DB.ExecContext(rollbackCtx, `INSERT INTO device_protection_assignments(client_ip, protection_id) VALUES(?, ?) ON CONFLICT(client_ip) DO UPDATE SET protection_id=excluded.protection_id, updated_at=CURRENT_TIMESTAMP`, clientIP, previousID.Int64)
+			_, _ = handler.store.DB.ExecContext(rollbackCtx, `INSERT INTO device_protection_memberships(device_id, protection_id) VALUES(?, ?) ON CONFLICT(device_id) DO UPDATE SET protection_id=excluded.protection_id, updated_at=CURRENT_TIMESTAMP`, deviceID, previousID.Int64)
+			_, _ = handler.store.DB.ExecContext(rollbackCtx, `INSERT INTO device_protection_assignments(client_ip, protection_id) VALUES(?, ?) ON CONFLICT(client_ip) DO UPDATE SET protection_id=excluded.protection_id, updated_at=CURRENT_TIMESTAMP`, clientIP, previousID.Int64)
 		} else {
-			_, _ = s.store.DB.ExecContext(rollbackCtx, `DELETE FROM device_protection_memberships WHERE device_id = ?`, deviceID)
-			_, _ = s.store.DB.ExecContext(rollbackCtx, `DELETE FROM device_protection_assignments WHERE client_ip = ?`, clientIP)
+			_, _ = handler.store.DB.ExecContext(rollbackCtx, `DELETE FROM device_protection_memberships WHERE device_id = ?`, deviceID)
+			_, _ = handler.store.DB.ExecContext(rollbackCtx, `DELETE FROM device_protection_assignments WHERE client_ip = ?`, clientIP)
 		}
-		_ = s.reloader.Apply(rollbackCtx)
-		writeError(w, fmt.Errorf("device protection was not changed because CoreDNS rejected the configuration: %w", err))
+		_ = handler.reloader.Apply(rollbackCtx)
+		writeError(responseWriter, fmt.Errorf("device protection was not changed because CoreDNS rejected the configuration: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true})
 }

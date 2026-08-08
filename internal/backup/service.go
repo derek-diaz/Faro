@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/derek/faro/internal/db"
+	faroversion "github.com/derek/faro/internal/version"
 	"github.com/mattn/go-sqlite3"
 	"golang.org/x/crypto/argon2"
 )
@@ -105,10 +106,12 @@ var rollbackRestoreTables = append(append([]string(nil), restoreTables...),
 )
 
 type Manifest struct {
-	FormatVersion int      `json:"format_version"`
-	CreatedAt     string   `json:"created_at"`
-	DatabaseBytes int64    `json:"database_bytes"`
-	Excluded      []string `json:"excluded"`
+	FormatVersion      int      `json:"format_version"`
+	ApplicationVersion string   `json:"application_version,omitempty"`
+	SchemaVersion      int      `json:"schema_version,omitempty"`
+	CreatedAt          string   `json:"created_at"`
+	DatabaseBytes      int64    `json:"database_bytes"`
+	Excluded           []string `json:"excluded"`
 }
 
 type Service struct {
@@ -133,12 +136,12 @@ func NewService(store *db.Store) *Service {
 
 // Create writes a consistent, encrypted backup to a temporary file. The caller
 // owns the returned cleanup function.
-func (s *Service) Create(ctx context.Context, passphrase string) (string, Manifest, func(), error) {
+func (service *Service) Create(ctx context.Context, passphrase string) (string, Manifest, func(), error) {
 	if err := validatePassphrase(passphrase); err != nil {
 		return "", Manifest{}, noopCleanup, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	service.mu.Lock()
+	defer service.mu.Unlock()
 
 	tempDir, err := os.MkdirTemp("", "faro-backup-")
 	if err != nil {
@@ -146,7 +149,7 @@ func (s *Service) Create(ctx context.Context, passphrase string) (string, Manife
 	}
 	cleanup := func() { _ = os.RemoveAll(tempDir) }
 	databasePath := filepath.Join(tempDir, databaseFilename)
-	if err := snapshotDatabase(ctx, s.store.DB, databasePath); err != nil {
+	if err := snapshotDatabase(ctx, service.store.DB, databasePath); err != nil {
 		cleanup()
 		return "", Manifest{}, noopCleanup, fmt.Errorf("snapshot database: %w", err)
 	}
@@ -164,10 +167,12 @@ func (s *Service) Create(ctx context.Context, passphrase string) (string, Manife
 		return "", Manifest{}, noopCleanup, errors.New("database is too large for a portable Faro backup")
 	}
 	manifest := Manifest{
-		FormatVersion: FormatVersion,
-		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
-		DatabaseBytes: info.Size(),
-		Excluded:      []string{"auth_sessions", "redundancy pairing secrets and node membership", "integration credentials and derived router observations", "favicon cache files", "raw query-log buffer"},
+		FormatVersion:      FormatVersion,
+		ApplicationVersion: faroversion.Number,
+		SchemaVersion:      db.CurrentSchemaVersion,
+		CreatedAt:          time.Now().UTC().Format(time.RFC3339),
+		DatabaseBytes:      info.Size(),
+		Excluded:           []string{"auth_sessions", "redundancy pairing secrets and node membership", "integration credentials and derived router observations", "favicon cache files", "raw query-log buffer"},
 	}
 	archivePath := filepath.Join(tempDir, "payload.zip")
 	if err := writeArchive(archivePath, databasePath, manifest); err != nil {
@@ -184,8 +189,8 @@ func (s *Service) Create(ctx context.Context, passphrase string) (string, Manife
 	return encryptedPath, manifest, cleanup, nil
 }
 
-func (s *Service) Restore(ctx context.Context, encrypted io.Reader, passphrase string) (Manifest, error) {
-	manifest, transaction, err := s.BeginRestore(ctx, encrypted, passphrase)
+func (service *Service) Restore(ctx context.Context, encrypted io.Reader, passphrase string) (Manifest, error) {
+	manifest, transaction, err := service.BeginRestore(ctx, encrypted, passphrase)
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -196,15 +201,15 @@ func (s *Service) Restore(ctx context.Context, encrypted io.Reader, passphrase s
 // BeginRestore validates and applies a backup while retaining a private
 // snapshot of the previous live database. The caller must call Commit after
 // dependent services accept the restored state, or Rollback on failure.
-func (s *Service) BeginRestore(ctx context.Context, encrypted io.Reader, passphrase string) (Manifest, *RestoreTransaction, error) {
+func (backupService *Service) BeginRestore(ctx context.Context, encrypted io.Reader, passphrase string) (Manifest, *RestoreTransaction, error) {
 	if err := validatePassphrase(passphrase); err != nil {
 		return Manifest{}, nil, err
 	}
-	s.mu.Lock()
+	backupService.mu.Lock()
 	locked := true
 	defer func() {
 		if locked {
-			s.mu.Unlock()
+			backupService.mu.Unlock()
 		}
 	}()
 
@@ -234,14 +239,14 @@ func (s *Service) BeginRestore(ctx context.Context, encrypted io.Reader, passphr
 		return Manifest{}, nil, fmt.Errorf("validate backup database: %w", ErrInvalidBackup)
 	}
 	previousPath := filepath.Join(tempDir, "previous.db")
-	if err := snapshotDatabase(ctx, s.store.DB, previousPath); err != nil {
+	if err := snapshotDatabase(ctx, backupService.store.DB, previousPath); err != nil {
 		return Manifest{}, nil, fmt.Errorf("snapshot database before restore: %w", err)
 	}
-	if err := restoreDatabase(ctx, s.store.DB, databasePath); err != nil {
+	if err := restoreDatabase(ctx, backupService.store.DB, databasePath); err != nil {
 		return Manifest{}, nil, fmt.Errorf("restore database: %w", err)
 	}
 	transaction := &RestoreTransaction{
-		service:      s,
+		service:      backupService,
 		previousPath: previousPath,
 		tempDir:      tempDir,
 		active:       true,
@@ -253,37 +258,37 @@ func (s *Service) BeginRestore(ctx context.Context, encrypted io.Reader, passphr
 
 // Commit accepts the restored database and releases its private rollback
 // snapshot.
-func (r *RestoreTransaction) Commit() {
-	_ = r.finish(nil)
+func (restoreTransaction *RestoreTransaction) Commit() {
+	_ = restoreTransaction.finish(nil)
 }
 
 // Rollback replaces every table affected directly or through cascading
 // deletes during restore with the pre-restore snapshot.
-func (r *RestoreTransaction) Rollback(ctx context.Context) error {
-	return r.finish(func() error {
-		if err := restoreDatabaseTables(ctx, r.service.store.DB, r.previousPath, rollbackRestoreTables, rollbackDeleteTables); err != nil {
+func (restoreTransaction *RestoreTransaction) Rollback(ctx context.Context) error {
+	return restoreTransaction.finish(func() error {
+		if err := restoreDatabaseTables(ctx, restoreTransaction.service.store.DB, restoreTransaction.previousPath, rollbackRestoreTables, rollbackDeleteTables); err != nil {
 			return fmt.Errorf("restore previous database snapshot: %w", err)
 		}
-		if err := integrityCheck(r.service.store.DB); err != nil {
+		if err := integrityCheck(restoreTransaction.service.store.DB); err != nil {
 			return fmt.Errorf("validate rolled back database: %w", err)
 		}
 		return nil
 	})
 }
 
-func (r *RestoreTransaction) finish(action func() error) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.active {
+func (restoreTransaction *RestoreTransaction) finish(action func() error) error {
+	restoreTransaction.mu.Lock()
+	defer restoreTransaction.mu.Unlock()
+	if !restoreTransaction.active {
 		return nil
 	}
 	var err error
 	if action != nil {
 		err = action()
 	}
-	r.active = false
-	_ = os.RemoveAll(r.tempDir)
-	r.service.mu.Unlock()
+	restoreTransaction.active = false
+	_ = os.RemoveAll(restoreTransaction.tempDir)
+	restoreTransaction.service.mu.Unlock()
 	return err
 }
 

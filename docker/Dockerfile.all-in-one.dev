@@ -10,9 +10,15 @@ FROM node:24-bookworm-slim AS node
 FROM golang:1.23-bookworm AS build
 
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
+RUN go mod download
 COPY cmd/faro-logtee ./cmd/faro-logtee
-RUN CGO_ENABLED=0 go build -o /out/faro-logtee ./cmd/faro-logtee
+COPY cmd/faro-dohproxy ./cmd/faro-dohproxy
+COPY internal/db ./internal/db
+COPY internal/dohproxy ./internal/dohproxy
+COPY internal/version ./internal/version
+RUN CGO_ENABLED=0 go build -o /out/faro-logtee ./cmd/faro-logtee && \
+    CGO_ENABLED=1 go build -o /out/faro-dohproxy ./cmd/faro-dohproxy
 
 FROM golang:1.23-bookworm
 
@@ -23,6 +29,7 @@ RUN apt-get update && \
 COPY --from=air /go/bin/air /usr/local/bin/air
 COPY --from=coredns /coredns /usr/local/bin/coredns
 COPY --from=build /out/faro-logtee /usr/local/bin/faro-logtee
+COPY --from=build /out/faro-dohproxy /usr/local/bin/faro-dohproxy
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
@@ -37,6 +44,9 @@ COPY docker/faro-dev-healthcheck.sh /usr/local/bin/faro-dev-healthcheck
 RUN chmod 0755 /usr/local/bin/faro-dev-entrypoint /usr/local/bin/faro-dev-healthcheck
 
 ENV FARO_DB_PATH=/data/faro.db \
+    FARO_MIGRATION_BACKUP_DIR=/data/migrations \
+    FARO_UPGRADE_STATE_PATH=/data/faro-upgrade.json \
+    FARO_DOH_RUNTIME_PATH=/data/faro-doh.json \
     FARO_DEVICE_CATALOG_PATH=/data/device-catalog.json \
     FARO_FAVICON_DIR=/data/favicons \
     FARO_COREDNS_CONFIG_DIR=/coredns \

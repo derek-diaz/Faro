@@ -15,19 +15,19 @@ import (
 // noinspection SpellCheckingInspection
 const contentTypeOptionsNoSniff = "nosniff"
 
-func decode(w http.ResponseWriter, r *http.Request, dst any) bool {
-	defer logActionError("close request body", r.Body.Close)
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(dst); err != nil {
-		writeBadRequest(w, err)
+func decode(responseWriter http.ResponseWriter, request *http.Request, dst any) bool {
+	defer logActionError("close request body", request.Body.Close)
+	if err := json.NewDecoder(http.MaxBytesReader(responseWriter, request.Body, 1<<20)).Decode(dst); err != nil {
+		writeBadRequest(responseWriter, err)
 		return false
 	}
 	return true
 }
 
-func idFromPath(w http.ResponseWriter, r *http.Request, prefix string) (int64, bool) {
-	id, err := strconv.ParseInt(strings.Trim(strings.TrimPrefix(r.URL.Path, prefix), "/"), 10, 64)
+func idFromPath(responseWriter http.ResponseWriter, request *http.Request, prefix string) (int64, bool) {
+	id, err := strconv.ParseInt(strings.Trim(strings.TrimPrefix(request.URL.Path, prefix), "/"), 10, 64)
 	if err != nil {
-		writeBadRequest(w, errors.New("invalid id"))
+		writeBadRequest(responseWriter, errors.New("invalid id"))
 		return 0, false
 	}
 	return id, true
@@ -40,80 +40,80 @@ func boolInt(value bool) int {
 	return 0
 }
 
-func writeJSON(w http.ResponseWriter, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
+func writeJSON(responseWriter http.ResponseWriter, status int, payload any) {
+	responseWriter.Header().Set("Content-Type", "application/json")
+	responseWriter.WriteHeader(status)
+	if err := json.NewEncoder(responseWriter).Encode(payload); err != nil {
 		log.Printf("encode JSON response: %v", err)
 	}
 }
 
-func writeBadRequest(w http.ResponseWriter, err error) {
-	writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+func writeBadRequest(responseWriter http.ResponseWriter, err error) {
+	writeJSON(responseWriter, http.StatusBadRequest, map[string]any{"error": err.Error()})
 }
 
-func writeError(w http.ResponseWriter, err error) {
-	writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+func writeError(responseWriter http.ResponseWriter, err error) {
+	writeJSON(responseWriter, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 }
 
-func methodNotAllowed(w http.ResponseWriter) {
-	writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+func methodNotAllowed(responseWriter http.ResponseWriter) {
+	writeJSON(responseWriter, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
 }
 
 func cors(trustProxy bool, onboardingComplete func(context.Context) bool, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		setSecurityHeaders(w)
-		if !allowCORSRequest(w, r, trustProxy, onboardingComplete) {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		setSecurityHeaders(responseWriter)
+		if !allowCORSRequest(responseWriter, request, trustProxy, onboardingComplete) {
 			return
 		}
-		setCORSHeaders(w, r)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
+		setCORSHeaders(responseWriter, request)
+		if request.Method == http.MethodOptions {
+			responseWriter.WriteHeader(http.StatusNoContent)
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(responseWriter, request)
 	})
 }
 
-func setSecurityHeaders(w http.ResponseWriter) {
-	w.Header().Set("X-Content-Type-Options", contentTypeOptionsNoSniff)
-	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Referrer-Policy", "no-referrer")
+func setSecurityHeaders(responseWriter http.ResponseWriter) {
+	responseWriter.Header().Set("X-Content-Type-Options", contentTypeOptionsNoSniff)
+	responseWriter.Header().Set("X-Frame-Options", "DENY")
+	responseWriter.Header().Set("Referrer-Policy", "no-referrer")
 }
 
-func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
-	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Vary", "Origin")
+func setCORSHeaders(responseWriter http.ResponseWriter, request *http.Request) {
+	if origin := strings.TrimSpace(request.Header.Get("Origin")); origin != "" {
+		responseWriter.Header().Set("Access-Control-Allow-Origin", origin)
+		responseWriter.Header().Set("Vary", "Origin")
 	}
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Faro-Timezone")
-	w.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
+	responseWriter.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	responseWriter.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Faro-Timezone")
+	responseWriter.Header().Set("Access-Control-Expose-Headers", "Content-Disposition")
 }
 
-func allowCORSRequest(w http.ResponseWriter, r *http.Request, trustProxy bool, onboardingComplete func(context.Context) bool) bool {
-	origin := strings.TrimSpace(r.Header.Get("Origin"))
-	crossOrigin := origin != "" && !sameOrigin(r, origin, trustProxy)
-	crossSite := strings.EqualFold(r.Header.Get("Sec-Fetch-Site"), "cross-site")
-	if r.URL.Path == "/api/auth/setup" || !crossOrigin && !crossSite {
+func allowCORSRequest(responseWriter http.ResponseWriter, request *http.Request, trustProxy bool, onboardingComplete func(context.Context) bool) bool {
+	origin := strings.TrimSpace(request.Header.Get("Origin"))
+	crossOrigin := origin != "" && !sameOrigin(request, origin, trustProxy)
+	crossSite := strings.EqualFold(request.Header.Get("Sec-Fetch-Site"), "cross-site")
+	if request.URL.Path == "/api/auth/setup" || !crossOrigin && !crossSite {
 		return true
 	}
-	if allowCrossOriginDuringOnboarding(r, onboardingComplete) {
+	if allowCrossOriginDuringOnboarding(request, onboardingComplete) {
 		return true
 	}
 	if crossOrigin {
-		writeJSON(w, http.StatusForbidden, map[string]any{"error": "cross-origin requests are not allowed"})
+		writeJSON(responseWriter, http.StatusForbidden, map[string]any{"error": "cross-origin requests are not allowed"})
 		return false
 	}
-	writeJSON(w, http.StatusForbidden, map[string]any{"error": "cross-site requests are not allowed"})
+	writeJSON(responseWriter, http.StatusForbidden, map[string]any{"error": "cross-site requests are not allowed"})
 	return false
 }
 
-func allowCrossOriginDuringOnboarding(r *http.Request, onboardingComplete func(context.Context) bool) bool {
-	if r.Method == http.MethodDelete && r.URL.Path == "/api/redundancy" {
+func allowCrossOriginDuringOnboarding(request *http.Request, onboardingComplete func(context.Context) bool) bool {
+	if request.Method == http.MethodDelete && request.URL.Path == "/api/redundancy" {
 		return false
 	}
-	return !onboardingComplete(r.Context())
+	return !onboardingComplete(request.Context())
 }
 
 func logActionError(operation string, action func() error) {
@@ -122,18 +122,18 @@ func logActionError(operation string, action func() error) {
 	}
 }
 
-func sameOrigin(r *http.Request, origin string, trustProxy bool) bool {
+func sameOrigin(request *http.Request, origin string, trustProxy bool) bool {
 	parsed, err := url.Parse(origin)
 	if err != nil || parsed.Host == "" {
 		return false
 	}
 	scheme := "http"
-	if r.TLS != nil || trustProxy && strings.EqualFold(firstForwardedValue(r.Header.Get("X-Forwarded-Proto")), "https") {
+	if request.TLS != nil || trustProxy && strings.EqualFold(firstForwardedValue(request.Header.Get("X-Forwarded-Proto")), "https") {
 		scheme = "https"
 	}
-	host := r.Host
+	host := request.Host
 	if trustProxy {
-		if forwardedHost := firstForwardedValue(r.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
+		if forwardedHost := firstForwardedValue(request.Header.Get("X-Forwarded-Host")); forwardedHost != "" {
 			host = forwardedHost
 		}
 	}

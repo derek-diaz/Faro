@@ -170,10 +170,10 @@ func TestFaviconLinksResolveDeclaredIconsSafely(t *testing.T) {
 }
 
 func TestFaviconDiscoveryUsesHeadOfLargePage(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(`<html><head><link rel="icon" href="https://cdn.example.com/icon.png"></head><body>`))
-		_, _ = w.Write([]byte(strings.Repeat("x", maxFaviconPageBytes*2)))
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = responseWriter.Write([]byte(`<html><head><link rel="icon" href="https://cdn.example.com/icon.png"></head><body>`))
+		_, _ = responseWriter.Write([]byte(strings.Repeat("x", maxFaviconPageBytes*2)))
 	}))
 	defer server.Close()
 	candidates := discoverFaviconCandidates(context.Background(), server.Client(), server.URL)
@@ -184,9 +184,9 @@ func TestFaviconDiscoveryUsesHeadOfLargePage(t *testing.T) {
 }
 
 func TestDownloadFaviconAcceptsDetectedImageWithGenericContentType(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"))
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.Header().Set("Content-Type", "application/octet-stream")
+		_, _ = responseWriter.Write([]byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"))
 	}))
 	defer server.Close()
 	body, _, err := downloadFavicon(context.Background(), server.Client(), server.URL)
@@ -199,9 +199,9 @@ func TestDownloadFaviconAcceptsDetectedImageWithGenericContentType(t *testing.T)
 }
 
 func TestDownloadFaviconRejectsHTMLMislabeledAsImage(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "image/png")
-		_, _ = w.Write([]byte("<html><body>not an icon</body></html>"))
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, _ *http.Request) {
+		responseWriter.Header().Set("Content-Type", "image/png")
+		_, _ = responseWriter.Write([]byte("<html><body>not an icon</body></html>"))
 	}))
 	defer server.Close()
 	if _, _, err := downloadFavicon(context.Background(), server.Client(), server.URL); err == nil {

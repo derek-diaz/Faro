@@ -40,12 +40,12 @@ func newDeviceNameResolver() *deviceNameResolver {
 // discoverDeviceNames prefers explicit Local DNS and UniFi names before bounded
 // reverse-DNS lookups. Concurrent lookups keep routers without PTR records from
 // adding one timeout per device to a large inventory load.
-func (s *Handler) discoverDeviceNames(ctx context.Context, clientIPs []string) map[string]deviceIdentity {
+func (handler *Handler) discoverDeviceNames(ctx context.Context, clientIPs []string) map[string]deviceIdentity {
 	identities := make(map[string]deviceIdentity, len(clientIPs))
 	requested := uniqueDeviceAddresses(clientIPs)
-	loadLocalDeviceNames(ctx, s.store.DB, requested, identities)
-	loadUniFiDeviceNames(ctx, s.store.DB, requested, identities)
-	resolveReverseDeviceNames(ctx, clientIPs, identities, s.deviceNames)
+	loadLocalDeviceNames(ctx, handler.store.DB, requested, identities)
+	loadUniFiDeviceNames(ctx, handler.store.DB, requested, identities)
+	resolveReverseDeviceNames(ctx, clientIPs, identities, handler.deviceNames)
 	return identities
 }
 
@@ -170,25 +170,25 @@ func stringQueryArguments(values []string) ([]any, string) {
 	return arguments, strings.Join(placeholders, ",")
 }
 
-func (r *deviceNameResolver) cached(clientIP string) (string, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	entry, ok := r.entries[clientIP]
+func (resolver *deviceNameResolver) cached(clientIP string) (string, bool) {
+	resolver.mu.Lock()
+	defer resolver.mu.Unlock()
+	entry, ok := resolver.entries[clientIP]
 	if !ok || time.Now().After(entry.expiresAt) {
-		delete(r.entries, clientIP)
+		delete(resolver.entries, clientIP)
 		return "", false
 	}
 	return entry.name, true
 }
 
-func (r *deviceNameResolver) store(clientIP, name string) {
+func (resolver *deviceNameResolver) store(clientIP, name string) {
 	ttl := 12 * time.Hour
 	if name == "" {
 		ttl = 30 * time.Minute
 	}
-	r.mu.Lock()
-	r.entries[clientIP] = cachedDeviceName{name: name, expiresAt: time.Now().Add(ttl)}
-	r.mu.Unlock()
+	resolver.mu.Lock()
+	resolver.entries[clientIP] = cachedDeviceName{name: name, expiresAt: time.Now().Add(ttl)}
+	resolver.mu.Unlock()
 }
 
 func friendlyHostname(hostname string) string {
@@ -210,9 +210,4 @@ func usefulHostname(hostname, clientIP string) bool {
 	compactName := strings.NewReplacer("-", "", "_", "", ".", "").Replace(strings.ToLower(hostname))
 	compactIP := strings.NewReplacer(".", "", ":", "").Replace(strings.ToLower(clientIP))
 	return compactName != compactIP && compactName != "ip"+compactIP
-}
-
-func inferDeviceTypeFromSignals(name, clientIP string, domains []string) (string, string) {
-	prediction := bundledDeviceCatalog.Predict(name, clientIP, domains)
-	return prediction.DeviceType, prediction.Confidence
 }

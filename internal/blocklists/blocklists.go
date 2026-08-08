@@ -37,12 +37,12 @@ type listSnapshot struct {
 	updatedAt       string
 }
 
-func (r Refresher) RefreshAndApply(ctx context.Context, id int64, apply func(context.Context) error) (int, error) {
-	snapshot, err := r.snapshot(ctx, id)
+func (refresher Refresher) RefreshAndApply(ctx context.Context, id int64, apply func(context.Context) error) (int, error) {
+	snapshot, err := refresher.snapshot(ctx, id)
 	if err != nil {
 		return 0, err
 	}
-	count, err := r.Refresh(ctx, id)
+	count, err := refresher.Refresh(ctx, id)
 	if err != nil {
 		return 0, err
 	}
@@ -51,7 +51,7 @@ func (r Refresher) RefreshAndApply(ctx context.Context, id int64, apply func(con
 	}
 	if err := apply(ctx); err != nil {
 		rollbackCtx := context.WithoutCancel(ctx)
-		if restoreErr := r.restore(rollbackCtx, id, snapshot); restoreErr != nil {
+		if restoreErr := refresher.restore(rollbackCtx, id, snapshot); restoreErr != nil {
 			return 0, fmt.Errorf("apply refreshed blocklist: %w; restore previous entries: %v", err, restoreErr)
 		}
 		_ = apply(rollbackCtx)
@@ -60,13 +60,13 @@ func (r Refresher) RefreshAndApply(ctx context.Context, id int64, apply func(con
 	return count, nil
 }
 
-func (r Refresher) Refresh(ctx context.Context, id int64) (int, error) {
+func (refresher Refresher) Refresh(ctx context.Context, id int64) (int, error) {
 	var source string
-	if err := r.Store.DB.QueryRowContext(ctx, `SELECT url FROM blocklists WHERE id = ?`, id).Scan(&source); err != nil {
+	if err := refresher.Store.DB.QueryRowContext(ctx, `SELECT url FROM blocklists WHERE id = ?`, id).Scan(&source); err != nil {
 		return 0, err
 	}
 
-	body, err := r.openSource(ctx, source)
+	body, err := refresher.openSource(ctx, source)
 	if err != nil {
 		return 0, err
 	}
@@ -84,7 +84,7 @@ func (r Refresher) Refresh(ctx context.Context, id int64) (int, error) {
 		return 0, errors.New("blocklist contained no valid domains; keeping the last known good version")
 	}
 
-	tx, err := r.Store.DB.BeginTx(ctx, nil)
+	tx, err := refresher.Store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -112,12 +112,12 @@ func (r Refresher) Refresh(ctx context.Context, id int64) (int, error) {
 	return len(domains), nil
 }
 
-func (r Refresher) snapshot(ctx context.Context, id int64) (listSnapshot, error) {
+func (refresher Refresher) snapshot(ctx context.Context, id int64) (listSnapshot, error) {
 	var snapshot listSnapshot
-	if err := r.Store.DB.QueryRowContext(ctx, `SELECT last_refreshed_at, updated_at FROM blocklists WHERE id = ?`, id).Scan(&snapshot.lastRefreshedAt, &snapshot.updatedAt); err != nil {
+	if err := refresher.Store.DB.QueryRowContext(ctx, `SELECT last_refreshed_at, updated_at FROM blocklists WHERE id = ?`, id).Scan(&snapshot.lastRefreshedAt, &snapshot.updatedAt); err != nil {
 		return snapshot, err
 	}
-	rows, err := r.Store.DB.QueryContext(ctx, `SELECT domain FROM blocklist_entries WHERE blocklist_id = ? ORDER BY domain`, id)
+	rows, err := refresher.Store.DB.QueryContext(ctx, `SELECT domain FROM blocklist_entries WHERE blocklist_id = ? ORDER BY domain`, id)
 	if err != nil {
 		return snapshot, err
 	}
@@ -132,8 +132,8 @@ func (r Refresher) snapshot(ctx context.Context, id int64) (listSnapshot, error)
 	return snapshot, rows.Err()
 }
 
-func (r Refresher) restore(ctx context.Context, id int64, snapshot listSnapshot) error {
-	tx, err := r.Store.DB.BeginTx(ctx, nil)
+func (refresher Refresher) restore(ctx context.Context, id int64, snapshot listSnapshot) error {
+	tx, err := refresher.Store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -182,18 +182,18 @@ func NewManager(store *db.Store, apply func(context.Context) error) *Manager {
 	}
 }
 
-func (m *Manager) Run(ctx context.Context) {
-	interval := m.Interval
+func (manager *Manager) Run(ctx context.Context) {
+	interval := manager.Interval
 	if interval <= 0 {
 		interval = defaultRefreshInterval
 	}
-	startupDelay := m.StartupDelay
+	startupDelay := manager.StartupDelay
 	if startupDelay == 0 {
 		startupDelay = defaultStartupDelay
 	} else if startupDelay < 0 {
 		startupDelay = 0
 	}
-	retryInterval := m.RetryInterval
+	retryInterval := manager.RetryInterval
 	if retryInterval <= 0 {
 		retryInterval = defaultRetryInterval
 	}
@@ -205,7 +205,7 @@ func (m *Manager) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 			next := interval
-			if m.refreshDue(ctx) {
+			if manager.refreshDue(ctx) {
 				next = retryInterval
 				log.Printf("automatic blocklist refresh will retry in %s", retryInterval)
 			}
@@ -214,13 +214,13 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-func (m *Manager) refreshDue(ctx context.Context) (failed bool) {
-	age := m.RefreshAge
+func (manager *Manager) refreshDue(ctx context.Context) (failed bool) {
+	age := manager.RefreshAge
 	if age <= 0 {
 		age = defaultRefreshAge
 	}
 	cutoff := time.Now().UTC().Add(-age).Format(time.RFC3339)
-	rows, err := m.Store.DB.QueryContext(ctx, `
+	rows, err := manager.Store.DB.QueryContext(ctx, `
 		SELECT id FROM blocklists
 		WHERE enabled = 1 AND (last_refreshed_at IS NULL OR datetime(last_refreshed_at) < datetime(?))
 		ORDER BY id
@@ -243,7 +243,7 @@ func (m *Manager) refreshDue(ctx context.Context) (failed bool) {
 	_ = rows.Close()
 
 	for _, id := range ids {
-		if _, err := m.Refresher.RefreshAndApply(ctx, id, m.Apply); err != nil {
+		if _, err := manager.Refresher.RefreshAndApply(ctx, id, manager.Apply); err != nil {
 			log.Printf("automatic blocklist refresh %d failed: %v", id, err)
 			failed = true
 		}
@@ -313,7 +313,7 @@ func parseBlocklistLine(line string) (string, bool) {
 	return domain, err == nil
 }
 
-func (r Refresher) openSource(ctx context.Context, source string) (io.ReadCloser, error) {
+func (refresher Refresher) openSource(ctx context.Context, source string) (io.ReadCloser, error) {
 	if filePath, ok := strings.CutPrefix(source, "file://"); ok {
 		return os.Open(filePath)
 	}
@@ -324,7 +324,7 @@ func (r Refresher) openSource(ctx context.Context, source string) (io.ReadCloser
 	// Resolve downloads directly through Faro's configured public DNS upstreams.
 	// Docker's host resolver may point back to Faro and cannot answer while the
 	// DNS container is still coming up during installation or upgrade.
-	resolver := newBlocklistResolver(r.blocklistDNSUpstreams(ctx))
+	resolver := newBlocklistResolver(refresher.blocklistDNSUpstreams(ctx))
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = blocklistDialContext(resolver)
 	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
@@ -339,13 +339,13 @@ func (r Refresher) openSource(ctx context.Context, source string) (io.ReadCloser
 	return resp.Body, nil
 }
 
-func (r Refresher) blocklistDNSUpstreams(ctx context.Context) []string {
-	if len(r.DNSUpstreams) > 0 {
-		return r.DNSUpstreams
+func (refresher Refresher) blocklistDNSUpstreams(ctx context.Context) []string {
+	if len(refresher.DNSUpstreams) > 0 {
+		return refresher.DNSUpstreams
 	}
 	var configured, faroIP string
-	_ = r.Store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&configured)
-	_ = r.Store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'faro_lan_ip'`).Scan(&faroIP)
+	_ = refresher.Store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'upstream_dns'`).Scan(&configured)
+	_ = refresher.Store.DB.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'faro_lan_ip'`).Scan(&faroIP)
 	faroAddress := net.ParseIP(strings.TrimSpace(faroIP))
 	upstreams := make([]string, 0, 4)
 	for _, raw := range strings.Split(configured, ",") {

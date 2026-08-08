@@ -14018,6 +14018,18 @@ body .selected-server {
   color: var(--text-muted);
 }
 
+:root[data-theme-resolved="dark"] .device-overview-lists > section > .empty {
+  display: grid;
+  min-height: 48px;
+  place-items: center;
+  margin: 14px 0 0;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: transparent;
+  padding: 10px 14px;
+  text-align: center;
+}
+
 /* Settings, integrations, upstreams, and forms */
 :root[data-theme-resolved="dark"] :is(.settings-tabs, .event-filter-tabs) {
   border-color: var(--border);
@@ -14796,10 +14808,23 @@ body .selected-server {
   color: #7ce0ce;
 }
 
-:root[data-theme-resolved="dark"] :is(.decision-trace-step.blocked .decision-trace-icon, .device-confidence.low, .device-table-value.blocked) {
+:root[data-theme-resolved="dark"] :is(.decision-trace-step.blocked .decision-trace-icon, .device-confidence.low) {
   border-color: #754047;
   background: var(--blocked-soft);
   color: #ffaaa3;
+}
+
+:root[data-theme-resolved="dark"] .device-table-value.blocked strong {
+  justify-self: start;
+  border: 1px solid rgba(255, 170, 163, 0.16);
+  border-radius: 5px;
+  background: rgba(117, 64, 71, 0.44);
+  color: #ffb1ab;
+  padding: 2px 6px;
+}
+
+:root[data-theme-resolved="dark"] .device-table-value.blocked em {
+  color: #e4aaa6;
 }
 
 :root[data-theme-resolved="dark"] .redundancy-node {

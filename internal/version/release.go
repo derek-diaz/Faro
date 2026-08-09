@@ -64,6 +64,10 @@ func (checker *Checker) Latest(ctx context.Context) *Release {
 }
 
 func fetchLatestRelease(ctx context.Context, client *http.Client) *Release {
+	return fetchLatestReleaseForVersion(ctx, client, Number)
+}
+
+func fetchLatestReleaseForVersion(ctx context.Context, client *http.Client, currentVersion string) *Release {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, releaseAPIURL, nil)
 	if err != nil {
 		return nil
@@ -86,7 +90,7 @@ func fetchLatestRelease(ctx context.Context, client *http.Client) *Release {
 		return nil
 	}
 	releaseVersion, ok := normalizeReleaseVersion(payload.TagName)
-	if !ok || !IsNewer(releaseVersion, Number) {
+	if !ok || !IsNewer(releaseVersion, currentVersion) {
 		return nil
 	}
 	return &Release{

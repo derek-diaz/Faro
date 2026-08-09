@@ -28,24 +28,25 @@ func TestIsNewer(t *testing.T) {
 }
 
 func TestFetchLatestRelease(t *testing.T) {
+	const mockCurrentVersion = "2.4.6"
 	client := &http.Client{
 		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(`{"tag_name":"v0.9.1","name":"Faro 0.9.1","published_at":"2026-08-05T12:00:00Z"}`)),
+				Body:       io.NopCloser(strings.NewReader(`{"tag_name":"v2.4.7","name":"Faro 2.4.7","published_at":"2026-08-05T12:00:00Z"}`)),
 				Request:    request,
 			}, nil
 		}),
 	}
 
-	release := fetchLatestRelease(context.Background(), client)
+	release := fetchLatestReleaseForVersion(context.Background(), client, mockCurrentVersion)
 	if release == nil {
 		t.Fatal("fetchLatestRelease returned nil for a newer stable release")
 	}
-	if release.Version != "0.9.1" || release.Display != "v0.9.1" {
+	if release.Version != "2.4.7" || release.Display != "v2.4.7" {
 		t.Fatalf("unexpected release version: %#v", release)
 	}
-	if release.URL != releasePageURL+"/tag/v0.9.1" {
+	if release.URL != releasePageURL+"/tag/v2.4.7" {
 		t.Fatalf("unexpected release URL: %q", release.URL)
 	}
 }

@@ -14,7 +14,7 @@ func TestIsNewer(t *testing.T) {
 		current   string
 		want      bool
 	}{
-		{candidate: "v0.9.2", current: "0.9.1", want: true},
+		{candidate: "v0.10.0", current: "0.9.2", want: true},
 		{candidate: "1.0.0", current: "v0.9.1", want: true},
 		{candidate: "0.9.0", current: "0.9.1", want: false},
 		{candidate: "0.8.9", current: "0.9.1", want: false},

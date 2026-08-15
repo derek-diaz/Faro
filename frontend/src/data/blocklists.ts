@@ -22,7 +22,7 @@ export const blocklistCategories: Array<{ id: BlocklistCategory; label: string; 
   { id: "Network", label: "Network controls", description: "Advanced controls for bypass tools and redirect services." },
 ];
 
-const hagezi = (path: string) => `https://raw.githubusercontent.com/hagezi/dns-blocklists/main/${path}`;
+const hagezi = (path: string) => `https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/${path}`;
 const blocklistProject = (name: string) => `https://blocklistproject.github.io/Lists/alt-version/${name}-nl.txt`;
 const ublock = (name: string) => `https://ublockorigin.github.io/uAssets/filters/${name}.txt`;
 

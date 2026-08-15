@@ -97,7 +97,7 @@ func grouped(ctx context.Context, database *sql.DB, query string, args ...any) [
 }
 
 func recentQueries(ctx context.Context, database *sql.DB) []map[string]any {
-	rows, err := database.QueryContext(ctx, `SELECT timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata FROM dns_queries ORDER BY timestamp DESC LIMIT 8`)
+	rows, err := database.QueryContext(ctx, `SELECT timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata FROM dns_queries ORDER BY timestamp DESC, id DESC LIMIT 8`)
 	if err != nil {
 		return make([]map[string]any, 0)
 	}
@@ -110,7 +110,7 @@ func recentQueries(ctx context.Context, database *sql.DB) []map[string]any {
 }
 
 func recentQueriesFor(ctx context.Context, database *sql.DB, where string, args ...any) []map[string]any {
-	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata FROM dns_queries WHERE ` + where + ` ORDER BY timestamp DESC LIMIT 12`
+	query := `SELECT id, timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata FROM dns_queries WHERE ` + where + ` ORDER BY timestamp DESC, id DESC LIMIT 12`
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
 		return make([]map[string]any, 0)

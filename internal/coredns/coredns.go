@@ -24,6 +24,7 @@ import (
 
 	"github.com/coredns/caddy/caddyfile"
 	"github.com/derek/faro/internal/db"
+	"github.com/derek/faro/internal/protectiontime"
 )
 
 var reloadTotal atomic.Uint64
@@ -51,6 +52,8 @@ type Manager struct {
 	ReloadTimeout     time.Duration
 	HTTPClient        *http.Client
 	applyMu           sync.Mutex
+	temporalMu        sync.Mutex
+	temporalSignature string
 	bootstrapped      bool
 	validateGenerated func(context.Context, map[string][]byte) error
 	readLiveHash      func(context.Context) (string, error)
@@ -72,6 +75,12 @@ type protectionRender struct {
 	ClientIPs  []string
 	HostsFile  string
 	BlockHosts string
+	Active     bool
+}
+
+type pausedDeviceRender struct {
+	ID        int64
+	ClientIPs []string
 }
 
 type RuleMatch struct {
@@ -160,7 +169,33 @@ func (manager *Manager) Apply(ctx context.Context) error {
 	if manager.AfterApply != nil {
 		manager.AfterApply(context.WithoutCancel(ctx))
 	}
+	manager.rememberTemporalState(context.WithoutCancel(ctx))
 	return nil
+}
+
+// RunTemporalReloads keeps the generated DNS policy aligned with protection
+// schedules and temporary pauses even when nobody has the Faro UI open.
+func (manager *Manager) RunTemporalReloads(ctx context.Context) {
+	manager.rememberTemporalState(ctx)
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			signature, err := manager.currentTemporalSignature(ctx, time.Now())
+			if err != nil {
+				continue
+			}
+			manager.temporalMu.Lock()
+			previous := manager.temporalSignature
+			manager.temporalMu.Unlock()
+			if previous != "" && previous != signature {
+				_ = manager.Apply(ctx)
+			}
+		}
+	}
 }
 
 // ApplyReplica installs a controller-produced, already rendered configuration.
@@ -326,6 +361,10 @@ func (manager *Manager) render(ctx context.Context) (renderedFiles, error) {
 	if len(protections) == 0 {
 		return renderedFiles{}, errors.New("home protection is missing")
 	}
+	pausedDevices, err := manager.pausedDevices(ctx, time.Now())
+	if err != nil {
+		return renderedFiles{}, err
+	}
 
 	blockTemplate := template.Must(template.New("serverBlock").Parse(`.:53 {
     {{ if not .Protection.IsDefault }}view protection_{{ .Protection.ID }} {
@@ -355,6 +394,26 @@ func (manager *Manager) render(ctx context.Context) (renderedFiles, error) {
 }
 `))
 	var core bytes.Buffer
+	for _, device := range pausedDevices {
+		if _, err := fmt.Fprintf(&core, `.:53 {
+    view device_pause_%d {
+        expr %s
+    }
+    errors
+    metadata
+    log . "FARO|{remote}|{type}|{name}|{rcode}|{duration}|{/forward/upstream}"
+    acl {
+        allow net %s
+        block
+    }
+    template ANY ANY {
+        rcode REFUSED
+    }
+}
+`, device.ID, protectionViewExpression(device.ClientIPs), strings.Join(state.AllowedCIDRs, " ")); err != nil {
+			return renderedFiles{}, err
+		}
+	}
 	protectionHosts, defaultBlocks, err := renderProtectionBlocks(&core, blockTemplate, state, localHosts, protections)
 	if err != nil {
 		return renderedFiles{}, err
@@ -509,17 +568,26 @@ func (manager *Manager) blockHostsForProtection(ctx context.Context, protectionI
 }
 
 func (manager *Manager) protections(ctx context.Context) ([]protectionRender, error) {
-	rows, err := manager.Store.DB.QueryContext(ctx, `SELECT id, name, is_default FROM protection_profiles ORDER BY is_default, id`)
+	rows, err := manager.Store.DB.QueryContext(ctx, `
+		SELECT id, name, is_default, paused_until, schedule_enabled, schedule_days,
+		       schedule_start, schedule_end, schedule_timezone
+		FROM protection_profiles ORDER BY is_default, id`)
 	if err != nil {
 		return nil, err
 	}
 	var protections []protectionRender
 	for rows.Next() {
 		var protection protectionRender
-		if err := rows.Scan(&protection.ID, &protection.Name, &protection.IsDefault); err != nil {
+		var pausedUntil, days, start, end, timezone string
+		var scheduleEnabled bool
+		if err := rows.Scan(&protection.ID, &protection.Name, &protection.IsDefault, &pausedUntil,
+			&scheduleEnabled, &days, &start, &end, &timezone); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
+		protection.Active = !protectiontime.PausedAt(pausedUntil, time.Now()) && protectiontime.ActiveAt(protectiontime.Schedule{
+			Enabled: scheduleEnabled, Days: days, Start: start, End: end, Timezone: timezone,
+		}, time.Now())
 		protections = append(protections, protection)
 	}
 	if err := rows.Close(); err != nil {
@@ -537,12 +605,105 @@ func (manager *Manager) protections(ctx context.Context) ([]protectionRender, er
 		if err != nil {
 			return nil, err
 		}
-		protection.BlockHosts, err = manager.blockHostsForProtection(ctx, protection.ID)
+		if protection.Active {
+			protection.BlockHosts, err = manager.blockHostsForProtection(ctx, protection.ID)
+		}
 		if err != nil {
 			return nil, err
 		}
 	}
 	return protections, nil
+}
+
+func (manager *Manager) pausedDevices(ctx context.Context, now time.Time) ([]pausedDeviceRender, error) {
+	rows, err := manager.Store.DB.QueryContext(ctx, `SELECT device_id, paused_until FROM device_dns_pauses ORDER BY device_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var result []pausedDeviceRender
+	for rows.Next() {
+		var device pausedDeviceRender
+		var pausedUntil string
+		if err := rows.Scan(&device.ID, &pausedUntil); err != nil {
+			return nil, err
+		}
+		if !protectiontime.PausedAt(pausedUntil, now) {
+			continue
+		}
+		device.ClientIPs, err = domains(ctx, manager.Store, `SELECT address FROM device_addresses WHERE device_id = ?`, device.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(device.ClientIPs) > 0 {
+			result = append(result, device)
+		}
+	}
+	return result, rows.Err()
+}
+
+func (manager *Manager) rememberTemporalState(ctx context.Context) {
+	signature, err := manager.currentTemporalSignature(ctx, time.Now())
+	if err != nil {
+		return
+	}
+	manager.temporalMu.Lock()
+	manager.temporalSignature = signature
+	manager.temporalMu.Unlock()
+}
+
+func (manager *Manager) currentTemporalSignature(ctx context.Context, now time.Time) (string, error) {
+	// Temporal checks run every 15 seconds. Keep this query limited to the
+	// fields that determine whether policy is active; rendering blocklists here
+	// would repeatedly scan and sort the entire installed lists just to discover
+	// that no schedule boundary was crossed.
+	rows, err := manager.Store.DB.QueryContext(ctx, `
+		SELECT id, paused_until, schedule_enabled, schedule_days, schedule_start, schedule_end, schedule_timezone
+		FROM protection_profiles ORDER BY id`)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var value strings.Builder
+	for rows.Next() {
+		var id int64
+		var pausedUntil, days, start, end, timezone string
+		var scheduleEnabled bool
+		if err := rows.Scan(&id, &pausedUntil, &scheduleEnabled, &days, &start, &end, &timezone); err != nil {
+			return "", err
+		}
+		active := !protectiontime.PausedAt(pausedUntil, now) && protectiontime.ActiveAt(protectiontime.Schedule{
+			Enabled: scheduleEnabled, Days: days, Start: start, End: end, Timezone: timezone,
+		}, now)
+		_, _ = fmt.Fprintf(&value, "p:%d:%t;", id, active)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if err := rows.Close(); err != nil {
+		return "", err
+	}
+
+	pausedRows, err := manager.Store.DB.QueryContext(ctx, `SELECT device_id, paused_until FROM device_dns_pauses ORDER BY device_id`)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = pausedRows.Close() }()
+	for pausedRows.Next() {
+		var deviceID int64
+		var pausedUntil string
+		if err := pausedRows.Scan(&deviceID, &pausedUntil); err != nil {
+			return "", err
+		}
+		if protectiontime.PausedAt(pausedUntil, now) {
+			_, _ = fmt.Fprintf(&value, "d:%d;", deviceID)
+		}
+	}
+	if err := pausedRows.Err(); err != nil {
+		return "", err
+	}
+	return value.String(), nil
 }
 
 func protectionViewExpression(clientIPs []string) string {
@@ -1101,29 +1262,53 @@ func ExplainDomainForClient(ctx context.Context, store *db.Store, domain, client
 		return DomainDecision{Action: "allowed"}
 	}
 	decision := DomainDecision{Action: "allowed"}
+	if clientIP != "" {
+		var pausedUntil string
+		if store.DB.QueryRowContext(ctx, `
+			SELECT p.paused_until FROM device_dns_pauses p
+			JOIN device_addresses a ON a.device_id = p.device_id
+			WHERE a.address = ? LIMIT 1`, clientIP).Scan(&pausedUntil) == nil && protectiontime.PausedAt(pausedUntil, time.Now()) {
+			decision.Action = "blocked"
+			decision.Reason = "DNS access is temporarily paused for this device."
+			return decision
+		}
+	}
 	var protectionID int64
 	var protectionName string
+	var pausedUntil, scheduleDays, scheduleStart, scheduleEnd, scheduleTimezone string
+	var scheduleEnabled bool
+	var allowID, manualID int64
+	var localID int64
+	var localType, localValue string
 	err = store.DB.QueryRowContext(ctx, `
-		SELECT p.id, p.name
+		SELECT p.id, p.name, p.paused_until, p.schedule_enabled, p.schedule_days, p.schedule_start, p.schedule_end, p.schedule_timezone,
+		       COALESCE((SELECT id FROM protection_allow_entries WHERE protection_id = p.id AND domain = ? LIMIT 1), 0),
+		       COALESCE((SELECT id FROM protection_block_entries WHERE protection_id = p.id AND domain = ? LIMIT 1), 0),
+		       COALESCE(local.id, 0), COALESCE(local.type, ''), COALESCE(local.value, '')
 		FROM protection_profiles p
+		LEFT JOIN (SELECT id, type, value FROM dns_records WHERE hostname = ? ORDER BY id LIMIT 1) local ON 1 = 1
 		LEFT JOIN device_addresses da ON da.address = ?
 		LEFT JOIN device_protection_memberships m ON m.protection_id = p.id AND m.device_id = da.device_id
 		LEFT JOIN device_protection_assignments legacy ON legacy.protection_id = p.id AND legacy.client_ip = ?
 		WHERE m.device_id IS NOT NULL OR legacy.client_ip IS NOT NULL OR p.is_default = 1
 		ORDER BY CASE WHEN m.device_id IS NOT NULL THEN 0 WHEN legacy.client_ip IS NOT NULL THEN 1 ELSE 2 END
 		LIMIT 1
-	`, clientIP, clientIP).Scan(&protectionID, &protectionName)
+	`, normalized, normalized, normalized, clientIP, clientIP).Scan(&protectionID, &protectionName, &pausedUntil, &scheduleEnabled, &scheduleDays, &scheduleStart, &scheduleEnd, &scheduleTimezone, &allowID, &manualID, &localID, &localType, &localValue)
 	if err != nil {
+		var local LocalRecordMatch
+		if lookupErr := store.DB.QueryRowContext(ctx, `SELECT id, type, value FROM dns_records WHERE hostname = ? ORDER BY id LIMIT 1`, normalized).Scan(&local.ID, &local.Type, &local.Value); lookupErr == nil {
+			decision.LocalRecord = &local
+		}
 		return decision
 	}
 	decision.Protection = &RuleMatch{Kind: "protection", ID: protectionID, Name: protectionName}
-	var allowID int64
-	if err := store.DB.QueryRowContext(ctx, `SELECT id FROM protection_allow_entries WHERE protection_id = ? AND domain = ?`, protectionID, normalized).Scan(&allowID); err == nil {
+	if localID != 0 {
+		decision.LocalRecord = &LocalRecordMatch{ID: localID, Type: localType, Value: localValue}
+	}
+	if allowID != 0 {
 		decision.Allowlist = &RuleMatch{Kind: "allowlist", ID: allowID, Name: protectionName + " exception"}
 	}
-
-	var manualID int64
-	if err := store.DB.QueryRowContext(ctx, `SELECT id FROM protection_block_entries WHERE protection_id = ? AND domain = ?`, protectionID, normalized).Scan(&manualID); err == nil {
+	if manualID != 0 {
 		decision.ManualBlock = &RuleMatch{Kind: "manual_block", ID: manualID, Name: protectionName + " custom block"}
 	}
 
@@ -1146,12 +1331,10 @@ func ExplainDomainForClient(ctx context.Context, store *db.Store, domain, client
 		}
 	}
 
-	var local LocalRecordMatch
-	if err := store.DB.QueryRowContext(ctx, `SELECT id, type, value FROM dns_records WHERE hostname = ? ORDER BY id LIMIT 1`, normalized).Scan(&local.ID, &local.Type, &local.Value); err == nil {
-		decision.LocalRecord = &local
-	}
-
+	filteringActive := !protectiontime.PausedAt(pausedUntil, time.Now()) && protectiontime.ActiveAt(protectiontime.Schedule{Enabled: scheduleEnabled, Days: scheduleDays, Start: scheduleStart, End: scheduleEnd, Timezone: scheduleTimezone}, time.Now())
 	switch {
+	case !filteringActive:
+		decision.Reason = "Filtering is currently bypassed by " + protectionName + " time controls."
 	case decision.Allowlist != nil:
 		decision.Reason = "An exception in " + protectionName + " bypassed filtering."
 	case decision.ManualBlock != nil:

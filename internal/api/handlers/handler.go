@@ -42,6 +42,8 @@ type Handler struct {
 	configMu            sync.Mutex
 	activityCountsMu    sync.Mutex
 	activityCountsCache map[string]activityCountCacheEntry
+	dashboardMu         sync.Mutex
+	dashboardCache      dashboardCacheEntry
 }
 
 func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Monitor, dependencies ...any) http.Handler {

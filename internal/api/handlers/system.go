@@ -116,13 +116,18 @@ func (handler *Handler) metrics(responseWriter http.ResponseWriter, request *htt
 		return
 	}
 	reloads, reloadFailures := coredns.ReloadTotals()
-	total := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries`)
-	blocked := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE action = 'blocked'`)
-	cacheHits := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE source = 'cache'`)
-	upstreamQueries := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE source = 'upstream'`)
+	var total, blocked, cacheHits, upstreamQueries, enabled, entries int
+	_ = handler.store.DB.QueryRowContext(request.Context(), `
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN source = 'cache' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN source = 'upstream' THEN 1 ELSE 0 END), 0),
+			(SELECT COUNT(*) FROM blocklists WHERE enabled = 1),
+			(SELECT COUNT(*) FROM blocklist_entries)
+		FROM dns_queries
+	`).Scan(&total, &blocked, &cacheHits, &upstreamQueries, &enabled, &entries)
 	cache := handler.coreDNSCacheMetrics(request.Context())
-	enabled := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM blocklists WHERE enabled = 1`)
-	entries := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM blocklist_entries`)
 	responseWriter.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	_, _ = fmt.Fprintf(responseWriter, "# TYPE faro_dns_queries_total counter\nfaro_dns_queries_total %d\n", total)
 	_, _ = fmt.Fprintf(responseWriter, "# TYPE faro_dns_blocked_queries_total counter\nfaro_dns_blocked_queries_total %d\n", blocked)

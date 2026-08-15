@@ -5,12 +5,16 @@ import { blocklistCatalog } from "../data/blocklists";
 import { encryptedEndpointForAddresses, encryptedEndpointIndex, upstreamProviders } from "../data/upstreams";
 import { ProviderLogo } from "./ProviderLogo";
 import { SetupRail, setupStages } from "./SetupRail";
+import { AppearanceMenu } from "./AppearanceMenu";
 import { errorMessage, normalizeURL } from "../utils/formatting";
+import type { ThemeMode } from "../theme";
 
 type OnboardingProps = {
   readonly username: string;
   readonly onComplete: () => void;
   readonly onJoinExisting: () => void;
+  readonly themeMode: ThemeMode;
+  readonly onThemeModeChange: (mode: ThemeMode) => void;
 };
 
 const steps = setupStages.slice(1);
@@ -21,7 +25,7 @@ const protectionChoices: ProtectionChoice[] = [
   ...blocklistCatalog.filter((item) => item.id === "oisd-small" || item.id === "hagezi-normal")
 ];
 
-export function Onboarding({ username, onComplete, onJoinExisting }: OnboardingProps) {
+export function Onboarding({ username, onComplete, onJoinExisting, themeMode, onThemeModeChange }: OnboardingProps) {
   const [step, setStep] = useState(0);
   const [localSuffix, setLocalSuffix] = useState("home");
   const [lanAddress, setLanAddress] = useState(() => detectedLANAddress(window.location.hostname));
@@ -134,6 +138,7 @@ export function Onboarding({ username, onComplete, onJoinExisting }: OnboardingP
 
   return (
     <main className="onboarding-shell">
+      <AppearanceMenu className="public-appearance-control" themeMode={themeMode} onThemeModeChange={onThemeModeChange} />
       <SetupRail currentStep={step + 1} username={username} />
 
       <section className="onboarding-content">

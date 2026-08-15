@@ -31,12 +31,19 @@ func (handler *Handler) domainSummary(responseWriter http.ResponseWriter, reques
 		return
 	}
 	start := todayStart(request)
-	total := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE domain = ? AND timestamp >= ?`, domain, start)
-	blocked := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE domain = ? AND timestamp >= ? AND action = 'blocked'`, domain, start)
+	var total, blocked, allowedAll, blockedAll int
 	var firstSeen, lastSeen sql.NullString
-	_ = handler.store.DB.QueryRowContext(request.Context(), `SELECT MIN(timestamp), MAX(timestamp) FROM dns_queries WHERE domain = ?`, domain).Scan(&firstSeen, &lastSeen)
-	allowedAll := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE domain = ? AND action = 'allowed'`, domain)
-	blockedAll := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE domain = ? AND action = 'blocked'`, domain)
+	_ = handler.store.DB.QueryRowContext(request.Context(), `
+		SELECT
+			COALESCE(SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN timestamp >= ? AND action = 'blocked' THEN 1 ELSE 0 END), 0),
+			MIN(timestamp),
+			MAX(timestamp),
+			COALESCE(SUM(CASE WHEN action = 'allowed' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END), 0)
+		FROM dns_queries
+		WHERE domain = ?
+	`, start, start, domain).Scan(&total, &blocked, &firstSeen, &lastSeen, &allowedAll, &blockedAll)
 	status := "Allowed"
 	if allowedAll > 0 && blockedAll > 0 {
 		status = "Mixed"

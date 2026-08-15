@@ -108,6 +108,10 @@ func (handler *Handler) routeDeviceSubresource(responseWriter http.ResponseWrite
 		handler.handleDeviceSubresource(responseWriter, request, rawClientIP, handler.assignDeviceProtection)
 		return true
 	}
+	if rawClientIP, ok := strings.CutSuffix(path, "/pause"); ok {
+		handler.handleDeviceSubresource(responseWriter, request, rawClientIP, handler.deviceDNSPause)
+		return true
+	}
 	if rawClientIP, ok := strings.CutSuffix(path, "/replay"); ok {
 		handler.handleDeviceSubresource(responseWriter, request, rawClientIP, handler.deviceReplay)
 		return true
@@ -182,6 +186,14 @@ func (handler *Handler) deviceDetails(responseWriter http.ResponseWriter, reques
 		identity.DeviceType, identity.TypeConfidence, typeSource = storedDeviceType, "high", "manual"
 	}
 	protectionID, protectionName, protectionIcon := protectionForClient(request.Context(), handler.store.DB, clientIP)
+	var dnsPausedUntil sql.NullString
+	_ = handler.store.DB.QueryRowContext(request.Context(), `SELECT paused_until FROM device_dns_pauses WHERE device_id = ?`, deviceID).Scan(&dnsPausedUntil)
+	dnsPaused := false
+	if dnsPausedUntil.Valid {
+		if until, parseErr := time.Parse(time.RFC3339, dnsPausedUntil.String); parseErr == nil {
+			dnsPaused = time.Now().Before(until)
+		}
+	}
 	writeJSON(responseWriter, http.StatusOK, map[string]any{
 		"device_id":             deviceID,
 		"client_ip":             clientIP,
@@ -209,8 +221,75 @@ func (handler *Handler) deviceDetails(responseWriter http.ResponseWriter, reques
 		"protection":            protectionName,
 		"protection_id":         protectionID,
 		"protection_icon":       protectionIcon,
+		"dns_paused":            dnsPaused,
+		"dns_paused_until":      nullableString(dnsPausedUntil),
 		"recent_activity":       recentQueriesFor(request.Context(), handler.store.DB, `device_id = ?`, deviceID),
 	})
+}
+
+func (handler *Handler) deviceDNSPause(responseWriter http.ResponseWriter, request *http.Request, clientIP string) {
+	if request.Method != http.MethodPut {
+		methodNotAllowed(responseWriter)
+		return
+	}
+	deviceID, found, err := deviceidentity.DeviceIDForAddress(request.Context(), handler.store, clientIP)
+	if err != nil || !found {
+		writeBadRequest(responseWriter, errors.New("device was not found"))
+		return
+	}
+	var input struct {
+		Until string `json:"until"`
+	}
+	if !decode(responseWriter, request, &input) {
+		return
+	}
+	input.Until = strings.TrimSpace(input.Until)
+	if input.Until != "" {
+		until, parseErr := time.Parse(time.RFC3339, input.Until)
+		if parseErr != nil || !until.After(time.Now()) {
+			writeBadRequest(responseWriter, errors.New("pause end must be a future RFC3339 timestamp"))
+			return
+		}
+		if until.After(time.Now().Add(7 * 24 * time.Hour)) {
+			writeBadRequest(responseWriter, errors.New("a device can be paused for at most 7 days"))
+			return
+		}
+		input.Until = until.UTC().Format(time.RFC3339)
+	}
+	handler.configMu.Lock()
+	defer handler.configMu.Unlock()
+	var previous sql.NullString
+	_ = handler.store.DB.QueryRowContext(request.Context(), `SELECT paused_until FROM device_dns_pauses WHERE device_id = ?`, deviceID).Scan(&previous)
+	if input.Until == "" {
+		_, err = handler.store.DB.ExecContext(request.Context(), `DELETE FROM device_dns_pauses WHERE device_id = ?`, deviceID)
+	} else {
+		_, err = handler.store.DB.ExecContext(request.Context(), `
+			INSERT INTO device_dns_pauses(device_id, paused_until, updated_at) VALUES(?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(device_id) DO UPDATE SET paused_until=excluded.paused_until, updated_at=CURRENT_TIMESTAMP`, deviceID, input.Until)
+	}
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	if err := handler.reloader.Apply(request.Context()); err != nil {
+		rollbackCtx := context.WithoutCancel(request.Context())
+		if previous.Valid {
+			_, _ = handler.store.DB.ExecContext(rollbackCtx, `INSERT INTO device_dns_pauses(device_id, paused_until) VALUES(?, ?) ON CONFLICT(device_id) DO UPDATE SET paused_until=excluded.paused_until, updated_at=CURRENT_TIMESTAMP`, deviceID, previous.String)
+		} else {
+			_, _ = handler.store.DB.ExecContext(rollbackCtx, `DELETE FROM device_dns_pauses WHERE device_id = ?`, deviceID)
+		}
+		_ = handler.reloader.Apply(rollbackCtx)
+		writeError(responseWriter, fmt.Errorf("device pause was not changed because CoreDNS rejected the configuration: %w", err))
+		return
+	}
+	name := clientIP
+	_ = handler.store.DB.QueryRowContext(request.Context(), `SELECT COALESCE(NULLIF(name, ''), ?) FROM devices WHERE id = ?`, clientIP, deviceID).Scan(&name)
+	if input.Until == "" {
+		handler.recordEvent(request.Context(), eventInput{Type: "device.dns_resumed", Severity: "success", Title: "Device internet access restored", Description: name + " can resolve internet names again.", ClientIP: clientIP, Metadata: map[string]any{"device_id": deviceID}, Source: "protection"})
+	} else {
+		handler.recordEvent(request.Context(), eventInput{Type: "device.dns_paused", Severity: "warning", Title: "Device internet access paused", Description: name + " cannot make most new website or app connections because DNS is paused.", ClientIP: clientIP, Metadata: map[string]any{"device_id": deviceID, "paused_until": input.Until}, Source: "protection"})
+	}
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true, "paused_until": nullableTimeString(input.Until)})
 }
 
 func (handler *Handler) deviceReplay(responseWriter http.ResponseWriter, request *http.Request, clientIP string) {

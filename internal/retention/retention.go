@@ -109,7 +109,7 @@ func Prune(ctx context.Context, store *db.Store, days int, compact bool) (Result
 		store.ReportActivityWriteFailure(err)
 		return Result{}, err
 	}
-	if _, err := store.DB.ExecContext(ctx, `DELETE FROM notification_states WHERE event_key <> '*' AND datetime(updated_at) < datetime(?)`, cutoff.Format(time.RFC3339)); err != nil {
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM notification_states WHERE event_key <> '*' AND updated_at < ?`, cutoff.Format(time.RFC3339)); err != nil {
 		store.ReportActivityWriteFailure(err)
 		return Result{}, err
 	}

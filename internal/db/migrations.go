@@ -21,7 +21,7 @@ const (
 	// CurrentSchemaVersion is the highest SQLite schema version understood by
 	// this Faro release. It is deliberately independent of the application
 	// version so a future release can make multiple schema changes safely.
-	CurrentSchemaVersion = 9
+	CurrentSchemaVersion = 12
 
 	upgradeStateFilename = "faro-upgrade.json"
 	migrationBackupDir   = "migrations"
@@ -149,6 +149,45 @@ var migrationDefinitions = []migrationDefinition{
 	}},
 	{version: 9, name: "history-query-indexes", apply: func(ctx context.Context, store *Store) error {
 		return store.ensureHistoryIndexes(ctx)
+	}},
+	{version: 10, name: "history-query-performance", apply: func(ctx context.Context, store *Store) error {
+		if err := store.ensureHistoryIndexes(ctx); err != nil {
+			return err
+		}
+		if err := store.normalizeTimestampFormats(ctx); err != nil {
+			return err
+		}
+		_, err := store.DB.ExecContext(ctx, `UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'database_schema_version'`, strconv.Itoa(CurrentSchemaVersion))
+		return err
+	}},
+	{version: 11, name: "time-aware-protection", apply: func(ctx context.Context, store *Store) error {
+		for _, statement := range []string{
+			`ALTER TABLE protection_profiles ADD COLUMN paused_until TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE protection_profiles ADD COLUMN schedule_enabled INTEGER NOT NULL DEFAULT 0 CHECK(schedule_enabled IN (0, 1))`,
+			`ALTER TABLE protection_profiles ADD COLUMN schedule_days TEXT NOT NULL DEFAULT '1,2,3,4,5,6,7'`,
+			`ALTER TABLE protection_profiles ADD COLUMN schedule_start TEXT NOT NULL DEFAULT '00:00'`,
+			`ALTER TABLE protection_profiles ADD COLUMN schedule_end TEXT NOT NULL DEFAULT '23:59'`,
+			`ALTER TABLE protection_profiles ADD COLUMN schedule_timezone TEXT NOT NULL DEFAULT 'UTC'`,
+		} {
+			if err := addColumnIfMissing(ctx, store.DB, statement); err != nil {
+				return err
+			}
+		}
+		_, err := store.DB.ExecContext(ctx, `
+			CREATE TABLE IF NOT EXISTS device_dns_pauses (
+				device_id INTEGER PRIMARY KEY,
+				paused_until TEXT NOT NULL,
+				created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+				FOREIGN KEY(device_id) REFERENCES devices(id) ON DELETE CASCADE
+			);
+			CREATE INDEX IF NOT EXISTS idx_device_dns_pauses_until ON device_dns_pauses(paused_until);
+			UPDATE settings SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE key = 'database_schema_version';
+		`, strconv.Itoa(CurrentSchemaVersion))
+		return err
+	}},
+	{version: 12, name: "blocklist-source-mirror", apply: func(ctx context.Context, store *Store) error {
+		return store.migrateBlocklistSources(ctx)
 	}},
 }
 

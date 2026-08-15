@@ -22,6 +22,7 @@ import {
   Lightbulb,
   PawPrint,
   Printer,
+  Play,
   Router,
   Search,
   Server,
@@ -33,6 +34,7 @@ import {
   Sun,
   Tablet,
   Tv,
+  WifiOff,
   X
 } from "lucide-react";
 import { rowSortingFeature, tableFeatures, useTable } from "@tanstack/react-table";
@@ -605,6 +607,8 @@ function DeviceOverview({ detail, form, setForm, editing, saving, saveAlias, onD
         </form>
       )}
 
+      <DeviceDNSPause detail={detail} />
+
       <section className="device-overview-story">
         <span className={`device-story-icon ${detail.blocked_queries_today > 0 ? "blocked" : "healthy"}`}><ShieldCheck size={21} /></span>
         <div><small>Today at a glance</small><h3>{story.headline}</h3><p>{story.detail}</p></div>
@@ -685,6 +689,35 @@ function DeviceOverview({ detail, form, setForm, editing, saving, saveAlias, onD
     </div>
   );
 }
+
+function DeviceDNSPause({ detail }: { readonly detail: DeviceSummary }) {
+  const [pausedUntil, setPausedUntil] = useState(detail.dns_paused ? detail.dns_paused_until ?? null : null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const paused = Boolean(pausedUntil && new Date(pausedUntil).getTime() > Date.now());
+
+  async function update(preset: "5m" | "1h" | "tomorrow" | "resume") {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.pauseDeviceDNS(detail.client_ip, pauseDeviceUntil(preset));
+      setPausedUntil(result.paused_until ?? null);
+    } catch (error_) {
+      setError(error_ instanceof Error ? error_.message : "Could not change this device's DNS pause.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <section className={`device-dns-pause ${paused ? "paused" : ""}`}>
+    <span className="device-dns-pause-icon">{paused ? <WifiOff size={19} /> : <ShieldCheck size={19} />}</span>
+    <div><small>DEVICE INTERNET PAUSE</small><strong>{paused ? `Internet access paused until ${formatDevicePause(pausedUntil)}` : "Internet access is on"}</strong><p>{paused ? "Faro is blocking DNS for this device, so most websites and apps cannot make new connections. Existing connections may continue briefly." : "Pause most new website and app connections for this device. This is stronger than turning off domain blocking."}</p>{error && <em>{error}</em>}</div>
+    <div>{paused ? <button type="button" disabled={busy} onClick={() => void update("resume")}><Play size={14} />Restore internet access</button> : <><button className="secondary" type="button" disabled={busy} onClick={() => void update("5m")}>Pause 5 min</button><button className="secondary" type="button" disabled={busy} onClick={() => void update("1h")}>Pause 1 hour</button><button className="secondary" type="button" disabled={busy} onClick={() => void update("tomorrow")}>Pause until tomorrow</button></>}</div>
+  </section>;
+}
+
+function pauseDeviceUntil(preset: "5m" | "1h" | "tomorrow" | "resume") { if (preset === "resume") return ""; const until = new Date(); if (preset === "5m") until.setMinutes(until.getMinutes() + 5); else if (preset === "1h") until.setHours(until.getHours() + 1); else { until.setDate(until.getDate() + 1); until.setHours(7, 0, 0, 0); } return until.toISOString(); }
+function formatDevicePause(value: string | null) { return value ? new Intl.DateTimeFormat(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" }).format(new Date(value)) : "later"; }
 
 function OverviewKpi({ icon, label, value, detail, tone = "default", compact = false }: {
   readonly icon: ReactNode;

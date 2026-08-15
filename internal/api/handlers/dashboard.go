@@ -14,61 +14,86 @@ import (
 	"github.com/derek/faro/internal/upstreamhealth"
 )
 
+const dashboardCacheTTL = 5 * time.Second
+
+type dashboardCacheEntry struct {
+	key       string
+	payload   map[string]any
+	expiresAt time.Time
+}
+
+func (handler *Handler) cachedDashboard(key string) (map[string]any, bool) {
+	handler.dashboardMu.Lock()
+	defer handler.dashboardMu.Unlock()
+	if handler.dashboardCache.payload == nil || handler.dashboardCache.key != key || time.Now().After(handler.dashboardCache.expiresAt) {
+		return nil, false
+	}
+	return handler.dashboardCache.payload, true
+}
+
+func (handler *Handler) rememberDashboard(key string, payload map[string]any) {
+	handler.dashboardMu.Lock()
+	handler.dashboardCache = dashboardCacheEntry{key: key, payload: payload, expiresAt: time.Now().Add(dashboardCacheTTL)}
+	handler.dashboardMu.Unlock()
+}
+
 func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
 		methodNotAllowed(responseWriter)
 		return
 	}
 	start := todayStart(request)
-	total := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ?`, start)
-	blocked := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ? AND action = 'blocked'`, start)
-	enabledBlocklists := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM blocklists WHERE enabled = 1`)
-	blockEntries := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM blocklist_entries`)
+	if payload, ok := handler.cachedDashboard(start); ok {
+		writeJSON(responseWriter, http.StatusOK, payload)
+		return
+	}
+	traffic := dashboardTrafficSummary(request.Context(), handler.store.DB, start)
+	counts := dashboardCountsSummary(request.Context(), handler.store.DB, start)
+	settings := dashboardSettingsSummary(request.Context(), handler.store.DB)
+	total := traffic.total
+	blocked := traffic.blocked
 	topClients := grouped(request.Context(), handler.store.DB, `SELECT client_ip, COUNT(*) FROM dns_queries WHERE timestamp >= ? GROUP BY client_ip ORDER BY COUNT(*) DESC LIMIT 5`, start)
 	topBlocked := grouped(request.Context(), handler.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? AND action = 'blocked' GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start)
-	deviceCount := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(DISTINCT client_ip) FROM dns_queries`)
-	reloadFailures := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM events WHERE type = 'dns.reload_failed' AND timestamp >= ?`, start)
-	cacheHits := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ? AND source = 'cache'`, start)
-	upstreamQueries := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE timestamp >= ? AND source = 'upstream'`, start)
-	cacheLatency := scalarFloat(request.Context(), handler.store.DB, `SELECT COALESCE(AVG(latency_ms), 0) FROM dns_queries WHERE timestamp >= ? AND source = 'cache'`, start)
-	upstreamLatency := scalarFloat(request.Context(), handler.store.DB, `SELECT COALESCE(AVG(latency_ms), 0) FROM dns_queries WHERE timestamp >= ? AND source = 'upstream'`, start)
 	liveCache := handler.coreDNSCacheMetrics(request.Context())
 	upstreamSnapshot := upstreamhealth.Snapshot{Status: "unknown", Summary: "Upstream health has not been checked yet.", Items: make([]upstreamhealth.Probe, 0)}
 	if handler.upstreams != nil {
 		upstreamSnapshot = handler.upstreams.Snapshot()
 	}
 
-	writeJSON(responseWriter, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"total_queries_today":   total,
 		"blocked_queries_today": blocked,
 		"block_percentage":      percentage(blocked, total),
-		"enabled_blocklists":    enabledBlocklists,
-		"blocklist_entries":     blockEntries,
+		"enabled_blocklists":    counts.enabledBlocklists,
+		"blocklist_entries":     counts.blockEntries,
 		"cache": map[string]any{
-			"enabled":                     settingValue(request.Context(), handler.store.DB, "dns_cache_enabled") != "false",
+			"enabled":                     settings.cacheEnabled != "false",
 			"metrics_available":           liveCache.available,
 			"entries":                     liveCache.entries,
 			"hits_since_restart":          liveCache.hits,
 			"requests_since_restart":      liveCache.requests,
 			"hit_rate_since_restart":      percentage64(liveCache.hits, liveCache.requests),
-			"hits_today":                  cacheHits,
-			"upstream_queries_today":      upstreamQueries,
-			"hit_rate_today":              percentage(cacheHits, cacheHits+upstreamQueries),
-			"average_cache_latency_ms":    cacheLatency,
-			"average_upstream_latency_ms": upstreamLatency,
+			"hits_today":                  traffic.cacheHits,
+			"upstream_queries_today":      traffic.upstreamQueries,
+			"hit_rate_today":              percentage(traffic.cacheHits, traffic.cacheHits+traffic.upstreamQueries),
+			"average_cache_latency_ms":    traffic.cacheLatency,
+			"average_upstream_latency_ms": traffic.upstreamLatency,
 		},
 		"network_summary": networkSummary(request.Context(), handler.store.DB, networkSummaryInput{
-			start: start, blocked: blocked, topClients: topClients, topBlocked: topBlocked,
+			start: start, blocked: blocked, newDevices: counts.newDevices, newDevicesKnown: true, topClients: topClients, topBlocked: topBlocked,
 			upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available,
 		}),
 		"health_cards": healthCards(request.Context(), handler.store.DB, healthCardsInput{
-			total: total, blocked: blocked, enabledBlocklists: enabledBlocklists, blockEntries: blockEntries,
-			deviceCount: deviceCount, reloadFailures: reloadFailures, upstreams: upstreamSnapshot,
+			total: total, blocked: blocked, enabledBlocklists: counts.enabledBlocklists, blockEntries: counts.blockEntries,
+			deviceCount: counts.deviceCount, reloadFailures: counts.reloadFailures,
+			cacheAnswers: traffic.cacheHits, forwardedAnswers: traffic.upstreamQueries,
+			trafficCountsKnown:  true,
+			upstreams:           upstreamSnapshot,
 			dnsMetricsAvailable: liveCache.available,
 		}),
 		"stories": dashboardStories(request.Context(), handler.store.DB, dashboardStoriesInput{
-			start: start, blocked: blocked, topClients: topClients, topBlocked: topBlocked,
-			reloadFailures: reloadFailures, upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available,
+			start: start, blocked: blocked, newDevices: counts.newDevices, newDevicesKnown: true, topClients: topClients, topBlocked: topBlocked,
+			reloadFailures: counts.reloadFailures, upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available,
 		}),
 		"whats_new":                whatsNew(request.Context(), handler.store.DB, start),
 		"sparklines":               dashboardSparklines(request.Context(), handler.store.DB),
@@ -80,8 +105,74 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 		"upstream_health_status":   upstreamSnapshot.Status,
 		"upstream_checked_at":      upstreamSnapshot.CheckedAt,
 		"upstream_probes":          upstreamSnapshot.Items,
-		"favicon_fetching_enabled": settingValue(request.Context(), handler.store.DB, "favicon_fetching_enabled"),
-	})
+		"favicon_fetching_enabled": settings.faviconFetchingEnabled,
+	}
+	handler.rememberDashboard(start, payload)
+	writeJSON(responseWriter, http.StatusOK, payload)
+}
+
+type dashboardTraffic struct {
+	total, blocked, cacheHits, upstreamQueries int
+	cacheLatency, upstreamLatency              float64
+}
+
+func dashboardTrafficSummary(ctx context.Context, database *sql.DB, start string) dashboardTraffic {
+	var traffic dashboardTraffic
+	_ = database.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*),
+			COALESCE(SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN source = 'cache' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN source = 'upstream' THEN 1 ELSE 0 END), 0),
+			COALESCE(AVG(CASE WHEN source = 'cache' THEN latency_ms END), 0),
+			COALESCE(AVG(CASE WHEN source = 'upstream' THEN latency_ms END), 0)
+		FROM dns_queries
+		WHERE timestamp >= ?
+	`, start).Scan(
+		&traffic.total, &traffic.blocked, &traffic.cacheHits, &traffic.upstreamQueries,
+		&traffic.cacheLatency, &traffic.upstreamLatency,
+	)
+	traffic.cacheLatency = roundedFloat(traffic.cacheLatency)
+	traffic.upstreamLatency = roundedFloat(traffic.upstreamLatency)
+	return traffic
+}
+
+type dashboardCounts struct {
+	enabledBlocklists, blockEntries, deviceCount, reloadFailures, newDevices int
+}
+
+func dashboardCountsSummary(ctx context.Context, database *sql.DB, start string) dashboardCounts {
+	var counts dashboardCounts
+	_ = database.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM blocklists WHERE enabled = 1),
+			(SELECT COUNT(*) FROM blocklist_entries),
+			(SELECT COUNT(*) FROM devices),
+			(SELECT COUNT(*) FROM events WHERE type = 'dns.reload_failed' AND timestamp >= ?),
+			(SELECT COUNT(*) FROM devices WHERE first_seen_at >= ?)
+	`, start, start).Scan(
+		&counts.enabledBlocklists, &counts.blockEntries, &counts.deviceCount,
+		&counts.reloadFailures, &counts.newDevices,
+	)
+	return counts
+}
+
+type dashboardSettings struct {
+	cacheEnabled, faviconFetchingEnabled string
+}
+
+func dashboardSettingsSummary(ctx context.Context, database *sql.DB) dashboardSettings {
+	var settings dashboardSettings
+	_ = database.QueryRowContext(ctx, `
+		SELECT
+			COALESCE((SELECT value FROM settings WHERE key = 'dns_cache_enabled'), ''),
+			COALESCE((SELECT value FROM settings WHERE key = 'favicon_fetching_enabled'), '')
+	`).Scan(&settings.cacheEnabled, &settings.faviconFetchingEnabled)
+	return settings
+}
+
+func roundedFloat(value float64) float64 {
+	return float64(int(value*100+0.5)) / 100
 }
 
 type cacheMetrics struct {
@@ -145,6 +236,8 @@ func (handler *Handler) coreDNSCacheMetrics(ctx context.Context) cacheMetrics {
 type networkSummaryInput struct {
 	start               string
 	blocked             int
+	newDevices          int
+	newDevicesKnown     bool
 	topClients          []map[string]any
 	topBlocked          []map[string]any
 	upstreams           upstreamhealth.Snapshot
@@ -154,20 +247,23 @@ type networkSummaryInput struct {
 func networkSummary(ctx context.Context, database *sql.DB, input networkSummaryInput) map[string]any {
 	headline, messages := networkHeadline(input.blocked, input.upstreams, input.dnsMetricsAvailable)
 	messages = appendNetworkHighlights(messages, input.topClients, input.topBlocked)
-	newDevices := scalarInt(ctx, database, `
-		SELECT COUNT(*) FROM (
-			SELECT client_ip, MIN(timestamp) AS first_seen
-			FROM dns_queries
-			GROUP BY client_ip
-			HAVING first_seen >= ?
-		)
-	`, input.start)
+	newDevices := input.newDevices
+	if !input.newDevicesKnown {
+		newDevices = scalarInt(ctx, database, `
+			SELECT COUNT(*) FROM (
+				SELECT client_ip, MIN(timestamp) AS first_seen
+				FROM dns_queries
+				GROUP BY client_ip
+				HAVING first_seen >= ?
+			)
+		`, input.start)
+	}
 	if newDevices == 0 {
 		messages = append(messages, "No new devices seen today.")
-	} else if newDevices == 1 {
+	} else if input.newDevices == 1 {
 		messages = append(messages, "1 new device seen today.")
 	} else {
-		messages = append(messages, fmt.Sprintf("%d new devices seen today.", newDevices))
+		messages = append(messages, fmt.Sprintf("%d new devices seen today.", input.newDevices))
 	}
 	return map[string]any{"headline": headline, "messages": messages}
 }
@@ -218,6 +314,8 @@ func firstLabel(items []map[string]any) string {
 type dashboardStoriesInput struct {
 	start               string
 	blocked             int
+	newDevices          int
+	newDevicesKnown     bool
 	topClients          []map[string]any
 	topBlocked          []map[string]any
 	reloadFailures      int
@@ -238,12 +336,15 @@ func dashboardStories(ctx context.Context, database *sql.DB, input dashboardStor
 	} else {
 		stories = append(stories, story("DNS needs attention.", fmt.Sprintf("%d reload failures detected today.", input.reloadFailures), "critical"))
 	}
-	newDevices := scalarInt(ctx, database, `SELECT COUNT(*) FROM (SELECT client_ip, MIN(timestamp) first_seen FROM dns_queries GROUP BY client_ip HAVING first_seen >= ?)`, input.start)
+	newDevices := input.newDevices
+	if !input.newDevicesKnown {
+		newDevices = scalarInt(ctx, database, `SELECT COUNT(*) FROM (SELECT client_ip, MIN(timestamp) first_seen FROM dns_queries GROUP BY client_ip HAVING first_seen >= ?)`, input.start)
+	}
 	if newDevices > 0 {
-		stories = append(stories, story(fmt.Sprintf("%d new devices joined today.", newDevices), "New clients are now visible in Devices.", "info"))
+		stories = append(stories, story(countedStory(newDevices, "new device joined today.", "new devices joined today."), "New clients are now visible in Devices.", "info"))
 	}
 	if input.blocked > 0 {
-		stories = append(stories, story(fmt.Sprintf("Filtering blocked %d requests today.", input.blocked), firstLabelSentence("Most blocked domain", input.topBlocked), "warning"))
+		stories = append(stories, story("Filtering blocked "+countedStory(input.blocked, "request today.", "requests today."), firstLabelSentence("Most blocked domain", input.topBlocked), "warning"))
 	}
 	if len(input.topClients) > 0 {
 		stories = append(stories, story("Busiest device today.", firstLabelSentence("Top active device", input.topClients), "info"))
@@ -253,6 +354,14 @@ func dashboardStories(ctx context.Context, database *sql.DB, input dashboardStor
 
 func story(title, body, tone string) map[string]any {
 	return map[string]any{"title": title, "body": body, "tone": tone}
+}
+
+func countedStory(count int, singular, plural string) string {
+	label := plural
+	if count == 1 {
+		label = singular
+	}
+	return fmt.Sprintf("%d %s", count, label)
 }
 
 func firstLabelSentence(prefix string, items []map[string]any) string {
@@ -273,13 +382,19 @@ type healthCardsInput struct {
 	blockEntries        int
 	deviceCount         int
 	reloadFailures      int
+	cacheAnswers        int
+	forwardedAnswers    int
+	trafficCountsKnown  bool
 	upstreams           upstreamhealth.Snapshot
 	dnsMetricsAvailable bool
 }
 
 func healthCards(ctx context.Context, database *sql.DB, input healthCardsInput) []map[string]any {
-	cacheAnswers := scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'cache'`)
-	forwardedAnswers := scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'upstream'`)
+	cacheAnswers, forwardedAnswers := input.cacheAnswers, input.forwardedAnswers
+	if !input.trafficCountsKnown {
+		cacheAnswers = scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'cache'`)
+		forwardedAnswers = scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'upstream'`)
+	}
 	return []map[string]any{
 		dnsHealthCard(input.dnsMetricsAvailable, input.reloadFailures),
 		upstreamHealthCard(input.upstreams),
@@ -326,40 +441,50 @@ func upstreamHealthCard(snapshot upstreamhealth.Snapshot) map[string]any {
 
 func whatsNew(ctx context.Context, database *sql.DB, start string) map[string]any {
 	return map[string]any{
-		"devices":       searchRows(ctx, database, `SELECT client_ip AS label, 'First seen today' AS subtitle FROM (SELECT client_ip, MIN(timestamp) first_seen FROM dns_queries GROUP BY client_ip HAVING first_seen >= ?) LIMIT 5`, start),
-		"domains":       searchRows(ctx, database, `SELECT domain AS label, 'First time observed' AS subtitle FROM (SELECT domain, MIN(timestamp) first_seen FROM dns_queries GROUP BY domain HAVING first_seen >= ?) LIMIT 5`, start),
+		"devices":       searchRows(ctx, database, `SELECT address AS label, 'First seen today' AS subtitle FROM device_addresses WHERE first_seen_at >= ? ORDER BY first_seen_at DESC, id DESC LIMIT 5`, start),
+		"domains":       searchRows(ctx, database, `SELECT q.domain AS label, 'First time observed' AS subtitle FROM dns_queries q WHERE q.timestamp >= ? AND NOT EXISTS (SELECT 1 FROM dns_queries prior WHERE prior.domain = q.domain AND prior.timestamp < ?) GROUP BY q.domain ORDER BY MIN(q.timestamp) DESC LIMIT 5`, start, start),
 		"blocklists":    searchRows(ctx, database, `SELECT name AS label, 'Installed today' AS subtitle FROM blocklists WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5`, start),
 		"local_records": searchRows(ctx, database, `SELECT hostname AS label, 'Local DNS record' AS subtitle FROM dns_records WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5`, start),
 	}
 }
 
 func dashboardSparklines(ctx context.Context, database *sql.DB) map[string]any {
+	activity, blocked := hourlyActivityCounts(ctx, database)
 	return map[string]any{
-		"activity": hourlyCounts(ctx, database, `SELECT strftime('%H', timestamp) AS hour, COUNT(*) FROM dns_queries WHERE timestamp >= datetime('now', '-24 hours') GROUP BY hour`),
-		"blocked":  hourlyCounts(ctx, database, `SELECT strftime('%H', timestamp) AS hour, COUNT(*) FROM dns_queries WHERE timestamp >= datetime('now', '-24 hours') AND action = 'blocked' GROUP BY hour`),
+		"activity": activity,
+		"blocked":  blocked,
 	}
 }
 
-func hourlyCounts(ctx context.Context, database *sql.DB, query string) []int {
-	values := make([]int, 24)
-	rows, err := database.QueryContext(ctx, query)
+func hourlyActivityCounts(ctx context.Context, database *sql.DB) ([]int, []int) {
+	activity, blocked := make([]int, 24), make([]int, 24)
+	cutoff := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	rows, err := database.QueryContext(ctx, `
+		SELECT strftime('%H', timestamp) AS hour,
+		       COUNT(*),
+		       COALESCE(SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END), 0)
+		FROM dns_queries
+		WHERE timestamp >= ?
+		GROUP BY hour
+	`, cutoff)
 	if err != nil {
-		return values
+		return activity, blocked
 	}
 	defer closeRows(rows)
 	nowHour := time.Now().UTC().Hour()
 	for rows.Next() {
 		var hourText string
-		var count int
-		if err := rows.Scan(&hourText, &count); err != nil {
-			return values
+		var count, blockedCount int
+		if err := rows.Scan(&hourText, &count, &blockedCount); err != nil {
+			return activity, blocked
 		}
 		hour, err := strconv.Atoi(hourText)
 		if err != nil {
 			continue
 		}
 		index := (hour - nowHour + 23 + 24) % 24
-		values[index] = count
+		activity[index] = count
+		blocked[index] = blockedCount
 	}
-	return values
+	return activity, blocked
 }

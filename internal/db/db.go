@@ -13,6 +13,8 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+const sqlitePoolSize = 4
+
 type Store struct {
 	DB               *sql.DB
 	Path             string
@@ -26,11 +28,11 @@ func Open(path string) (*Store, error) {
 	if err := recoverInterruptedMigration(path); err != nil {
 		return nil, err
 	}
-	database, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000")
+	database, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000&_cache_size=-20000")
 	if err != nil {
 		return nil, err
 	}
-	database.SetMaxOpenConns(1)
+	configureSQLitePool(database)
 
 	store := &Store{
 		DB:               database,
@@ -52,11 +54,11 @@ func Open(path string) (*Store, error) {
 // work. Runtime services that only need to observe accepted configuration use
 // this so they cannot become an independent control plane.
 func OpenReadOnly(path string) (*Store, error) {
-	database, err := sql.Open("sqlite3", path+"?mode=ro&_query_only=1&_foreign_keys=on&_busy_timeout=5000")
+	database, err := sql.Open("sqlite3", path+"?mode=ro&_query_only=1&_foreign_keys=on&_busy_timeout=5000&_cache_size=-20000")
 	if err != nil {
 		return nil, err
 	}
-	database.SetMaxOpenConns(1)
+	configureSQLitePool(database)
 	if err := database.PingContext(context.Background()); err != nil {
 		_ = database.Close()
 		return nil, err
@@ -70,6 +72,15 @@ func OpenReadOnly(path string) (*Store, error) {
 
 func (store *Store) Close() error {
 	return store.DB.Close()
+}
+
+// SQLite serializes writers, but WAL mode allows readers to proceed while a
+// write is in progress. Keeping a small pool prevents dashboard/activity reads
+// from queueing behind the query-log writer while avoiding an unbounded number
+// of SQLite connections on small appliances.
+func configureSQLitePool(database *sql.DB) {
+	database.SetMaxOpenConns(sqlitePoolSize)
+	database.SetMaxIdleConns(sqlitePoolSize)
 }
 
 func (store *Store) ensureSchema(ctx context.Context) error {
@@ -405,8 +416,39 @@ func (store *Store) ensureHistoryIndexes(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_domain_timestamp ON dns_queries(domain, timestamp);`,
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_activity_order ON dns_queries(julianday(timestamp) DESC, id DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_dns_queries_retention ON dns_queries(datetime(timestamp), id);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_queries_domain_action_timestamp ON dns_queries(domain, action, timestamp);`,
+		`CREATE INDEX IF NOT EXISTS idx_blocklists_enabled ON blocklists(enabled);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_records_value_type_hostname ON dns_records(value, type, hostname);`,
+		`CREATE INDEX IF NOT EXISTS idx_dns_records_created_at ON dns_records(created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_devices_first_seen ON devices(first_seen_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_device_addresses_device_last_seen_id ON device_addresses(device_id, last_seen_at DESC, id DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_device_addresses_first_seen ON device_addresses(first_seen_at DESC, id DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_device_names_source_device ON device_names(source, device_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_protection_blocklists_blocklist ON protection_blocklists(blocklist_id, protection_id);`,
 		`CREATE INDEX IF NOT EXISTS idx_events_activity_order ON events(julianday(timestamp) DESC, id DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_events_retention ON events(datetime(timestamp), id);`,
+		`CREATE INDEX IF NOT EXISTS idx_events_type_timestamp ON events(type, timestamp);`,
+	} {
+		if _, err := store.DB.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (store *Store) normalizeTimestampFormats(ctx context.Context) error {
+	for _, statement := range []string{
+		`UPDATE events SET
+			timestamp = replace(timestamp, ' ', 'T') || CASE WHEN substr(timestamp, -1) = 'Z' THEN '' ELSE 'Z' END
+		WHERE instr(timestamp, ' ') > 0`,
+		`UPDATE devices SET
+			first_seen_at = replace(first_seen_at, ' ', 'T') || CASE WHEN substr(first_seen_at, -1) = 'Z' THEN '' ELSE 'Z' END,
+			last_seen_at = replace(last_seen_at, ' ', 'T') || CASE WHEN substr(last_seen_at, -1) = 'Z' THEN '' ELSE 'Z' END
+		WHERE first_seen_at IS NOT NULL AND instr(first_seen_at, ' ') > 0`,
+		`UPDATE device_addresses SET
+			first_seen_at = replace(first_seen_at, ' ', 'T') || CASE WHEN substr(first_seen_at, -1) = 'Z' THEN '' ELSE 'Z' END,
+			last_seen_at = replace(last_seen_at, ' ', 'T') || CASE WHEN substr(last_seen_at, -1) = 'Z' THEN '' ELSE 'Z' END
+		WHERE instr(first_seen_at, ' ') > 0`,
 	} {
 		if _, err := store.DB.ExecContext(ctx, statement); err != nil {
 			return err
@@ -587,30 +629,59 @@ type blocklistSourceMigration struct {
 	to   string
 }
 
+const (
+	hageziGitHubBaseURL = "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/"
+	hageziMirrorBaseURL = "https://gitlab.com/hagezi/mirror/-/raw/main/dns-blocklists/"
+)
+
 var movedBlocklistSources = []blocklistSourceMigration{
 	{
-		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/pro.txt",
-		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt",
+		from: hageziGitHubBaseURL + "hosts/pro.txt",
+		to:   hageziMirrorBaseURL + "adblock/pro.txt",
 	},
 	{
-		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/light.txt",
-		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/light.txt",
+		from: hageziGitHubBaseURL + "hosts/light.txt",
+		to:   hageziMirrorBaseURL + "adblock/light.txt",
 	},
 	{
-		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/multi.txt",
-		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/multi.txt",
+		from: hageziGitHubBaseURL + "hosts/multi.txt",
+		to:   hageziMirrorBaseURL + "adblock/multi.txt",
 	},
 	{
-		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/pro.plus.txt",
-		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.plus.txt",
+		from: hageziGitHubBaseURL + "hosts/pro.plus.txt",
+		to:   hageziMirrorBaseURL + "adblock/pro.plus.txt",
 	},
 	{
-		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/ultimate.txt",
-		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/ultimate.txt",
+		from: hageziGitHubBaseURL + "hosts/ultimate.txt",
+		to:   hageziMirrorBaseURL + "adblock/ultimate.txt",
 	},
 	{
-		from: "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/tif.txt",
-		to:   "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/tif.txt",
+		from: hageziGitHubBaseURL + "hosts/tif.txt",
+		to:   hageziMirrorBaseURL + "adblock/tif.txt",
+	},
+	{
+		from: hageziGitHubBaseURL + "adblock/pro.txt",
+		to:   hageziMirrorBaseURL + "adblock/pro.txt",
+	},
+	{
+		from: hageziGitHubBaseURL + "adblock/light.txt",
+		to:   hageziMirrorBaseURL + "adblock/light.txt",
+	},
+	{
+		from: hageziGitHubBaseURL + "adblock/multi.txt",
+		to:   hageziMirrorBaseURL + "adblock/multi.txt",
+	},
+	{
+		from: hageziGitHubBaseURL + "adblock/pro.plus.txt",
+		to:   hageziMirrorBaseURL + "adblock/pro.plus.txt",
+	},
+	{
+		from: hageziGitHubBaseURL + "adblock/ultimate.txt",
+		to:   hageziMirrorBaseURL + "adblock/ultimate.txt",
+	},
+	{
+		from: hageziGitHubBaseURL + "adblock/tif.txt",
+		to:   hageziMirrorBaseURL + "adblock/tif.txt",
 	},
 }
 
@@ -622,6 +693,20 @@ func (store *Store) migrateBlocklistSources(ctx context.Context) error {
 			WHERE url = ?`, migration.to, migration.from); err != nil {
 			return err
 		}
+	}
+	if _, err := store.DB.ExecContext(ctx, `
+		UPDATE blocklists
+		SET url = ? || substr(url, ?), updated_at = CURRENT_TIMESTAMP
+		WHERE url LIKE ? || 'hosts/%'`,
+		hageziMirrorBaseURL+"adblock/", len(hageziGitHubBaseURL+"hosts/")+1, hageziGitHubBaseURL); err != nil {
+		return err
+	}
+	if _, err := store.DB.ExecContext(ctx, `
+		UPDATE blocklists
+		SET url = ? || substr(url, ?), updated_at = CURRENT_TIMESTAMP
+		WHERE url LIKE ? || '%'`,
+		hageziMirrorBaseURL, len(hageziGitHubBaseURL)+1, hageziGitHubBaseURL); err != nil {
+		return err
 	}
 	return nil
 }
@@ -747,7 +832,7 @@ func (store *Store) seedDemoQueries(ctx context.Context) error {
 		{"192.168.7.55", "tracker.example.net", "AAAA", "blocked", "blocklist", 0.7},
 	}
 	for _, seedQuery := range seed {
-		if _, err := store.DB.ExecContext(ctx, `INSERT INTO dns_queries(timestamp, client_ip, domain, query_type, action, source, latency_ms) VALUES(datetime('now'), ?, ?, ?, ?, ?, ?)`,
+		if _, err := store.DB.ExecContext(ctx, `INSERT INTO dns_queries(timestamp, client_ip, domain, query_type, action, source, latency_ms) VALUES(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?, ?, ?, ?, ?)`,
 			seedQuery.client, seedQuery.domain, seedQuery.qtype, seedQuery.action, seedQuery.source, seedQuery.latency); err != nil {
 			return err
 		}

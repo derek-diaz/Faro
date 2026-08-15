@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/derek/faro/internal/db"
 	faroversion "github.com/derek/faro/internal/version"
@@ -419,6 +420,38 @@ func TestProtectionLifecycle(t *testing.T) {
 	}
 	if reloader.calls != 2 {
 		t.Fatalf("reload calls=%d want 2", reloader.calls)
+	}
+}
+
+func TestProtectionPauseLifecycle(t *testing.T) {
+	handler, reloader := newTestServer(t)
+	list := httptest.NewRecorder()
+	handler.ServeHTTP(list, httptest.NewRequest(http.MethodGet, "/api/protections", nil))
+	var protections []struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(list.Body.Bytes(), &protections); err != nil || len(protections) == 0 {
+		t.Fatalf("read protections: %s", list.Body.String())
+	}
+	until := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	pause := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/protections/%d/pause", protections[0].ID), bytes.NewBufferString(fmt.Sprintf(`{"until":%q}`, until)))
+	pause.Header.Set("Content-Type", "application/json")
+	paused := httptest.NewRecorder()
+	handler.ServeHTTP(paused, pause)
+	if paused.Code != http.StatusOK {
+		t.Fatalf("pause protection: status=%d body=%s", paused.Code, paused.Body.String())
+	}
+	read := httptest.NewRecorder()
+	handler.ServeHTTP(read, httptest.NewRequest(http.MethodGet, "/api/protections", nil))
+	if !bytes.Contains(read.Body.Bytes(), []byte(`"state":"paused"`)) || !bytes.Contains(read.Body.Bytes(), []byte(`"is_active":false`)) {
+		t.Fatalf("paused state missing: %s", read.Body.String())
+	}
+	resume := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/protections/%d/pause", protections[0].ID), bytes.NewBufferString(`{"until":""}`))
+	resume.Header.Set("Content-Type", "application/json")
+	resumed := httptest.NewRecorder()
+	handler.ServeHTTP(resumed, resume)
+	if resumed.Code != http.StatusOK || reloader.calls != 2 {
+		t.Fatalf("resume protection: status=%d reloads=%d body=%s", resumed.Code, reloader.calls, resumed.Body.String())
 	}
 }
 

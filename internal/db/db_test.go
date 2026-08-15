@@ -102,6 +102,9 @@ func TestBlocklistSourceMigrationUpdatesMovedHageziURLs(t *testing.T) {
 	if _, err := store.DB.Exec(`
 		INSERT INTO blocklists(name, url) VALUES
 			('Pro', 'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/pro.txt'),
+			('Current Pro', 'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt'),
+			('Legacy Host', 'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/hosts/legacy.txt'),
+			('Wildcard', 'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/fake-onlydomains.txt'),
 			('Custom', 'https://example.test/custom.txt')`); err != nil {
 		t.Fatal(err)
 	}
@@ -109,15 +112,33 @@ func TestBlocklistSourceMigrationUpdatesMovedHageziURLs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var migrated, custom string
+	var migrated, migratedCurrent, migratedLegacyHost, migratedWildcard, custom string
 	if err := store.DB.QueryRow(`SELECT url FROM blocklists WHERE name = 'Pro'`).Scan(&migrated); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.QueryRow(`SELECT url FROM blocklists WHERE name = 'Current Pro'`).Scan(&migratedCurrent); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.QueryRow(`SELECT url FROM blocklists WHERE name = 'Legacy Host'`).Scan(&migratedLegacyHost); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.QueryRow(`SELECT url FROM blocklists WHERE name = 'Wildcard'`).Scan(&migratedWildcard); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.DB.QueryRow(`SELECT url FROM blocklists WHERE name = 'Custom'`).Scan(&custom); err != nil {
 		t.Fatal(err)
 	}
-	if migrated != "https://raw.githubusercontent.com/hagezi/dns-blocklists/main/adblock/pro.txt" {
+	if migrated != hageziMirrorBaseURL+"adblock/pro.txt" {
 		t.Fatalf("migrated URL = %q", migrated)
+	}
+	if migratedCurrent != hageziMirrorBaseURL+"adblock/pro.txt" {
+		t.Fatalf("current migrated URL = %q", migratedCurrent)
+	}
+	if migratedLegacyHost != hageziMirrorBaseURL+"adblock/legacy.txt" {
+		t.Fatalf("legacy host migrated URL = %q", migratedLegacyHost)
+	}
+	if migratedWildcard != hageziMirrorBaseURL+"wildcard/fake-onlydomains.txt" {
+		t.Fatalf("wildcard migrated URL = %q", migratedWildcard)
 	}
 	if custom != "https://example.test/custom.txt" {
 		t.Fatalf("custom URL changed to %q", custom)

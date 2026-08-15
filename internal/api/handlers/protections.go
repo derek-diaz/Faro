@@ -9,10 +9,13 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/derek/faro/internal/db"
 	deviceidentity "github.com/derek/faro/internal/devices"
+	"github.com/derek/faro/internal/protectiontime"
 )
 
 const maxProtectionProfiles = 12
@@ -23,22 +26,32 @@ var protectionIcons = map[string]struct{}{
 }
 
 type protectionInput struct {
-	Name         string   `json:"name"`
-	Icon         string   `json:"icon"`
-	BlocklistIDs []int64  `json:"blocklist_ids"`
-	AllowDomains []string `json:"allow_domains"`
-	BlockDomains []string `json:"block_domains"`
-	DeviceIPs    []string `json:"device_ips"`
+	Name         string                  `json:"name"`
+	Icon         string                  `json:"icon"`
+	BlocklistIDs []int64                 `json:"blocklist_ids"`
+	AllowDomains []string                `json:"allow_domains"`
+	BlockDomains []string                `json:"block_domains"`
+	DeviceIPs    []string                `json:"device_ips"`
+	Schedule     protectionScheduleInput `json:"schedule"`
+}
+
+type protectionScheduleInput struct {
+	Enabled  bool   `json:"enabled"`
+	Days     string `json:"days"`
+	Start    string `json:"start"`
+	End      string `json:"end"`
+	Timezone string `json:"timezone"`
 }
 
 type protectionSnapshot struct {
-	ID        int64
-	Name      string
-	Icon      string
-	IsDefault bool
-	CreatedAt string
-	UpdatedAt string
-	Input     protectionInput
+	ID          int64
+	Name        string
+	Icon        string
+	IsDefault   bool
+	CreatedAt   string
+	UpdatedAt   string
+	PausedUntil string
+	Input       protectionInput
 }
 
 type deviceProtectionAssignment struct {
@@ -89,6 +102,16 @@ func (handler *Handler) protections(responseWriter http.ResponseWriter, request 
 }
 
 func (handler *Handler) protection(responseWriter http.ResponseWriter, request *http.Request) {
+	trimmedPath := strings.Trim(strings.TrimPrefix(request.URL.Path, "/api/protections/"), "/")
+	if idText, ok := strings.CutSuffix(trimmedPath, "/pause"); ok {
+		id, err := strconv.ParseInt(idText, 10, 64)
+		if err != nil || id <= 0 {
+			writeBadRequest(responseWriter, errors.New("invalid protection id"))
+			return
+		}
+		handler.pauseProtection(responseWriter, request, id)
+		return
+	}
 	id, ok := idFromPath(responseWriter, request, "/api/protections/")
 	if !ok {
 		return
@@ -161,26 +184,89 @@ func (handler *Handler) updateProtection(responseWriter http.ResponseWriter, req
 		writeError(responseWriter, fmt.Errorf("protection was not changed because CoreDNS rejected the configuration: %w", err))
 		return
 	}
+	handler.recordEvent(request.Context(), eventInput{Type: "protection.updated", Severity: "success", Title: "Protection updated", Description: normalized.Name + " settings were applied to DNS.", Metadata: map[string]any{"protection_id": id, "schedule_enabled": normalized.Schedule.Enabled}, Source: "protection"})
 	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true})
 }
 
+func (handler *Handler) pauseProtection(responseWriter http.ResponseWriter, request *http.Request, id int64) {
+	if request.Method != http.MethodPut {
+		methodNotAllowed(responseWriter)
+		return
+	}
+	var input struct {
+		Until string `json:"until"`
+	}
+	if !decode(responseWriter, request, &input) {
+		return
+	}
+	input.Until = strings.TrimSpace(input.Until)
+	if input.Until != "" {
+		until, err := time.Parse(time.RFC3339, input.Until)
+		if err != nil || !until.After(time.Now()) {
+			writeBadRequest(responseWriter, errors.New("pause end must be a future RFC3339 timestamp"))
+			return
+		}
+		if until.After(time.Now().Add(7 * 24 * time.Hour)) {
+			writeBadRequest(responseWriter, errors.New("a protection can be paused for at most 7 days"))
+			return
+		}
+		input.Until = until.UTC().Format(time.RFC3339)
+	}
+	handler.configMu.Lock()
+	defer handler.configMu.Unlock()
+	var name, previous string
+	if err := handler.store.DB.QueryRowContext(request.Context(), `SELECT name, paused_until FROM protection_profiles WHERE id = ?`, id).Scan(&name, &previous); err != nil {
+		writeBadRequest(responseWriter, errors.New("protection does not exist"))
+		return
+	}
+	if _, err := handler.store.DB.ExecContext(request.Context(), `UPDATE protection_profiles SET paused_until = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, input.Until, id); err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	if err := handler.reloader.Apply(request.Context()); err != nil {
+		rollbackCtx := context.WithoutCancel(request.Context())
+		_, _ = handler.store.DB.ExecContext(rollbackCtx, `UPDATE protection_profiles SET paused_until = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, previous, id)
+		_ = handler.reloader.Apply(rollbackCtx)
+		writeError(responseWriter, fmt.Errorf("protection pause was not changed because CoreDNS rejected the configuration: %w", err))
+		return
+	}
+	if input.Until == "" {
+		handler.recordEvent(request.Context(), eventInput{Type: "protection.resumed", Severity: "success", Title: "Domain blocking turned on", Description: name + " is blocking domains again.", Metadata: map[string]any{"protection_id": id}, Source: "protection"})
+	} else {
+		handler.recordEvent(request.Context(), eventInput{Type: "protection.paused", Severity: "warning", Title: "Domain blocking temporarily off", Description: name + " is allowing domains it would normally block; devices remain online.", Metadata: map[string]any{"protection_id": id, "paused_until": input.Until}, Source: "protection"})
+	}
+	writeJSON(responseWriter, http.StatusOK, map[string]any{"ok": true, "paused_until": nullableTimeString(input.Until)})
+}
+
+func nullableTimeString(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
 func (handler *Handler) listProtections(responseWriter http.ResponseWriter, request *http.Request) {
-	rows, err := handler.store.DB.QueryContext(request.Context(), `SELECT id, name, icon, is_default, created_at, updated_at FROM protection_profiles ORDER BY is_default DESC, name`)
+	rows, err := handler.store.DB.QueryContext(request.Context(), `
+		SELECT id, name, icon, is_default, paused_until, schedule_enabled, schedule_days,
+		       schedule_start, schedule_end, schedule_timezone, created_at, updated_at
+		FROM protection_profiles ORDER BY is_default DESC, name`)
 	if err != nil {
 		writeError(responseWriter, err)
 		return
 	}
 	defer closeRows(rows)
 	type protectionRow struct {
-		id                   int64
-		name, icon           string
-		isDefault            bool
-		createdAt, updatedAt string
+		id                                                            int64
+		name, icon                                                    string
+		isDefault                                                     bool
+		pausedUntil, days, start, end, timezone, createdAt, updatedAt string
+		scheduleEnabled                                               bool
 	}
 	base := make([]protectionRow, 0)
 	for rows.Next() {
 		var item protectionRow
-		if err := rows.Scan(&item.id, &item.name, &item.icon, &item.isDefault, &item.createdAt, &item.updatedAt); err != nil {
+		if err := rows.Scan(&item.id, &item.name, &item.icon, &item.isDefault, &item.pausedUntil,
+			&item.scheduleEnabled, &item.days, &item.start, &item.end, &item.timezone, &item.createdAt, &item.updatedAt); err != nil {
 			writeError(responseWriter, err)
 			return
 		}
@@ -192,6 +278,14 @@ func (handler *Handler) listProtections(responseWriter http.ResponseWriter, requ
 	}
 	items := make([]map[string]any, 0, len(base))
 	for _, item := range base {
+		paused := protectiontime.PausedAt(item.pausedUntil, time.Now())
+		scheduledActive := protectiontime.ActiveAt(protectiontime.Schedule{Enabled: item.scheduleEnabled, Days: item.days, Start: item.start, End: item.end, Timezone: item.timezone}, time.Now())
+		state := "active"
+		if paused {
+			state = "paused"
+		} else if !scheduledActive {
+			state = "scheduled_off"
+		}
 		items = append(items, map[string]any{
 			"id": item.id, "name": item.name, "icon": item.icon, "is_default": item.isDefault,
 			"blocklist_ids": protectionIDs(request.Context(), handler.store.DB, `SELECT blocklist_id FROM protection_blocklists WHERE protection_id = ? ORDER BY blocklist_id`, item.id),
@@ -201,6 +295,8 @@ func (handler *Handler) listProtections(responseWriter http.ResponseWriter, requ
 				SELECT address FROM device_addresses a JOIN device_protection_memberships m ON m.device_id = a.device_id WHERE m.protection_id = ?
 				UNION SELECT client_ip FROM device_protection_assignments WHERE protection_id = ? ORDER BY 1`, item.id, item.id),
 			"created_at": item.createdAt, "updated_at": item.updatedAt,
+			"paused_until": nullableTimeString(item.pausedUntil), "state": state, "is_active": !paused && scheduledActive,
+			"schedule": map[string]any{"enabled": item.scheduleEnabled, "days": item.days, "start": item.start, "end": item.end, "timezone": item.timezone},
 		})
 	}
 	writeJSON(responseWriter, http.StatusOK, items)
@@ -225,7 +321,15 @@ func (handler *Handler) normalizeProtectionInput(ctx context.Context, input prot
 		return input, err
 	}
 	input.DeviceIPs, err = normalizeProtectionDevices(input.DeviceIPs)
-	return input, err
+	if err != nil {
+		return input, err
+	}
+	schedule, err := protectiontime.Validate(protectiontime.Schedule{Enabled: input.Schedule.Enabled, Days: input.Schedule.Days, Start: input.Schedule.Start, End: input.Schedule.End, Timezone: input.Schedule.Timezone})
+	if err != nil {
+		return input, err
+	}
+	input.Schedule = protectionScheduleInput{Enabled: schedule.Enabled, Days: schedule.Days, Start: schedule.Start, End: schedule.End, Timezone: schedule.Timezone}
+	return input, nil
 }
 
 func (handler *Handler) normalizeProtectionBlocklists(ctx context.Context, values []int64) ([]int64, error) {
@@ -288,7 +392,7 @@ func (handler *Handler) insertProtection(ctx context.Context, input protectionIn
 		return 0, err
 	}
 	defer rollbackTransaction(tx)
-	result, err := tx.ExecContext(ctx, `INSERT INTO protection_profiles(name, icon) VALUES(?, ?)`, input.Name, input.Icon)
+	result, err := tx.ExecContext(ctx, `INSERT INTO protection_profiles(name, icon, schedule_enabled, schedule_days, schedule_start, schedule_end, schedule_timezone) VALUES(?, ?, ?, ?, ?, ?, ?)`, input.Name, input.Icon, input.Schedule.Enabled, input.Schedule.Days, input.Schedule.Start, input.Schedule.End, input.Schedule.Timezone)
 	if err != nil {
 		return 0, errors.New("a protection with that name already exists")
 	}
@@ -311,7 +415,7 @@ func (handler *Handler) replaceProtection(ctx context.Context, id int64, isDefau
 		return err
 	}
 	defer rollbackTransaction(tx)
-	if _, err := tx.ExecContext(ctx, `UPDATE protection_profiles SET name = ?, icon = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, input.Name, input.Icon, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE protection_profiles SET name = ?, icon = ?, schedule_enabled = ?, schedule_days = ?, schedule_start = ?, schedule_end = ?, schedule_timezone = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, input.Name, input.Icon, input.Schedule.Enabled, input.Schedule.Days, input.Schedule.Start, input.Schedule.End, input.Schedule.Timezone, id); err != nil {
 		return errors.New("a protection with that name already exists")
 	}
 	if err := clearProtectionChildren(ctx, tx, id); err != nil {
@@ -325,11 +429,12 @@ func (handler *Handler) replaceProtection(ctx context.Context, id int64, isDefau
 
 func (handler *Handler) readProtection(ctx context.Context, id int64) (protectionSnapshot, error) {
 	var snapshot protectionSnapshot
-	if err := handler.store.DB.QueryRowContext(ctx, `SELECT id, name, icon, is_default, created_at, updated_at FROM protection_profiles WHERE id = ?`, id).Scan(&snapshot.ID, &snapshot.Name, &snapshot.Icon, &snapshot.IsDefault, &snapshot.CreatedAt, &snapshot.UpdatedAt); err != nil {
+	var schedule protectionScheduleInput
+	if err := handler.store.DB.QueryRowContext(ctx, `SELECT id, name, icon, is_default, paused_until, created_at, updated_at, schedule_enabled, schedule_days, schedule_start, schedule_end, schedule_timezone FROM protection_profiles WHERE id = ?`, id).Scan(&snapshot.ID, &snapshot.Name, &snapshot.Icon, &snapshot.IsDefault, &snapshot.PausedUntil, &snapshot.CreatedAt, &snapshot.UpdatedAt, &schedule.Enabled, &schedule.Days, &schedule.Start, &schedule.End, &schedule.Timezone); err != nil {
 		return snapshot, err
 	}
 	snapshot.Input = protectionInput{
-		Name: snapshot.Name, Icon: snapshot.Icon,
+		Name: snapshot.Name, Icon: snapshot.Icon, Schedule: schedule,
 		BlocklistIDs: protectionIDs(ctx, handler.store.DB, `SELECT blocklist_id FROM protection_blocklists WHERE protection_id = ?`, id),
 		AllowDomains: protectionDomainStrings(ctx, handler.store.DB, `SELECT domain FROM protection_allow_entries WHERE protection_id = ?`, id),
 		BlockDomains: protectionDomainStrings(ctx, handler.store.DB, `SELECT domain FROM protection_block_entries WHERE protection_id = ?`, id),
@@ -346,7 +451,7 @@ func (handler *Handler) restoreProtection(ctx context.Context, snapshot protecti
 		return err
 	}
 	defer rollbackTransaction(tx)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO protection_profiles(id, name, icon, is_default, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, is_default=excluded.is_default, created_at=excluded.created_at, updated_at=excluded.updated_at`, snapshot.ID, snapshot.Name, snapshot.Icon, snapshot.IsDefault, snapshot.CreatedAt, snapshot.UpdatedAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO protection_profiles(id, name, icon, is_default, paused_until, schedule_enabled, schedule_days, schedule_start, schedule_end, schedule_timezone, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name=excluded.name, icon=excluded.icon, is_default=excluded.is_default, paused_until=excluded.paused_until, schedule_enabled=excluded.schedule_enabled, schedule_days=excluded.schedule_days, schedule_start=excluded.schedule_start, schedule_end=excluded.schedule_end, schedule_timezone=excluded.schedule_timezone, created_at=excluded.created_at, updated_at=excluded.updated_at`, snapshot.ID, snapshot.Name, snapshot.Icon, snapshot.IsDefault, snapshot.PausedUntil, snapshot.Input.Schedule.Enabled, snapshot.Input.Schedule.Days, snapshot.Input.Schedule.Start, snapshot.Input.Schedule.End, snapshot.Input.Schedule.Timezone, snapshot.CreatedAt, snapshot.UpdatedAt); err != nil {
 		return err
 	}
 	if err := clearProtectionChildren(ctx, tx, snapshot.ID); err != nil {

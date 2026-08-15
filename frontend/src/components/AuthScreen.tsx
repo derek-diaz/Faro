@@ -1,5 +1,7 @@
 import { Check, Eye, EyeOff, LockKeyhole, LogIn, Network, ShieldCheck, UserRound } from "lucide-react";
 import { useState, type SubmitEvent } from "react";
+import type { ThemeMode } from "../theme";
+import { AppearanceMenu } from "./AppearanceMenu";
 import { SetupRail } from "./SetupRail";
 import { BrandLogo } from "./BrandLogo";
 
@@ -8,9 +10,11 @@ type AuthScreenProps = {
   readonly onSubmit: (username: string, password: string) => Promise<void>;
   readonly error: string;
   readonly onJoinExisting?: () => void;
+  readonly themeMode: ThemeMode;
+  readonly onThemeModeChange: (mode: ThemeMode) => void;
 };
 
-export function AuthScreen({ mode, onSubmit, error, onJoinExisting }: AuthScreenProps) {
+export function AuthScreen({ mode, onSubmit, error, onJoinExisting, themeMode, onThemeModeChange }: AuthScreenProps) {
   const isSetup = mode === "setup";
   const [username, setUsername] = useState(mode === "setup" ? "admin" : "");
   const [password, setPassword] = useState("");
@@ -54,6 +58,8 @@ export function AuthScreen({ mode, onSubmit, error, onJoinExisting }: AuthScreen
       passwordsMatch={passwordsMatch}
       onSubmit={submit}
       onJoinExisting={onJoinExisting}
+      themeMode={themeMode}
+      onThemeModeChange={onThemeModeChange}
     />
   );
 }
@@ -74,12 +80,15 @@ type AuthLayoutProps = {
   readonly passwordsMatch: boolean;
   readonly onSubmit: (event: SubmitEvent) => Promise<void>;
   readonly onJoinExisting?: () => void;
+  readonly themeMode: ThemeMode;
+  readonly onThemeModeChange: (mode: ThemeMode) => void;
 };
 
-function AuthLayout({ mode, onJoinExisting, ...formProps }: AuthLayoutProps) {
+function AuthLayout({ mode, onJoinExisting, themeMode, onThemeModeChange, ...formProps }: AuthLayoutProps) {
   const isSetup = mode === "setup";
   return (
     <main className={`auth-shell ${isSetup ? "setup-auth-shell" : ""}`}>
+      <AppearanceMenu className="public-appearance-control" themeMode={themeMode} onThemeModeChange={onThemeModeChange} />
       {isSetup ? <SetupRail currentStep={0} /> : <LoginRail />}
       <section className="auth-main" aria-labelledby="auth-title">
         <div className="auth-form-wrap">
@@ -91,7 +100,7 @@ function AuthLayout({ mode, onJoinExisting, ...formProps }: AuthLayoutProps) {
   );
 }
 
-function AuthForm({ mode, username, setUsername, password, setPassword, confirmation, setConfirmation, visible, setVisible, busy, error, passwordLongEnough, passwordsMatch, onSubmit }: Omit<AuthLayoutProps, "onJoinExisting">) {
+function AuthForm({ mode, username, setUsername, password, setPassword, confirmation, setConfirmation, visible, setVisible, busy, error, passwordLongEnough, passwordsMatch, onSubmit }: Omit<AuthLayoutProps, "onJoinExisting" | "themeMode" | "onThemeModeChange">) {
   return (
     <>
       <AuthHeader mode={mode} />
@@ -228,6 +237,6 @@ function LoginRail() {
   );
 }
 
-export function AuthLoading() {
-  return <main className="auth-shell auth-loading-shell"><div className="auth-loading"><BrandLogo /><strong>Faro</strong><span>Checking local session...</span></div></main>;
+export function AuthLoading({ themeMode, onThemeModeChange }: Pick<AuthScreenProps, "themeMode" | "onThemeModeChange">) {
+  return <main className="auth-shell auth-loading-shell"><AppearanceMenu className="public-appearance-control" themeMode={themeMode} onThemeModeChange={onThemeModeChange} /><div className="auth-loading"><BrandLogo /><strong>Faro</strong><span>Checking local session...</span></div></main>;
 }

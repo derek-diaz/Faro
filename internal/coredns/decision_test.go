@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/derek/faro/internal/db"
 	deviceidentity "github.com/derek/faro/internal/devices"
@@ -140,6 +141,65 @@ func TestRenderRoutesAssignedClientsBeforeHome(t *testing.T) {
 	homeDecision := ExplainDomainForClient(context.Background(), store, "games.example", "192.168.7.24")
 	if homeDecision.Action != "allowed" || homeDecision.Protection == nil || homeDecision.Protection.Name != "Home" {
 		t.Fatalf("Home should not inherit the custom rule: %#v", homeDecision)
+	}
+}
+
+func TestRenderPlacesActiveDevicePauseBeforeProtectionViews(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	deviceID, err := deviceidentity.ResolveAddress(context.Background(), store, "192.168.7.44", "dns")
+	if err != nil {
+		t.Fatal(err)
+	}
+	until := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	if _, err := store.DB.Exec(`INSERT INTO device_dns_pauses(device_id, paused_until) VALUES(?, ?)`, deviceID, until); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := NewManager(store, t.TempDir()).render(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pauseView := "view device_pause_" + fmt.Sprint(deviceID)
+	if !strings.Contains(rendered.Corefile, pauseView) || !strings.Contains(rendered.Corefile, "template ANY ANY") || !strings.Contains(rendered.Corefile, "rcode REFUSED") {
+		t.Fatalf("device pause view missing from Corefile:\n%s", rendered.Corefile)
+	}
+	if strings.Index(rendered.Corefile, pauseView) > strings.Index(rendered.Corefile, "view protection_") && strings.Contains(rendered.Corefile, "view protection_") {
+		t.Fatal("device pause view must precede protection views")
+	}
+	decision := ExplainDomainForClient(context.Background(), store, "example.com", "192.168.7.44")
+	if decision.Action != "blocked" || !strings.Contains(decision.Reason, "paused") {
+		t.Fatalf("unexpected paused-device decision: %#v", decision)
+	}
+}
+
+func TestTemporalSignatureDoesNotRenderBlocklists(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	result, err := store.DB.Exec(`INSERT INTO blocklists(name, url, enabled) VALUES('Large list', 'https://example.test/hosts', 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`INSERT INTO blocklist_entries(blocklist_id, domain) VALUES(?, 'not a domain')`, listID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`INSERT INTO protection_blocklists(protection_id, blocklist_id) SELECT id, ? FROM protection_profiles WHERE is_default = 1`, listID); err != nil {
+		t.Fatal(err)
+	}
+
+	manager := NewManager(store, t.TempDir())
+	if _, err := manager.currentTemporalSignature(context.Background(), time.Now()); err != nil {
+		t.Fatalf("temporal state check should not render blocklist contents: %v", err)
 	}
 }
 

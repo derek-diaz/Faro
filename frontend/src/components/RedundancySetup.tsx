@@ -1,6 +1,8 @@
 import { AlertTriangle, ArrowLeft, Check, CheckCircle2, Copy, LogOut, Network, RefreshCw, Server, ShieldCheck } from "lucide-react";
 import { useEffect, useState, type ReactNode, type SubmitEvent } from "react";
 import { api, type RedundancyPublicStatus } from "../api/client";
+import type { ThemeMode } from "../theme";
+import { AppearanceMenu } from "./AppearanceMenu";
 import { copyText } from "../utils/clipboard";
 import { BrandLogo } from "./BrandLogo";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -8,9 +10,11 @@ import { ConfirmDialog } from "./ConfirmDialog";
 type JoinExistingFaroProps = {
   readonly onBack: () => void;
   readonly onJoined: (status: RedundancyPublicStatus) => void;
+  readonly themeMode: ThemeMode;
+  readonly onThemeModeChange: (mode: ThemeMode) => void;
 };
 
-export function JoinExistingFaro({ onBack, onJoined }: JoinExistingFaroProps) {
+export function JoinExistingFaro({ onBack, onJoined, themeMode, onThemeModeChange }: JoinExistingFaroProps) {
   const currentHost = window.location.hostname;
   const [controllerURL, setControllerURL] = useState("");
   const [pairingCode, setPairingCode] = useState("");
@@ -40,6 +44,7 @@ export function JoinExistingFaro({ onBack, onJoined }: JoinExistingFaroProps) {
 
   return (
     <main className="redundancy-setup-shell">
+      <AppearanceMenu className="public-appearance-control" themeMode={themeMode} onThemeModeChange={onThemeModeChange} />
       <aside className="redundancy-setup-context">
         <div className="auth-brand"><BrandLogo /><strong className="brand-wordmark">Faro</strong></div>
         <div><span>DNS redundancy</span><h1>Join your existing Faro home.</h1><p>This server will receive the same validated DNS configuration and continue serving it when the controller is unavailable.</p></div>
@@ -71,10 +76,12 @@ type ReplicaNodeScreenProps = {
   readonly configured: boolean;
   readonly authenticated: boolean;
   readonly username?: string;
+  readonly themeMode: ThemeMode;
+  readonly onThemeModeChange: (mode: ThemeMode) => void;
   readonly onLeft: (status: RedundancyPublicStatus) => void;
 };
 
-export function ReplicaNodeScreen({ initialStatus, configured, authenticated, username, onLeft }: ReplicaNodeScreenProps) {
+export function ReplicaNodeScreen({ initialStatus, configured, authenticated, username, themeMode, onThemeModeChange, onLeft }: ReplicaNodeScreenProps) {
   const [status, setStatus] = useState(initialStatus);
   const [copyState, setCopyState] = useState<CopyState>("idle");
   const [leaveOpen, setLeaveOpen] = useState(false);
@@ -134,6 +141,7 @@ export function ReplicaNodeScreen({ initialStatus, configured, authenticated, us
   };
   return (
     <main className="replica-status-shell">
+      <AppearanceMenu className="public-appearance-control" themeMode={themeMode} onThemeModeChange={onThemeModeChange} />
       <header><BrandLogo /><strong>Faro</strong><span>Additional DNS server</span></header>
       <ReplicaStatusCard status={status} synchronized={synchronized} statusMessage={statusMessage} copyState={copyState} onCopyControllerAddress={() => void copyControllerAddress()} onOpenLeave={openLeaveDialog} />
       {leaveOpen && <LeaveRedundancyDialog requiresAuthentication={requiresAuthentication} busy={leaveBusy} leaveError={leaveError} adminName={adminName} adminPassword={adminPassword} onAdminNameChange={setAdminName} onAdminPasswordChange={setAdminPassword} onCancel={closeLeaveDialog} onConfirm={() => void leaveRedundancy()} />}

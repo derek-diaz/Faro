@@ -73,6 +73,7 @@ func main() {
 	if err := reloader.Apply(context.Background()); err != nil {
 		log.Printf("initial coredns render failed: %v", err)
 	}
+	go reloader.RunTemporalReloads(ctx)
 	go redundancyManager.Run(ctx)
 
 	tailer := querylog.NewTailer(store, logPath)

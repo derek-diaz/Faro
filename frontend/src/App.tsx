@@ -65,6 +65,17 @@ export function App() {
   const [redundancy, setRedundancy] = useState<RedundancyPublicStatus | null>(null);
   const [joiningExisting, setJoiningExisting] = useState(false);
   const [authError, setAuthError] = useState("");
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
+
+  useEffect(() => {
+    applyThemeMode(themeMode);
+    persistThemeMode(themeMode);
+    if (themeMode !== "system") return undefined;
+    const preference = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateResolvedTheme = () => applyThemeMode(themeMode);
+    preference.addEventListener("change", updateResolvedTheme);
+    return () => preference.removeEventListener("change", updateResolvedTheme);
+  }, [themeMode]);
 
   useEffect(() => {
     let active = true;
@@ -94,7 +105,7 @@ export function App() {
     }
   }
 
-  if (!auth || !redundancy) return authError ? <AuthScreen mode="login" onSubmit={authenticate} error={authError} /> : <AuthLoading />;
+  if (!auth || !redundancy) return authError ? <AuthScreen mode="login" onSubmit={authenticate} error={authError} themeMode={themeMode} onThemeModeChange={setThemeMode} /> : <AuthLoading themeMode={themeMode} onThemeModeChange={setThemeMode} />;
   if (redundancy.role === "replica") {
     return (
       <ReplicaNodeScreen
@@ -102,6 +113,8 @@ export function App() {
         configured={auth.configured}
         authenticated={auth.authenticated}
         username={auth.username}
+        themeMode={themeMode}
+        onThemeModeChange={setThemeMode}
         onLeft={(next) => {
           void api.authStatus()
             .then((nextAuth) => {
@@ -113,22 +126,23 @@ export function App() {
       />
     );
   }
-  if (joiningExisting) return <JoinExistingFaro onBack={() => setJoiningExisting(false)} onJoined={setRedundancy} />;
-  if (!auth.configured) return <AuthScreen mode="setup" onSubmit={authenticate} error={authError} onJoinExisting={() => setJoiningExisting(true)} />;
-  if (!auth.authenticated) return <AuthScreen mode="login" onSubmit={authenticate} error={authError} onJoinExisting={() => setJoiningExisting(true)} />;
-  if (!auth.onboarding_complete) return <Onboarding username={auth.username || "admin"} onComplete={() => setAuth({ ...auth, onboarding_complete: true })} onJoinExisting={() => setJoiningExisting(true)} />;
+  if (joiningExisting) return <JoinExistingFaro onBack={() => setJoiningExisting(false)} onJoined={setRedundancy} themeMode={themeMode} onThemeModeChange={setThemeMode} />;
+  if (!auth.configured) return <AuthScreen mode="setup" onSubmit={authenticate} error={authError} onJoinExisting={() => setJoiningExisting(true)} themeMode={themeMode} onThemeModeChange={setThemeMode} />;
+  if (!auth.authenticated) return <AuthScreen mode="login" onSubmit={authenticate} error={authError} onJoinExisting={() => setJoiningExisting(true)} themeMode={themeMode} onThemeModeChange={setThemeMode} />;
+  if (!auth.onboarding_complete) return <Onboarding username={auth.username || "admin"} onComplete={() => setAuth({ ...auth, onboarding_complete: true })} onJoinExisting={() => setJoiningExisting(true)} themeMode={themeMode} onThemeModeChange={setThemeMode} />;
 
-  return <AuthenticatedApp username={auth.username || "admin"} onSignedOut={() => setAuth({ configured: true, authenticated: false, onboarding_complete: true })} />;
+  return <AuthenticatedApp username={auth.username || "admin"} onSignedOut={() => setAuth({ configured: true, authenticated: false, onboarding_complete: true })} themeMode={themeMode} onThemeModeChange={setThemeMode} />;
 }
 
 type AuthenticatedAppProps = Readonly<{
   username: string;
   onSignedOut: () => void;
+  themeMode: ThemeMode;
+  onThemeModeChange: (mode: ThemeMode) => void;
 }>;
 
-function AuthenticatedApp({ username, onSignedOut }: AuthenticatedAppProps) {
+function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange }: AuthenticatedAppProps) {
 	const [versionInfo, setVersionInfo] = useState<VersionCheck | null>(null);
-	const [themeMode, setThemeMode] = useState<ThemeMode>(() => readThemeMode());
   const initialRoute = useMemo(readRoute, []);
   const [page, setPage] = useState<Page>(initialRoute.page);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -149,16 +163,6 @@ function AuthenticatedApp({ username, onSignedOut }: AuthenticatedAppProps) {
   let apiState: "checking" | "offline" | "online" = "online";
   if (loading) apiState = "checking";
   else if (error) apiState = "offline";
-
-  useEffect(() => {
-    applyThemeMode(themeMode);
-    persistThemeMode(themeMode);
-    if (themeMode !== "system") return undefined;
-    const preference = window.matchMedia("(prefers-color-scheme: dark)");
-    const updateResolvedTheme = () => applyThemeMode(themeMode);
-    preference.addEventListener("change", updateResolvedTheme);
-    return () => preference.removeEventListener("change", updateResolvedTheme);
-  }, [themeMode]);
 
   async function loadAll() {
     setLoading(true);
@@ -224,10 +228,15 @@ function AuthenticatedApp({ username, onSignedOut }: AuthenticatedAppProps) {
   }, [initialRoute]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      void refreshLiveData();
-    }, 10000);
-    return () => window.clearInterval(timer);
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") void refreshLiveData();
+    };
+    const timer = window.setInterval(refreshIfVisible, 30000);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
   }, [page]);
 
   useEffect(() => {
@@ -249,8 +258,9 @@ function AuthenticatedApp({ username, onSignedOut }: AuthenticatedAppProps) {
     if (liveRefreshBusy.current) return;
     liveRefreshBusy.current = true;
     try {
-      const [nextSummary, nextNotifications] = await Promise.all([api.dashboard(), api.notifications()]);
-      setSummary(nextSummary);
+      const dashboardRequest: Promise<DashboardSummary | null> = page === "dashboard" ? api.dashboard() : Promise.resolve(null);
+      const [nextSummary, nextNotifications] = await Promise.all([dashboardRequest, api.notifications()]);
+      if (nextSummary) setSummary(nextSummary);
       setNotifications(nextNotifications);
       setError(null);
     } catch (error_) {
@@ -357,8 +367,11 @@ function AuthenticatedApp({ username, onSignedOut }: AuthenticatedAppProps) {
             settings={settings}
             loading={loading}
             onDomainSelect={openDomain}
+            onDeviceSelect={openDevice}
             onViewActivity={() => navigateToPage("queries")}
             onViewDevices={() => navigateToPage("devices")}
+            onViewBlocklists={() => navigateToPage("blocklists")}
+            onViewLocalDns={() => navigateToPage("records")}
             onManageUpstreams={() => navigateToPage("upstreams")}
           />
         );
@@ -398,7 +411,7 @@ function AuthenticatedApp({ username, onSignedOut }: AuthenticatedAppProps) {
       page={page}
       setPage={navigateToPage}
       themeMode={themeMode}
-      onThemeModeChange={setThemeMode}
+      onThemeModeChange={onThemeModeChange}
       apiState={apiState}
       onOpenSearch={() => setSearchOpen(true)}
       notifications={notifications}

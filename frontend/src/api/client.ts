@@ -55,8 +55,20 @@ export type Protection = {
   allow_entries: DomainEntry[];
   block_entries: DomainEntry[];
   device_ips: string[];
+  paused_until?: string | null;
+  state: "active" | "paused" | "scheduled_off";
+  is_active: boolean;
+  schedule: ProtectionSchedule;
   created_at?: string;
   updated_at?: string;
+};
+
+export type ProtectionSchedule = {
+  enabled: boolean;
+  days: string;
+  start: string;
+  end: string;
+  timezone: string;
 };
 
 export type ProtectionIconKey = "house" | "users" | "baby" | "guest" | "tv" | "gamepad" | "smartphone" | "laptop" | "briefcase" | "lightbulb" | "cpu" | "shield";
@@ -68,6 +80,7 @@ export type ProtectionInput = {
   allow_domains: string[];
   block_domains: string[];
   device_ips: string[];
+  schedule: ProtectionSchedule;
 };
 
 export type DNSQuery = {
@@ -162,6 +175,8 @@ export type DeviceSummary = {
   protection_id: number;
   protection_icon: ProtectionIconKey;
   recent_activity?: DNSQuery[];
+  dns_paused?: boolean;
+  dns_paused_until?: string | null;
 };
 
 export type DeviceInventoryPage = {
@@ -691,9 +706,13 @@ export const api = {
     request<{ id: number }>("/api/protections", { method: "POST", body: JSON.stringify(protection) }),
   updateProtection: (id: number, protection: ProtectionInput) =>
     request<{ ok: boolean }>(`/api/protections/${id}`, { method: "PUT", body: JSON.stringify(protection) }),
+  pauseProtection: (id: number, until: string) =>
+    request<{ ok: boolean; paused_until?: string | null }>(`/api/protections/${id}/pause`, { method: "PUT", body: JSON.stringify({ until }) }),
   deleteProtection: (id: number) => request<{ ok: boolean }>(`/api/protections/${id}`, { method: "DELETE" }),
   assignDeviceProtection: (clientIP: string, protectionID: number) =>
     request<{ ok: boolean }>(`/api/devices/${encodeURIComponent(clientIP)}/protection`, { method: "PUT", body: JSON.stringify({ protection_id: protectionID }) }),
+  pauseDeviceDNS: (clientIP: string, until: string) =>
+    request<{ ok: boolean; paused_until?: string | null }>(`/api/devices/${encodeURIComponent(clientIP)}/pause`, { method: "PUT", body: JSON.stringify({ until }) }),
   allowlist: () => request<DomainEntry[]>("/api/allowlist"),
   addAllow: (domain: string) => request<{ id: number }>("/api/allowlist", { method: "POST", body: JSON.stringify({ domain }) }),
   addBlock: (domain: string) =>

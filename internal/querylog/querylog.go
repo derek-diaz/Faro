@@ -22,7 +22,10 @@ import (
 	deviceidentity "github.com/derek/faro/internal/devices"
 )
 
-const cursorSuffix = ".cursor"
+const (
+	cursorSuffix         = ".cursor"
+	queryIngestBatchSize = 256
+)
 
 var logPattern = regexp.MustCompile(`\s(\d+\.\d+\.\d+\.\d+|\[[0-9a-fA-F:]+]|[0-9a-fA-F:]+):\d+\s+-\s+\d+\s+"([A-Z]+)\s+IN\s+([^"\s]+).*"\s+([A-Z]+).*\s([0-9.]+)s`)
 
@@ -165,8 +168,20 @@ func (tailer *Tailer) readOpenFile(ctx context.Context, file *os.File, offset in
 	}
 
 	scanner := bufio.NewScanner(file)
+	entries := make([]logEntry, 0, queryIngestBatchSize)
 	for scanner.Scan() {
-		tailer.insert(ctx, scanner.Text())
+		entry, ok := parseLine(scanner.Text())
+		if !ok {
+			continue
+		}
+		entries = append(entries, entry)
+		if len(entries) == queryIngestBatchSize {
+			tailer.insertBatch(ctx, entries)
+			entries = entries[:0]
+		}
+	}
+	if len(entries) > 0 {
+		tailer.insertBatch(ctx, entries)
 	}
 	if err := scanner.Err(); err != nil {
 		return offset, err
@@ -273,12 +288,93 @@ func (tailer *Tailer) insert(ctx context.Context, line string) {
 	if !ok {
 		return
 	}
-	tailer.insertParsed(ctx, entry)
+	tailer.insertBatch(ctx, []logEntry{entry})
 }
 
 func (tailer *Tailer) insertParsed(ctx context.Context, entry logEntry) {
-	if !tailer.Store.ActivityStorageWriteAllowed() {
+	tailer.insertBatch(ctx, []logEntry{entry})
+}
+
+type pendingQuery struct {
+	timestamp        string
+	clientIP         string
+	deviceID         int64
+	domain           string
+	queryType        string
+	action           string
+	source           string
+	upstream         string
+	latencyMS        float64
+	rcode            string
+	decisionReason   string
+	decisionMetadata string
+}
+
+func (tailer *Tailer) insertBatch(ctx context.Context, entries []logEntry) {
+	if len(entries) == 0 || !tailer.Store.ActivityStorageWriteAllowed() {
 		return
+	}
+
+	queries := make([]pendingQuery, 0, len(entries))
+	for _, entry := range entries {
+		if !tailer.Store.ActivityStorageWriteAllowed() {
+			break
+		}
+		query, ok := tailer.prepareEntry(ctx, entry)
+		if ok {
+			queries = append(queries, query)
+		}
+	}
+	if len(queries) == 0 {
+		return
+	}
+
+	tx, err := tailer.Store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		tailer.Store.ReportActivityWriteFailure(err)
+		log.Printf("begin dns query batch failed: %v", err)
+		return
+	}
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO dns_queries(timestamp, client_ip, device_id, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata)
+		VALUES(?, ?, NULLIF(?, 0), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		_ = tx.Rollback()
+		tailer.Store.ReportActivityWriteFailure(err)
+		log.Printf("prepare dns query batch failed: %v", err)
+		return
+	}
+	for _, query := range queries {
+		if _, err := stmt.ExecContext(ctx,
+			query.timestamp, query.clientIP, query.deviceID, query.domain, query.queryType,
+			query.action, query.source, query.upstream, query.latencyMS, query.rcode,
+			query.decisionReason, query.decisionMetadata,
+		); err != nil {
+			_ = stmt.Close()
+			_ = tx.Rollback()
+			tailer.Store.ReportActivityWriteFailure(err)
+			log.Printf("insert dns query batch failed: %v", err)
+			return
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		tailer.Store.ReportActivityWriteFailure(err)
+		log.Printf("close dns query batch failed: %v", err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		tailer.Store.ReportActivityWriteFailure(err)
+		log.Printf("commit dns query batch failed: %v", err)
+		return
+	}
+	tailer.Store.ReportActivityWriteSuccess()
+}
+
+func (tailer *Tailer) prepareEntry(ctx context.Context, entry logEntry) (pendingQuery, bool) {
+	if !tailer.Store.ActivityStorageWriteAllowed() {
+		return pendingQuery{}, false
 	}
 	deviceID, identityErr := deviceidentity.ResolveAddress(ctx, tailer.Store, entry.clientIP, "dns")
 	if identityErr != nil {
@@ -297,27 +393,30 @@ func (tailer *Tailer) insertParsed(ctx context.Context, entry logEntry) {
 	if err != nil {
 		metadata = []byte("{}")
 	}
-
-	_, err = tailer.Store.DB.ExecContext(ctx, `
-		INSERT INTO dns_queries(timestamp, client_ip, device_id, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata)
-		VALUES(?, ?, NULLIF(?, 0), ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, time.Now().UTC().Format(time.RFC3339), entry.clientIP, deviceID, entry.domain, entry.queryType, action, source, entry.upstream, entry.latencyMS, entry.rcode, decision.Reason, string(metadata))
-	if err != nil {
-		tailer.Store.ReportActivityWriteFailure(err)
-		log.Printf("insert dns query failed: %v", err)
-		return
-	}
-	tailer.Store.ReportActivityWriteSuccess()
+	return pendingQuery{
+		timestamp:        time.Now().UTC().Format(time.RFC3339),
+		clientIP:         entry.clientIP,
+		deviceID:         deviceID,
+		domain:           entry.domain,
+		queryType:        entry.queryType,
+		action:           action,
+		source:           source,
+		upstream:         entry.upstream,
+		latencyMS:        entry.latencyMS,
+		rcode:            entry.rcode,
+		decisionReason:   decision.Reason,
+		decisionMetadata: string(metadata),
+	}, true
 }
 
-func sourceForEntry(ctx context.Context, store *db.Store, entry logEntry, decision coredns.DomainDecision) string {
+func sourceForEntry(_ context.Context, _ *db.Store, entry logEntry, decision coredns.DomainDecision) string {
 	if decision.Action == "blocked" {
 		if decision.ManualBlock != nil {
 			return "manual"
 		}
 		return "blocklist"
 	}
-	if isLocalRecord(ctx, store, entry.domain) {
+	if decision.LocalRecord != nil && (decision.LocalRecord.Type == "A" || decision.LocalRecord.Type == "AAAA") {
 		return "local"
 	}
 	if !entry.observed || entry.upstream != "" {
@@ -411,10 +510,4 @@ func normalizeUpstream(value string) string {
 		return host
 	}
 	return strings.Trim(value, "[]")
-}
-
-func isLocalRecord(ctx context.Context, store *db.Store, domain string) bool {
-	var exists int
-	err := store.DB.QueryRowContext(ctx, `SELECT 1 FROM dns_records WHERE hostname = ? AND type IN ('A', 'AAAA') LIMIT 1`, domain).Scan(&exists)
-	return err == nil
 }

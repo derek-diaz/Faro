@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Container version="2">
   <Name>Faro</Name>
-  <Repository>tabierto/faro:0.10.0</Repository>
+  <Repository>tabierto/faro:0.10.1</Repository>
   <Registry>https://hub.docker.com/r/tabierto/faro</Registry>
   <Network>bridge</Network>
   <MyIP/>

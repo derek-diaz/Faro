@@ -22,6 +22,12 @@ import (
 const faroNodeHeader = "X-Faro-Node"
 
 func (manager *Manager) AcceptPair(ctx context.Context, input PairRequest) (PairResponse, error) {
+	// Pairing codes are single-use. Serialize acceptance so two join requests
+	// cannot both validate the same code and overwrite the stored node secret
+	// with different pairing results.
+	manager.pairingMu.Lock()
+	defer manager.pairingMu.Unlock()
+
 	state, err := manager.readState(ctx)
 	if err != nil {
 		return PairResponse{}, err

@@ -10,9 +10,10 @@ import (
 )
 
 const (
-	RoleStandalone = "standalone"
-	RoleController = "controller"
-	RoleReplica    = "replica"
+	RoleStandalone        = "standalone"
+	RoleController        = "controller"
+	RoleReplica           = "replica"
+	defaultControllerPort = "1787"
 
 	snapshotSchemaVersion        = 1
 	maxSnapshotTransportBytes    = 128 << 20
@@ -40,6 +41,7 @@ type Manager struct {
 	syncNow  chan struct{}
 
 	operationMu sync.Mutex
+	pairingMu   sync.Mutex
 }
 
 type localState struct {

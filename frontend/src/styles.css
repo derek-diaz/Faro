@@ -13363,12 +13363,16 @@ body .selected-server {
   position: fixed;
   z-index: 100;
   inset: 0;
+  width: 100%;
+  height: 100%;
   display: grid;
   place-items: center;
   max-width: none;
   max-height: none;
   margin: 0;
   border: 0;
+  box-sizing: border-box;
+  overflow: auto;
   background: rgba(10, 22, 34, 0.48);
   padding: 20px;
   backdrop-filter: blur(8px);
@@ -13393,9 +13397,11 @@ body .selected-server {
 
 .confirm-dialog {
   width: min(480px, 100%);
+  max-height: calc(100vh - 40px);
   position: relative;
   z-index: 1;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   border: 1px solid rgba(255, 255, 255, 0.76);
   border-radius: 12px;
   background: rgba(252, 253, 254, 0.98);
@@ -14294,6 +14300,49 @@ body .selected-server {
 
 :root[data-theme-resolved="dark"] :is(.account-menu-popover strong, .account-menu-popover button, .search-modal h2, .confirm-dialog h2, .confirm-dialog strong) {
   color: var(--ink);
+}
+
+:root[data-theme-resolved="dark"] .confirm-dialog-backdrop {
+  background: rgba(2, 10, 17, 0.72);
+}
+
+:root[data-theme-resolved="dark"] .confirm-dialog-icon {
+  border: 1px solid #754047;
+  background: rgba(117, 64, 71, 0.42);
+  color: #ffaaa3;
+}
+
+:root[data-theme-resolved="dark"] .confirm-dialog-impact {
+  border-color: #28645b;
+  background: rgba(21, 59, 55, 0.78);
+  color: #7ce0ce;
+}
+
+:root[data-theme-resolved="dark"] .confirm-dialog-impact.warning {
+  border-color: #735a2d;
+  background: var(--warn-soft);
+  color: #f0c978;
+}
+
+:root[data-theme-resolved="dark"] .confirm-dialog-impact strong {
+  color: var(--ink);
+}
+
+:root[data-theme-resolved="dark"] .confirm-dialog-impact small {
+  color: var(--text-muted);
+}
+
+:root[data-theme-resolved="dark"] .confirm-dialog > footer {
+  border-top-color: var(--border-subtle);
+  background: var(--surface-muted);
+}
+
+:root[data-theme-resolved="dark"] .replica-leave-auth > p {
+  color: var(--ink);
+}
+
+:root[data-theme-resolved="dark"] .replica-leave-auth label {
+  color: var(--text-muted);
 }
 
 :root[data-theme-resolved="dark"] .about-modal h2,

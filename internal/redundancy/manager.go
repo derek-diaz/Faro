@@ -661,12 +661,28 @@ func recentlySeen(value string, now time.Time, maximumAge time.Duration) bool {
 }
 
 func normalizeControllerURL(ctx context.Context, raw string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("controller address must be an http or https Faro URL")
+	}
+	// The join screen accepts a LAN hostname or IP for convenience. Keep the
+	// API compatible with that input too, including requests from older UI
+	// bundles that did not add the scheme and Faro port in the browser.
+	if !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+	parsed, err := url.Parse(raw)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
 		return "", errors.New("controller address must be an http or https Faro URL")
 	}
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
 		return "", errors.New("controller address cannot contain credentials, a path, query, or fragment")
+	}
+	if parsed.Hostname() == "" {
+		return "", errors.New("controller address must include a hostname or IP address")
+	}
+	if parsed.Port() == "" {
+		parsed.Host = net.JoinHostPort(parsed.Hostname(), defaultControllerPort)
 	}
 	addresses, err := net.DefaultResolver.LookupIPAddr(ctx, parsed.Hostname())
 	if err != nil || len(addresses) == 0 {

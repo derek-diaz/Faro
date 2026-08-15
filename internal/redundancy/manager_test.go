@@ -163,7 +163,7 @@ func TestControllerPairsAndSynchronizesReplica(t *testing.T) {
 	applier := &recordingApplier{}
 	replica := NewManager(replicaStore, applier, t.TempDir(), filepath.Join(t.TempDir(), "replica.key"))
 	result, err := replica.Join(ctx, JoinInput{
-		ControllerURL: server.URL,
+		ControllerURL: strings.TrimPrefix(server.URL, "http://"),
 		PairingCode:   code.Code,
 		NodeName:      "Utility room Faro",
 		LANAddress:    "192.168.1.21",

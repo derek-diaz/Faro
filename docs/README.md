@@ -34,7 +34,7 @@ FARO_QUERY_LOG_BACKUPS=2
 FARO_DOCKER_LOG_MAX_SIZE=10m
 FARO_DOCKER_LOG_BACKUPS=3
 FARO_DEVICE_CATALOG_PATH=/config/device-catalog.json
-# FARO_VERSION=0.10.0
+# FARO_VERSION=0.10.1
 FARO_MIGRATION_BACKUP_DIR=/config/migrations
 FARO_UPGRADE_STATE_PATH=/config/faro-upgrade.json
 ```
@@ -74,7 +74,7 @@ The Compose file follows the current `latest` release by default. Normal
 upgrades are therefore just `docker compose pull` followed by
 `docker compose up -d`; no version editing is required. Set `FARO_VERSION`
 only when deliberately rolling back or pinning an image, for example
-`FARO_VERSION=0.10.0` or an immutable `sha-...` tag. Faro's automatic database
+`FARO_VERSION=0.10.1` or an immutable `sha-...` tag. Faro's automatic database
 backup, migration rollback, and last-known-good DNS state protect the simple
 upgrade path.
 
@@ -270,7 +270,7 @@ This is the advanced recovery path; routine upgrades do not need a version:
 
 ```sh
 docker compose stop faro
-FARO_VERSION=0.10.0 docker compose up -d
+FARO_VERSION=0.10.1 docker compose up -d
 docker compose exec faro cat /config/faro-upgrade.json
 docker compose logs --tail=200 faro
 ```
@@ -457,7 +457,7 @@ The production and development images supervise those responsibilities together 
 
 ### Application version
 
-Faro's runtime version is defined in [`internal/version/version.go`](../internal/version/version.go). Update the release default there for the next release; release image builds inject the exact version into the API and companion binaries, and OCI labels record that version and the project source. The current release is `v0.10.0`.
+Faro's runtime version is defined in [`internal/version/version.go`](../internal/version/version.go). Update the release default there for the next release; release image builds inject the exact version into the API and companion binaries, and OCI labels record that version and the project source. The current release is `v0.10.1`.
 
 The authenticated UI also checks the public [Faro GitHub releases](https://github.com/derek-diaz/Faro/releases) periodically. When a newer semantic-versioned release is available, Faro shows a banner with a direct release link. If GitHub cannot be reached, the check fails quietly and does not affect DNS or the rest of the interface.
 

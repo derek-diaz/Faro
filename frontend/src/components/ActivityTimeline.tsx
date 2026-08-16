@@ -11,6 +11,7 @@ import {
 import { Bar } from "react-chartjs-2";
 import { useMemo } from "react";
 import type { ActivityTimeline as ActivityTimelineData } from "../api/client";
+import { ActivityTimelineLoading } from "./ActivityLoading";
 
 ChartJS.register(BarController, BarElement, LinearScale, Tooltip);
 
@@ -124,6 +125,8 @@ export function ActivityTimeline({ timeline, rangeLabel, loading = false }: Acti
     }
   }), [buckets]);
 
+  if (loading && !timeline) return <ActivityTimelineLoading />;
+
   return (
     <div className="activity-timeline-chart" data-loading={loading ? "true" : undefined}>
       {timeline && (
@@ -146,6 +149,7 @@ export function ActivityTimeline({ timeline, rangeLabel, loading = false }: Acti
         <span><i className="activity-timeline-legend-swatch blocked" />Blocked</span>
         {timeline && <span className="activity-timeline-bucket-size">Each bar: {formatBucketSize(timeline.bucket_seconds)}</span>}
       </div>
+      {timeline && loading && <div className="activity-timeline-refresh" role="status"><span className="activity-loading-spinner" />Updating timeline…</div>}
       {!timeline && <div className="activity-timeline-empty">{loading ? "Loading timeline…" : "Choose a time range to see activity over time."}</div>}
       {timeline && !hasActivity && <div className="activity-timeline-empty">No activity in this time range.</div>}
     </div>

@@ -53,6 +53,24 @@ const pageLabels: Record<Page, string> = {
   settings: "Settings"
 };
 
+const DISMISSED_RELEASE_STORAGE_KEY = "faro-dismissed-release-version";
+
+function readDismissedReleaseVersion() {
+  try {
+    return window.localStorage.getItem(DISMISSED_RELEASE_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function persistDismissedReleaseVersion(version: string) {
+  try {
+    window.localStorage.setItem(DISMISSED_RELEASE_STORAGE_KEY, version);
+  } catch {
+    // Dismissal still applies for the current session when storage is unavailable.
+  }
+}
+
 type AppRoute = {
   page: Page;
   clientIP: string | null;
@@ -142,7 +160,8 @@ type AuthenticatedAppProps = Readonly<{
 }>;
 
 function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange }: AuthenticatedAppProps) {
-	const [versionInfo, setVersionInfo] = useState<VersionCheck | null>(null);
+  const [versionInfo, setVersionInfo] = useState<VersionCheck | null>(null);
+  const [dismissedReleaseVersion, setDismissedReleaseVersion] = useState<string | null>(() => readDismissedReleaseVersion());
   const initialRoute = useMemo(readRoute, []);
   const [page, setPage] = useState<Page>(initialRoute.page);
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
@@ -287,6 +306,13 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
     void api.notifications().then(setNotifications).catch(() => undefined);
   }
 
+  function dismissReleaseUpdate() {
+    const version = versionInfo?.latest?.version;
+    if (!version) return;
+    setDismissedReleaseVersion(version);
+    persistDismissedReleaseVersion(version);
+  }
+
   function markNotificationRead(id: string) {
     setNotifications((current) => {
       const item = current.items.find((event) => event.id === id);
@@ -406,6 +432,9 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
     }
   })();
 
+  const releaseUpdate = versionInfo?.latest ?? null;
+  const showReleaseUpdate = releaseUpdate !== null && releaseUpdate.version !== dismissedReleaseVersion;
+
   return (
     <Layout
       page={page}
@@ -419,7 +448,9 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
       username={username}
       onSignOut={signOut}
       appVersion={versionInfo}
-      releaseUpdate={versionInfo?.latest ?? null}
+      releaseUpdate={releaseUpdate}
+      showReleaseUpdate={showReleaseUpdate}
+      onDismissReleaseUpdate={dismissReleaseUpdate}
     >
       {error && (
         <div className="error-banner">

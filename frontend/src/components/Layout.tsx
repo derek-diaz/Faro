@@ -1,5 +1,6 @@
 import {
 	Activity,
+	ArrowUpRight,
 	BarChart3,
 	Bell,
 	CheckCircle2,
@@ -51,9 +52,11 @@ type LayoutProps = {
   readonly onSignOut: () => Promise<void>;
   readonly appVersion: AppVersion | null;
   readonly releaseUpdate: ReleaseInfo | null;
+  readonly showReleaseUpdate: boolean;
+  readonly onDismissReleaseUpdate: () => void;
 };
 
-export function Layout({ page, setPage, themeMode, onThemeModeChange, children, apiState, onOpenSearch, notifications, onOpenNotifications, username, onSignOut, appVersion, releaseUpdate }: LayoutProps) {
+export function Layout({ page, setPage, themeMode, onThemeModeChange, children, apiState, onOpenSearch, notifications, onOpenNotifications, username, onSignOut, appVersion, releaseUpdate, showReleaseUpdate, onDismissReleaseUpdate }: LayoutProps) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const currentPage = navItems.find((item) => item.id === page) ?? navItems[0];
@@ -91,19 +94,24 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
             );
           })}
         </nav>
-        <div className="sidebar-footer">
-          <span>Version</span>
+        <div className={releaseUpdate ? "sidebar-footer has-release-update" : "sidebar-footer"}>
+          <span>{releaseUpdate ? "Next version" : "Version"}</span>
           <button
-            className="sidebar-version-button"
+            className={releaseUpdate ? "sidebar-version-button has-release-update" : "sidebar-version-button"}
             type="button"
-            title="About Faro"
-            aria-label={`About Faro ${appVersion?.display ?? "application version"}`}
+            title={releaseUpdate ? `About Faro · ${releaseUpdate.display} available` : "About Faro"}
+            aria-label={releaseUpdate ? `About Faro. Now ${appVersion?.display ?? "checking"}; next ${releaseUpdate.display} is available.` : `About Faro ${appVersion?.display ?? "application version"}`}
             onClick={() => {
               setMobileNavOpen(false);
               setAboutOpen(true);
             }}
           >
-            {appVersion?.display ?? "Checking"}
+            {releaseUpdate ? (
+              <>
+                <span className="sidebar-version-current">Now {appVersion?.display ?? "checking"}</span>
+                <span className="sidebar-version-next">Next {releaseUpdate.display}</span>
+              </>
+            ) : appVersion?.display ?? "Checking"}
           </button>
         </div>
       </aside>
@@ -150,16 +158,23 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
             </details>
           </div>
         </header>
-        {releaseUpdate && (
-          <output className="update-banner">
+        {showReleaseUpdate && releaseUpdate && (
+          <aside className="update-banner" role="status" aria-label={`Faro ${releaseUpdate.display} update available`}>
+            <span className="update-banner-icon" aria-hidden="true"><ArrowUpRight size={18} /></span>
             <div className="update-banner-copy">
+              <span className="update-banner-eyebrow">New release available</span>
               <strong>Faro {releaseUpdate.display} is available.</strong>
-              <span>You are running {appVersion?.display ?? "an earlier version"}.</span>
+              <span className="update-banner-current">You’re running {appVersion?.display ?? "an earlier version"}.</span>
             </div>
-            <a href={releaseUpdate.url} target="_blank" rel="noreferrer">
-              View release <ExternalLink size={15} />
-            </a>
-          </output>
+            <div className="update-banner-actions">
+              <a href={releaseUpdate.url} target="_blank" rel="noreferrer">
+                View release <ExternalLink size={15} />
+              </a>
+              <button className="update-banner-dismiss" type="button" onClick={onDismissReleaseUpdate} aria-label={`Dismiss Faro ${releaseUpdate.display} update`} title="Dismiss update">
+                <X size={16} />
+              </button>
+            </div>
+          </aside>
         )}
         <div className="main-content">{children}</div>
       </main>

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -230,7 +231,7 @@ func nullableString(value sql.NullString) any {
 }
 
 func nullableFloat(value sql.NullFloat64) any {
-	if value.Valid {
+	if value.Valid && !math.IsNaN(value.Float64) && !math.IsInf(value.Float64, 0) {
 		return value.Float64
 	}
 	return nil

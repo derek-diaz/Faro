@@ -4,6 +4,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, type ActivityPage, type FaroEvent } from "../api/client";
 import { ActivityTimePicker, activityTimeRangeLabel, type ActivityTimeRange } from "../components/ActivityTimePicker";
+import { ActivityTableLoading, ActivityTimelineLoading } from "../components/ActivityLoading";
 import { DomainFavicon } from "../components/DomainFavicon";
 import { EmptyState } from "../components/EmptyState";
 import { ResolutionSource } from "../components/ResolutionSource";
@@ -41,6 +42,7 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
   const [page, setPage] = useState(1);
   const [activity, setActivity] = useState<ActivityPage>(emptyActivity);
   const [loading, setLoading] = useState(true);
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [timeRange, setTimeRange] = useState<ActivityTimeRange>({ preset: "24h" });
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -51,8 +53,8 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
     setLoading(true);
     setLoadError("");
     api.events(search, filter, page, PAGE_SIZE, timeRange.preset, timeRange.from, timeRange.to)
-      .then((result) => { if (active) setActivity(result); })
-      .catch((error_) => { if (active) setLoadError(error_ instanceof Error ? error_.message : "Activity could not be loaded."); })
+      .then((result) => { if (active) { setActivity(result); setHasLoaded(true); } })
+      .catch((error_) => { if (active) { setLoadError(error_ instanceof Error ? error_.message : "Activity could not be loaded."); setHasLoaded(true); } })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [search, filter, page, refreshVersion, timeRange]);
@@ -69,6 +71,8 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
   const visibleEvents = activity.items;
   const firstResult = activity.total === 0 ? 0 : (activity.page - 1) * activity.page_size + 1;
   const lastResult = Math.min(activity.page * activity.page_size, activity.total);
+  const initialLoading = loading && !hasLoaded && !loadError;
+  const loadingRows = loading && !loadError && visibleEvents.length === 0;
 
   const addRule = useCallback(async (domain: string, action: "allow" | "block") => {
     setBusy(`${action}:${domain}`);
@@ -169,7 +173,7 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
   const rangeLabel = activityTimeRangeLabel(timeRange);
 
   return (
-    <div className="activity-explorer">
+    <div className="activity-explorer" data-loading={initialLoading ? "initial" : loading ? "refreshing" : undefined}>
       <section className="activity-controls">
         <form
           className="activity-search"
@@ -196,36 +200,37 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
           </div>
           <ActivityTimePicker value={timeRange} onChange={(nextRange) => { setTimeRange(nextRange); setPage(1); }} />
         </div>
-        <Suspense fallback={<div className="activity-timeline-chart" data-loading="true"><div className="activity-timeline-empty">Loading timeline…</div></div>}>
+        <Suspense fallback={<ActivityTimelineLoading />}>
           <ActivityTimeline timeline={activity.timeline} rangeLabel={rangeLabel} loading={loading} />
         </Suspense>
       </section>
 
-      <section className="activity-summary" aria-label="Activity summary">
-        <ActivityStat icon={<Activity size={16} />} label="All events" value={counts.all} tone="all" />
-        <ActivityStat icon={<Globe2 size={16} />} label="DNS requests" value={counts.dns} tone="dns" />
-        <ActivityStat icon={<ShieldX size={16} />} label="Blocked" value={counts.blocked} tone="blocked" />
-        <ActivityStat icon={<Settings2 size={16} />} label="System changes" value={counts.system} tone="system" />
+      <section className="activity-summary" aria-label="Activity summary" aria-busy={initialLoading}>
+        <ActivityStat icon={<Activity size={16} />} label="All events" value={counts.all} tone="all" loading={initialLoading} />
+        <ActivityStat icon={<Globe2 size={16} />} label="DNS requests" value={counts.dns} tone="dns" loading={initialLoading} />
+        <ActivityStat icon={<ShieldX size={16} />} label="Blocked" value={counts.blocked} tone="blocked" loading={initialLoading} />
+        <ActivityStat icon={<Settings2 size={16} />} label="System changes" value={counts.system} tone="system" loading={initialLoading} />
       </section>
 
-      <section className="panel activity-results-panel">
+      <section className="panel activity-results-panel" aria-busy={loading}>
         <div className="activity-results-toolbar">
           <div className="filter-label"><Filter size={16} /><span>Filter</span></div>
           <fieldset className="event-filter-tabs">
             <legend className="sr-only">Filter activity</legend>
-            <FilterButton active={filter === "all"} label="All" count={counts.all} onClick={() => selectFilter("all")} />
-            <FilterButton active={filter === "dns"} label="DNS" count={counts.dns} onClick={() => selectFilter("dns")} />
-            <FilterButton active={filter === "cache"} label="Cache" count={counts.cache} onClick={() => selectFilter("cache")} />
-            <FilterButton active={filter === "upstream"} label="Upstream" count={counts.upstream} onClick={() => selectFilter("upstream")} />
-            <FilterButton active={filter === "blocked"} label="Blocked" count={counts.blocked} onClick={() => selectFilter("blocked")} />
-            <FilterButton active={filter === "system"} label="System" count={counts.system} onClick={() => selectFilter("system")} />
+            <FilterButton active={filter === "all"} label="All" count={counts.all} loading={initialLoading} onClick={() => selectFilter("all")} />
+            <FilterButton active={filter === "dns"} label="DNS" count={counts.dns} loading={initialLoading} onClick={() => selectFilter("dns")} />
+            <FilterButton active={filter === "cache"} label="Cache" count={counts.cache} loading={initialLoading} onClick={() => selectFilter("cache")} />
+            <FilterButton active={filter === "upstream"} label="Upstream" count={counts.upstream} loading={initialLoading} onClick={() => selectFilter("upstream")} />
+            <FilterButton active={filter === "blocked"} label="Blocked" count={counts.blocked} loading={initialLoading} onClick={() => selectFilter("blocked")} />
+            <FilterButton active={filter === "system"} label="System" count={counts.system} loading={initialLoading} onClick={() => selectFilter("system")} />
           </fieldset>
-          <span className="results-count">{loading ? "Loading…" : `Showing ${firstResult}–${lastResult} of ${activity.total}`}</span>
+          <span className="results-count" role={loading ? "status" : undefined}>{loading ? (initialLoading ? "Preparing activity…" : "Updating activity…") : `Showing ${firstResult}–${lastResult} of ${activity.total}`}</span>
         </div>
 
         {loadError && <EmptyState title="Activity unavailable" body={loadError} />}
-        {!loadError && visibleEvents.length === 0 && <EmptyState title="No matching activity" body="Try another filter or point a device at Faro to begin collecting DNS activity." />}
-        {!loadError && visibleEvents.length > 0 && (
+        {!loadError && loadingRows && <ActivityTableLoading />}
+        {!loadError && !loading && visibleEvents.length === 0 && <EmptyState title="No matching activity" body="Try another filter or point a device at Faro to begin collecting DNS activity." />}
+        {!loadError && !loadingRows && visibleEvents.length > 0 && (
           <div className="activity-table-wrap">
             <table className="monitor-table event-table">
               <thead>
@@ -280,12 +285,12 @@ function eventUpstream(event: FaroEvent) {
   return typeof value === "string" ? value : null;
 }
 
-function ActivityStat({ icon, label, value, tone = "all" }: { readonly icon: ReactNode; readonly label: string; readonly value: number; readonly tone?: "all" | "dns" | "blocked" | "system" }) {
-  return <div className={`activity-stat ${tone}`}><span className="activity-stat-icon" aria-hidden="true">{icon}</span><div className="activity-stat-copy"><span>{label}</span><strong>{value}</strong></div></div>;
+function ActivityStat({ icon, label, value, tone = "all", loading = false }: { readonly icon: ReactNode; readonly label: string; readonly value: number; readonly tone?: "all" | "dns" | "blocked" | "system"; readonly loading?: boolean }) {
+  return <div className={`activity-stat ${tone}`}><span className="activity-stat-icon" aria-hidden="true">{icon}</span><div className="activity-stat-copy"><span>{label}</span>{loading ? <span className="activity-stat-skeleton" aria-hidden="true" /> : <strong>{value}</strong>}</div></div>;
 }
 
-function FilterButton({ active, label, count, onClick }: { readonly active: boolean; readonly label: string; readonly count: number; readonly onClick: () => void }) {
-  return <button className={active ? "active" : ""} type="button" onClick={onClick}>{label}<span>{count}</span></button>;
+function FilterButton({ active, label, count, loading = false, onClick }: { readonly active: boolean; readonly label: string; readonly count: number; readonly loading?: boolean; readonly onClick: () => void }) {
+  return <button className={active ? "active" : ""} type="button" onClick={onClick}>{label}{loading ? <span className="activity-count-skeleton" aria-hidden="true" /> : <span>{count}</span>}</button>;
 }
 
 function EventResult({ event }: { readonly event: FaroEvent }) {

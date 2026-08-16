@@ -7,7 +7,7 @@ FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS go-build
 ARG TARGETOS
 ARG TARGETARCH
 ARG BUILDARCH
-ARG FARO_VERSION=0.10.3
+ARG FARO_VERSION=0.10.4
 
 WORKDIR /app
 COPY go.mod go.sum* ./
@@ -46,7 +46,7 @@ RUN npm run build
 
 FROM debian:bookworm-slim
 
-ARG FARO_VERSION=0.10.3
+ARG FARO_VERSION=0.10.4
 
 LABEL org.opencontainers.image.title="Faro" \
       org.opencontainers.image.version="$FARO_VERSION" \

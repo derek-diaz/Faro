@@ -5,7 +5,7 @@ var (
 	// Number is the semantic version without the conventional leading "v".
 	// Release image builds replace this value with an ldflag so the binary,
 	// API, UI, and OCI image metadata all identify the same release.
-	Number = "0.10.2"
+	Number = "0.10.3"
 	// Display is the version as it should appear in the Faro interface and logs.
 	Display = "v" + Number
 )

@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,18 +41,12 @@ func boolInt(value bool) int {
 }
 
 func writeJSON(responseWriter http.ResponseWriter, status int, payload any) {
-	var body bytes.Buffer
-	if err := json.NewEncoder(&body).Encode(payload); err != nil {
-		log.Printf("encode JSON response: %v", err)
-		body.Reset()
-		_ = json.NewEncoder(&body).Encode(map[string]string{"error": "failed to encode response"})
-		status = http.StatusInternalServerError
-	}
 	responseWriter.Header().Set("Content-Type", "application/json")
-	responseWriter.Header().Set("Content-Length", strconv.Itoa(body.Len()))
 	responseWriter.WriteHeader(status)
-	if _, err := responseWriter.Write(body.Bytes()); err != nil {
-		log.Printf("write JSON response: %v", err)
+	// Keep large responses, especially encrypted redundancy snapshots, on the
+	// HTTP writer instead of creating a second full-size encoded copy first.
+	if err := json.NewEncoder(responseWriter).Encode(payload); err != nil {
+		log.Printf("encode JSON response: %v", err)
 	}
 }
 

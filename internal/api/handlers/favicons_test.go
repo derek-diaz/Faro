@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -16,6 +17,74 @@ import (
 
 	"github.com/derek/faro/internal/db"
 )
+
+func TestFaviconExpectedMissesDoNotReturnErrors(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	handler := &Handler{store: store, faviconDir: filepath.Join(t.TempDir(), "icons")}
+
+	requestIcon := func(domain string, status int) *httptest.ResponseRecorder {
+		t.Helper()
+		response := httptest.NewRecorder()
+		handler.favicon(response, httptest.NewRequest(http.MethodGet, "/api/favicons/"+domain, nil))
+		if response.Code != status || response.Header().Get("X-Faro-Favicon") != "placeholder" {
+			t.Fatalf("%s: got status %d and headers %v", domain, response.Code, response.Header())
+		}
+		return response
+	}
+	response := requestIcon("example.com", http.StatusNoContent)
+	if response.Header().Get("Cache-Control") != "no-store" || response.Body.Len() != 0 {
+		t.Fatal("disabled response must be empty and not cached")
+	}
+	if _, err := store.DB.Exec(`UPDATE settings SET value = 'true' WHERE key = 'favicon_fetching_enabled'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, domain := range []string{"version.bind", "ads.example", "faro-dns-test-178847778033769400.invalid", "router.home", "printer.local", "foo.test", "bad..com"} {
+		requestIcon(domain, http.StatusOK)
+	}
+	if _, err := os.Stat(handler.faviconDir); !os.IsNotExist(err) {
+		t.Fatal("disabled or ineligible lookups must not start the fetcher")
+	}
+	if _, err := store.DB.Exec(`INSERT INTO domain_favicons(domain, favicon_url, local_path, last_checked_at) VALUES('example.com', '', '', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	requestIcon("example.com", http.StatusOK)
+	requestIcon("example.com", http.StatusOK)
+}
+
+func TestFaviconSettingControlsCachedImages(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	iconPath := filepath.Join(t.TempDir(), "icon.svg")
+	icon := `<svg xmlns="http://www.w3.org/2000/svg"/>`
+	if err := os.WriteFile(iconPath, []byte(icon), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`INSERT INTO domain_favicons(domain, local_path) VALUES('example.com', ?)`, iconPath); err != nil {
+		t.Fatal(err)
+	}
+	handler := &Handler{store: store}
+	for _, enabled := range []string{"false", "true", "false", "true"} {
+		if _, err := store.DB.Exec(`UPDATE settings SET value = ? WHERE key = 'favicon_fetching_enabled'`, enabled); err != nil {
+			t.Fatal(err)
+		}
+		response := httptest.NewRecorder()
+		handler.favicon(response, httptest.NewRequest(http.MethodGet, "/api/favicons/example.com", nil))
+		if enabled == "true" {
+			if response.Code != http.StatusOK || response.Body.String() != icon || response.Header().Get("X-Faro-Favicon") != "cache" {
+				t.Fatalf("enabled: unexpected response %d %s", response.Code, response.Body.String())
+			}
+		} else if response.Code != http.StatusNoContent || response.Body.Len() != 0 {
+			t.Fatalf("disabled: unexpected response %d %s", response.Code, response.Body.String())
+		}
+	}
+}
 
 func TestCachedFaviconHonorsRecentFailure(t *testing.T) {
 	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))

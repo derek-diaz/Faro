@@ -1,11 +1,18 @@
-import { AlertCircle, AlertTriangle, Check, CheckCircle2, Database, Download, Eye, Filter, Info, ListFilter, Network, Plus, RefreshCw, Search, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { DialogSurface } from "@/components/DialogSurface";
+import { NativeSelect } from "@/components/ui/native-select";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Button } from "@/components/ui/button";
+import { AlertCircle, AlertTriangle, CheckCircle2, Database, Download, Eye, Info, ListFilter, Network, Plus, RefreshCw, Search, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useMemo, useRef, useState, type ReactNode, type SubmitEvent } from "react";
-import { api, type Blocklist } from "../api/client";
-import { ConfirmDialog } from "../components/ConfirmDialog";
-import { EmptyState } from "../components/EmptyState";
-import { blocklistCatalog, blocklistCategories, type BlocklistCategory, type CatalogBlocklist } from "../data/blocklists";
-import { errorMessage, formatNumber, normalizeURL } from "../utils/formatting";
+import { api, type Blocklist } from "@/api/client";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { EmptyState } from "@/components/EmptyState";
+import { blocklistCatalog, blocklistCategories, type BlocklistCategory, type CatalogBlocklist } from "@/data/blocklists";
+import { errorMessage, formatNumber, normalizeURL } from "@/utils/formatting";
 
 type BlocklistsProps = {
   readonly blocklists: Blocklist[];
@@ -166,21 +173,21 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
   }
 
   return (
-    <div className="blocklists-page">
+    <Tabs value={view} onValueChange={(value) => setView(value as View)} className="blocklists-page">
       <div className="blocklist-page-toolbar">
-        <div className="blocklist-view-tabs" role="tablist" aria-label="Blocklist views">
-          <button type="button" role="tab" aria-selected={view === "installed"} className={view === "installed" ? "active" : ""} onClick={() => setView("installed")}>Installed <span>{blocklists.length}</span></button>
-          <button type="button" role="tab" aria-selected={view === "available"} className={view === "available" ? "active" : ""} onClick={() => setView("available")}>Available <span>{available.length}</span></button>
-        </div>
+        <TabsList className="blocklist-view-tabs"  aria-label="Blocklist views">
+          <TabsTrigger value="installed"     >Installed <span>{blocklists.length}</span></TabsTrigger>
+          <TabsTrigger value="available"     >Available <span>{available.length}</span></TabsTrigger>
+        </TabsList>
         <div className="blocklist-primary-actions">
-          {view === "installed" && <button type="button" className="secondary" disabled={updatingAll || isInstalling || enabledCount === 0} onClick={() => void refreshAll()}><RefreshCw className={updatingAll ? "spinning" : ""} size={16} /><span>{updatingAll ? "Updating" : "Update all"}</span></button>}
-          <button type="button" disabled={isInstalling} onClick={() => setShowCustom(true)}><Plus size={16} /><span>Add custom</span></button>
+          {view === "installed" && <Button variant="outline" type="button" className="secondary" disabled={updatingAll || isInstalling || enabledCount === 0} onClick={() => void refreshAll()}><RefreshCw className={updatingAll ? "spinning" : ""} size={16} /><span>{updatingAll ? "Updating" : "Update all"}</span></Button>}
+          <Button variant="default" type="button" disabled={isInstalling} onClick={() => setShowCustom(true)}><Plus size={16} /><span>Add custom</span></Button>
         </div>
       </div>
 
       {notice && <BlocklistNotice notice={notice} onDismiss={() => setNotice(null)} />}
       {installing && <InstallationProgress installation={installing} />}
-      <BlocklistsContent
+      <TabsContent value={view}><BlocklistsContent
         view={view}
         blocklists={blocklists}
         enabledCount={enabledCount}
@@ -207,15 +214,15 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
         onRefreshList={refreshList}
         onRequestRemoval={(blocklist) => { setNotice(null); setPendingRemoval(blocklist); }}
         onInstall={installCatalog}
-      />
-      {showCustom && <CustomBlocklistDialog form={form} setForm={setForm} installing={installing} isInstalling={isInstalling} onSubmit={add} onClose={() => setShowCustom(false)} />}
+      /></TabsContent>
+      {showCustom && <CustomBlocklistDialog notice={notice} onDismissNotice={() => setNotice(null)} form={form} setForm={setForm} installing={installing} isInstalling={isInstalling} onSubmit={add} onClose={() => setShowCustom(false)} />}
       {pendingRemoval && <BlocklistRemovalDialog blocklist={pendingRemoval} busy={busy === pendingRemoval.id} onCancel={() => setPendingRemoval(null)} onConfirm={() => void remove(pendingRemoval)} />}
-    </div>
+    </Tabs>
   );
 }
 
 function BlocklistNotice({ notice, onDismiss }: { readonly notice: Exclude<Notice, null>; readonly onDismiss: () => void }) {
-  return <output className={`blocklist-notice ${notice.tone}`}>{notice.tone === "success" ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}<span>{notice.text}</span><button type="button" className="icon-button" aria-label="Dismiss message" onClick={onDismiss}><X size={15} /></button></output>;
+  return <output className={`blocklist-notice ${notice.tone}`}>{notice.tone === "success" ? <CheckCircle2 size={17} /> : <AlertCircle size={17} />}<span>{notice.text}</span><Button variant="ghost" size="icon" type="button" className="icon-button" aria-label="Dismiss message" onClick={onDismiss}><X size={15} /></Button></output>;
 }
 
 function InstallationProgress({ installation }: { readonly installation: Installation }) {
@@ -271,11 +278,10 @@ function InstalledBlocklists({ blocklists, enabledCount, entryCount, needsUpdate
       <SummaryItem icon={<ShieldCheck size={17} />} label="Enabled lists" value={String(enabledCount)} />
       <SummaryItem icon={<Database size={17} />} label="List entries" value={formatNumber(entryCount)} />
       <SummaryItem icon={<RefreshCw size={17} />} label="Need update" value={String(needsUpdate)} tone={needsUpdate > 0 ? "warning" : "healthy"} />
-      <SummaryItem icon={<Check size={17} />} label="Source library" value={enabledCount > 0 ? "Ready" : "Empty"} tone={enabledCount > 0 ? "healthy" : "warning"} />
     </section>
     <section className="panel installed-blocklists-panel">
       <div className="installed-list-heading"><div><h2>Installed lists</h2><p>Install sources once, then choose where they are used under Protection.</p></div><span>{enabledCount} of {blocklists.length} enabled</span></div>
-      {blocklists.length === 0 ? <EmptyState title="No blocklists installed" body="Browse available lists or add a custom URL to start filtering domains." action={<button type="button" onClick={() => setView("available")}>Browse available lists</button>} /> : <InstalledBlocklistTable blocklists={blocklists} isInstalling={isInstalling} busy={busy} onToggle={onToggle} onRefreshList={onRefreshList} onRequestRemoval={onRequestRemoval} />}
+      {blocklists.length === 0 ? <EmptyState title="No blocklists installed" body="Browse available lists or add a custom URL to start filtering domains." action={<Button variant="default" type="button" onClick={() => setView("available")}>Browse available lists</Button>} /> : <InstalledBlocklistTable blocklists={blocklists} isInstalling={isInstalling} busy={busy} onToggle={onToggle} onRefreshList={onRefreshList} onRequestRemoval={onRequestRemoval} />}
     </section>
   </>;
 }
@@ -288,7 +294,27 @@ function InstalledBlocklistTable({ blocklists, isInstalling, busy, onToggle, onR
   readonly onRefreshList: (blocklist: Blocklist) => Promise<void>;
   readonly onRequestRemoval: (blocklist: Blocklist) => void;
 }) {
-  return <div className="installed-blocklist-table"><div className="installed-blocklist-columns" aria-hidden="true"><span>List</span><span>Entries</span><span>Last updated</span><span>Status</span><span>Actions</span></div>{blocklists.map((blocklist) => <article className="installed-blocklist-row" key={blocklist.id}><div className="installed-list-identity"><span className="blocklist-source-mark">{sourceInitial(blocklist)}</span><div><strong>{blocklist.name}</strong><span>{sourceLabel(blocklist.url)} · {usageLabel(blocklist.protection_count)}</span></div></div><div className="installed-list-metric"><strong>{formatNumber(blocklist.entry_count ?? 0)}</strong><span>entries</span></div><div className="installed-list-updated"><strong>{formatUpdated(blocklist.last_refreshed_at)}</strong><span>{isStale(blocklist.last_refreshed_at) ? "Update recommended" : "Current"}</span></div><label className="blocklist-switch" title={blocklist.enabled ? "Disable list" : "Enable list"}><input type="checkbox" checked={blocklist.enabled} disabled={isInstalling || busy === blocklist.id} onChange={() => void onToggle(blocklist)} aria-label={`${blocklist.enabled ? "Disable" : "Enable"} ${blocklist.name}`} /><span aria-hidden="true" /><em>{blocklist.enabled ? "Enabled" : "Paused"}</em></label><div className="installed-list-actions"><button type="button" className="icon-button" title="Update now" aria-label={`Update ${blocklist.name}`} disabled={isInstalling || busy === blocklist.id} onClick={() => void onRefreshList(blocklist)}><RefreshCw className={busy === blocklist.id ? "spinning" : ""} size={16} /></button><button type="button" className="icon-button danger-icon" title="Remove" aria-label={`Remove ${blocklist.name}`} disabled={isInstalling || busy === blocklist.id} onClick={() => onRequestRemoval(blocklist)}><Trash2 size={16} /></button></div></article>)}</div>;
+  return (
+    <div className="installed-blocklist-table">
+      <div className="installed-blocklist-columns" aria-hidden="true"><span>List</span><span>Entries</span><span>Last updated</span><span>Status</span><span className="installed-actions-label">Actions</span></div>
+      {blocklists.map((blocklist) => <article className="installed-blocklist-row" key={blocklist.id} aria-label={blocklist.name}>
+        <div className="installed-list-identity">
+          <span className="blocklist-source-mark" aria-hidden="true">{sourceInitial(blocklist)}</span>
+          <div><strong>{blocklist.name}</strong><span>{sourceLabel(blocklist.url)} · {usageLabel(blocklist.protection_count)}</span></div>
+        </div>
+        <div className="installed-list-metric"><strong>{formatNumber(blocklist.entry_count ?? 0)}</strong><span>entries</span></div>
+        <div className="installed-list-updated"><strong>{formatUpdated(blocklist.last_refreshed_at)}</strong><span className={isStale(blocklist.last_refreshed_at) ? "stale" : undefined}>{isStale(blocklist.last_refreshed_at) ? "Update recommended" : "Current"}</span></div>
+        <label className="installed-list-status">
+          <Switch checked={blocklist.enabled} disabled={isInstalling || busy === blocklist.id} onCheckedChange={() => void onToggle(blocklist)} aria-label={`${blocklist.enabled ? "Disable" : "Enable"} ${blocklist.name}`} />
+          <span>{blocklist.enabled ? "Enabled" : "Paused"}</span>
+        </label>
+        <div className="installed-list-actions">
+          <Button variant="ghost" size="icon" type="button" title="Update now" aria-label={`Update ${blocklist.name}`} disabled={isInstalling || busy === blocklist.id} onClick={() => void onRefreshList(blocklist)}><RefreshCw className={busy === blocklist.id ? "spinning" : ""} size={16} /></Button>
+          <Button variant="ghost" size="icon" type="button" className="blocklist-remove-button" title="Remove" aria-label={`Remove ${blocklist.name}`} disabled={isInstalling || busy === blocklist.id} onClick={() => onRequestRemoval(blocklist)}><Trash2 size={16} /></Button>
+        </div>
+      </article>)}
+    </div>
+  );
 }
 
 function BlocklistCatalog({ catalogCandidates, filteredCatalog, visibleCategories, catalogQuery, catalogCategory, catalogProvider, catalogCompatibility, catalogProviders, hasCatalogFilters, installing, isInstalling, setCatalogQuery, setCatalogCategory, setCatalogProvider, setCatalogCompatibility, onInstall }: {
@@ -310,7 +336,7 @@ function BlocklistCatalog({ catalogCandidates, filteredCatalog, visibleCategorie
   readonly onInstall: (item: CatalogBlocklist) => Promise<void>;
 }) {
   const clearFilters = () => { setCatalogQuery(""); setCatalogCategory("All"); setCatalogProvider("All"); setCatalogCompatibility("All"); };
-  return <section className="panel blocklist-catalog-panel"><div className="catalog-heading"><div><h2>Find a blocklist</h2><p>Choose by what you want to protect, not by technical list names.</p></div><label className="catalog-search"><Search size={16} /><input value={catalogQuery} onChange={(event) => setCatalogQuery(event.target.value)} placeholder="Search by need, provider, or list" aria-label="Search available blocklists" /></label></div><div className="catalog-guide"><span className="catalog-guide-icon"><Sparkles size={18} /></span><div><strong>Start with one everyday list</strong><span>For most homes, that is enough. Add a Security, Privacy, or Content list only when you have a specific need.</span></div></div><div className="catalog-refine-row"><span><Filter size={14} /> Refine</span><label>Category<select value={catalogCategory} onChange={(event) => setCatalogCategory(event.target.value as "All" | BlocklistCategory)} aria-label="Filter blocklists by category"><option value="All">All categories ({catalogCandidates.length})</option>{blocklistCategories.map((category) => <option key={category.id} value={category.id}>{category.label} ({catalogCandidates.filter((item) => item.category === category.id).length})</option>)}</select></label><label>Provider<select value={catalogProvider} onChange={(event) => setCatalogProvider(event.target.value)} aria-label="Filter blocklists by provider"><option value="All">All providers</option>{catalogProviders.map((provider) => <option key={provider} value={provider}>{provider}</option>)}</select></label><label>Compatibility<select value={catalogCompatibility} onChange={(event) => setCatalogCompatibility(event.target.value as "All" | CatalogBlocklist["compatibility"])} aria-label="Filter blocklists by compatibility"><option value="All">Any compatibility</option><option value="Easy">Easy to use</option><option value="Balanced">Balanced</option><option value="Advanced">Advanced</option></select></label>{hasCatalogFilters && <button type="button" className="text-action" onClick={clearFilters}>Clear filters</button>}</div>{filteredCatalog.length === 0 ? <div className="compact-empty"><strong>No matching lists</strong><span>Try another search, category, or provider.</span>{hasCatalogFilters && <button type="button" className="secondary" onClick={clearFilters}>Clear filters</button>}</div> : <div className="blocklist-catalog-sections">{visibleCategories.map((category) => <CatalogCategory key={category.id} category={category} items={filteredCatalog.filter((item) => item.category === category.id)} installing={installing} isInstalling={isInstalling} onInstall={onInstall} />)}</div>}</section>;
+  return <section className="blocklist-catalog-panel"><div className="catalog-heading"><div><h2>Find a blocklist</h2><p>Browse filtering sources by category, provider, and compatibility.</p></div><label className="catalog-search"><Search size={16} /><Input variant="embedded" value={catalogQuery} onChange={(event) => setCatalogQuery(event.target.value)} placeholder="Search by need, provider, or list" aria-label="Search available blocklists" /></label></div><div className="catalog-guide"><span className="catalog-guide-icon"><Sparkles size={18} /></span><div><strong>Start with one everyday list</strong><span>Add specialized lists only when you need extra coverage.</span></div></div><div className="catalog-refine-row"><label>Category<NativeSelect value={catalogCategory} onChange={(event) => setCatalogCategory(event.target.value as "All" | BlocklistCategory)} aria-label="Filter blocklists by category"><option value="All">All categories ({catalogCandidates.length})</option>{blocklistCategories.map((category) => <option key={category.id} value={category.id}>{category.label} ({catalogCandidates.filter((item) => item.category === category.id).length})</option>)}</NativeSelect></label><label>Provider<NativeSelect value={catalogProvider} onChange={(event) => setCatalogProvider(event.target.value)} aria-label="Filter blocklists by provider"><option value="All">All providers</option>{catalogProviders.map((provider) => <option key={provider} value={provider}>{provider}</option>)}</NativeSelect></label><label>Compatibility<NativeSelect value={catalogCompatibility} onChange={(event) => setCatalogCompatibility(event.target.value as "All" | CatalogBlocklist["compatibility"])} aria-label="Filter blocklists by compatibility"><option value="All">Any compatibility</option><option value="Easy">Easy to use</option><option value="Balanced">Balanced</option><option value="Advanced">Advanced</option></NativeSelect></label>{hasCatalogFilters && <Button variant="link" type="button" className="text-action" onClick={clearFilters}>Clear filters</Button>}</div>{filteredCatalog.length === 0 ? <div className="compact-empty"><strong>No matching lists</strong><span>Try another search, category, or provider.</span>{hasCatalogFilters && <Button variant="outline" type="button" className="secondary" onClick={clearFilters}>Clear filters</Button>}</div> : <div className="blocklist-catalog-sections">{visibleCategories.map((category) => <CatalogCategory key={category.id} category={category} items={filteredCatalog.filter((item) => item.category === category.id)} installing={installing} isInstalling={isInstalling} onInstall={onInstall} />)}</div>}</section>;
 }
 
 function CatalogCategory({ category, items, installing, isInstalling, onInstall }: { readonly category: typeof blocklistCategories[number]; readonly items: CatalogBlocklist[]; readonly installing: Installation | null; readonly isInstalling: boolean; readonly onInstall: (item: CatalogBlocklist) => Promise<void> }) {
@@ -320,14 +346,23 @@ function CatalogCategory({ category, items, installing, isInstalling, onInstall 
 
 function CatalogCard({ item, installing, isInstalling, onInstall }: { readonly item: CatalogBlocklist; readonly installing: Installation | null; readonly isInstalling: boolean; readonly onInstall: (item: CatalogBlocklist) => Promise<void> }) {
   const itemInstalling = installing?.id === item.id;
-  return <article className={`catalog-blocklist-card ${item.recommended ? "recommended" : ""} ${itemInstalling ? "installing" : ""}`} aria-busy={itemInstalling}><div className="catalog-card-top"><span className={`compatibility-badge ${item.compatibility.toLowerCase()}`}>{item.compatibility === "Easy" ? "Easy to use" : item.compatibility}</span>{item.recommended && <span className="catalog-recommended"><CheckCircle2 size={13} /> Recommended</span>}</div><div><h4>{item.name}</h4><span className="catalog-provider">By {item.provider}</span></div><p>{item.description}</p><div className="catalog-best-for"><strong>Best for</strong><span>{item.bestFor}</span></div>{item.caution && <div className="catalog-caution"><Info size={13} /><span>{item.caution}</span></div>}<div className="catalog-card-footer"><div className="catalog-tags">{item.tags.map((tag) => <span key={tag}>{tag}</span>)}</div><button type="button" className="secondary catalog-install-button" disabled={isInstalling} onClick={() => void onInstall(item)}>{itemInstalling ? <RefreshCw className="spinning" size={15} /> : <Download size={15} />}<span>{itemInstalling ? "Installing…" : "Install"}</span></button></div></article>;
+  return (
+    <article className={`catalog-blocklist-card ${item.recommended ? "recommended" : ""} ${itemInstalling ? "installing" : ""}`} aria-busy={itemInstalling} aria-label={item.name}>
+      <div className="catalog-card-heading"><div><h4>{item.name}</h4><span className="catalog-provider">{item.provider}</span></div>{item.recommended && <span className="catalog-recommended"><CheckCircle2 size={13} />Recommended</span>}</div>
+      <div className="catalog-card-top"><span className={`compatibility-badge ${item.compatibility.toLowerCase()}`}>{item.compatibility === "Easy" ? "Easy to use" : item.compatibility}</span><div className="catalog-tags">{item.tags.map((tag) => <span key={tag}>{tag}</span>)}</div></div>
+      <p>{item.description}</p>
+      <div className="catalog-best-for"><strong>Best for</strong><span>{item.bestFor}</span></div>
+      {item.caution && <div className="catalog-caution"><Info size={14} /><span>{item.caution}</span></div>}
+      <div className="catalog-card-footer"><Button variant="outline" type="button" className="catalog-install-button" disabled={isInstalling} onClick={() => void onInstall(item)}>{itemInstalling ? <RefreshCw className="spinning" size={15} /> : <Download size={15} />}<span>{itemInstalling ? "Installing…" : "Install"}</span></Button></div>
+    </article>
+  );
 }
 
 type CustomBlocklistForm = { readonly name: string; readonly url: string; readonly enabled: boolean };
 
-function CustomBlocklistDialog({ form, setForm, installing, isInstalling, onSubmit, onClose }: { readonly form: CustomBlocklistForm; readonly setForm: (form: CustomBlocklistForm) => void; readonly installing: Installation | null; readonly isInstalling: boolean; readonly onSubmit: (event: SubmitEvent) => Promise<void>; readonly onClose: () => void }) {
+function CustomBlocklistDialog({ notice, onDismissNotice, form, setForm, installing, isInstalling, onSubmit, onClose }: { readonly notice: Notice; readonly onDismissNotice: () => void; readonly form: CustomBlocklistForm; readonly setForm: (form: CustomBlocklistForm) => void; readonly installing: Installation | null; readonly isInstalling: boolean; readonly onSubmit: (event: SubmitEvent) => Promise<void>; readonly onClose: () => void }) {
   const customInstalling = installing?.id === "custom";
-  return <div className="blocklist-modal-backdrop"><dialog open className="blocklist-modal" aria-labelledby="custom-blocklist-title"><header><div><h2 id="custom-blocklist-title">Add custom blocklist</h2><p>Use a public hosts file or plain domain list URL.</p></div><button type="button" className="icon-button" aria-label="Close custom blocklist form" disabled={customInstalling} onClick={onClose}><X size={18} /></button></header><form className="stack-form" onSubmit={(event) => void onSubmit(event)}><label>Name<input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="My blocklist" /></label><label>URL<input required type="url" value={form.url} onChange={(event) => setForm({ ...form, url: event.target.value })} placeholder="https://example.com/hosts.txt" /></label><label className="checkbox-row"><input type="checkbox" checked={form.enabled} onChange={(event) => setForm({ ...form, enabled: event.target.checked })} />Enable after installation</label><div className="blocklist-modal-actions"><button type="button" className="secondary" disabled={customInstalling} onClick={onClose}>Cancel</button><button type="submit" disabled={isInstalling}>{customInstalling ? <RefreshCw className="spinning" size={16} /> : <Plus size={16} />}<span>{customInstalling ? "Installing…" : "Add blocklist"}</span></button></div></form></dialog></div>;
+  return <DialogSurface className="blocklist-modal-backdrop" aria-labelledby="custom-blocklist-title" onClose={onClose} busy={customInstalling}><section className="blocklist-modal"><header><div><h2 id="custom-blocklist-title">Add custom blocklist</h2><p>Use a public hosts file or plain domain list URL.</p></div><Button variant="ghost" size="icon" type="button" className="icon-button" aria-label="Close custom blocklist form" disabled={customInstalling} onClick={onClose}><X size={18} /></Button></header>{notice?.tone === "error" && <BlocklistNotice notice={notice} onDismiss={onDismissNotice} />}<form className="stack-form" onSubmit={(event) => void onSubmit(event)}><label>Name<Input required value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} placeholder="My blocklist" /></label><label>URL<Input required type="url" value={form.url} onChange={(event) => setForm({ ...form, url: event.target.value })} placeholder="https://example.com/hosts.txt" /></label><label className="checkbox-row"><Checkbox  checked={form.enabled} onCheckedChange={(checked) => setForm({ ...form, enabled: checked })} />Enable after installation</label><div className="blocklist-modal-actions"><Button variant="outline" type="button" className="secondary" disabled={customInstalling} onClick={onClose}>Cancel</Button><Button variant="default" type="submit" disabled={isInstalling}>{customInstalling ? <RefreshCw className="spinning" size={16} /> : <Plus size={16} />}<span>{customInstalling ? "Installing…" : "Add blocklist"}</span></Button></div></form></section></DialogSurface>;
 }
 
 function BlocklistRemovalDialog({ blocklist, busy, onCancel, onConfirm }: { readonly blocklist: Blocklist; readonly busy: boolean; readonly onCancel: () => void; readonly onConfirm: () => void }) {

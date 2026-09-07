@@ -1,3 +1,4 @@
+import { Table } from "./ui/table";
 const timelineBarHeights = [34, 54, 42, 68, 49, 78, 58, 88, 64, 46, 72, 52, 82, 61, 40, 70, 50, 76] as const;
 const tableLoadingRows = Array.from({ length: 6 }, (_, index) => index);
 
@@ -28,7 +29,7 @@ export function ActivityTableLoading() {
   return (
     <div className="activity-table-wrap activity-table-loading" role="status" aria-label="Loading activity events">
       <span className="sr-only">Loading activity events…</span>
-      <table className="monitor-table event-table" aria-hidden="true">
+      <Table className="monitor-table event-table" aria-hidden="true">
         <thead>
           <tr><th>Time</th><th>Result</th><th>Domain or event</th><th>Device</th><th>Type</th><th>Source</th><th /></tr>
         </thead>
@@ -45,7 +46,7 @@ export function ActivityTableLoading() {
             </tr>
           ))}
         </tbody>
-      </table>
+      </Table>
     </div>
   );
 }

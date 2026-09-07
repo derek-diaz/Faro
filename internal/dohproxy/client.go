@@ -34,8 +34,11 @@ func newEndpointClient(endpoint Endpoint) (*endpointClient, error) {
 	parsed, _ := url.Parse(endpoint.URL)
 	host := parsed.Hostname()
 	transport := &http.Transport{
-		Proxy:             nil,
-		ForceAttemptHTTP2: true,
+		Proxy:               nil,
+		ForceAttemptHTTP2:   true,
+		IdleConnTimeout:     30 * time.Second,
+		MaxIdleConns:        8,
+		MaxIdleConnsPerHost: 2,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			ServerName: host,

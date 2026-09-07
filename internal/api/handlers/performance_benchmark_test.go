@@ -34,19 +34,27 @@ func BenchmarkHistoryReads(b *testing.B) {
 	window, _ := newActivityWindow(time.Now().Add(-24*time.Hour), time.Now())
 	b.Run("activity_rows", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if len(activityRecords(ctx, store.DB, 50, 0, "", "all", window)) != 50 {
+			records, err := activityRecords(ctx, store.DB, 50, 0, "", "all", window)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if len(records) != 50 {
 				b.Fatal("missing records")
 			}
 		}
 	})
 	b.Run("activity_counts", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			activityCounts(ctx, store.DB, "", window)
+			if _, err := activityCounts(ctx, store.DB, "", window); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 	b.Run("activity_timeline", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			activityTimelineFor(ctx, store.DB, "", "all", window)
+			if _, err := activityTimelineFor(ctx, store.DB, "", "all", window); err != nil {
+				b.Fatal(err)
+			}
 		}
 	})
 	b.Run("domain_sidebar", func(b *testing.B) {

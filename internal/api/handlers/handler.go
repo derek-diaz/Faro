@@ -49,6 +49,8 @@ type Handler struct {
 	cacheMetricsRefreshing   bool
 	dashboardMu              sync.Mutex
 	dashboardCache           dashboardCacheEntry
+	readGate                 readGate
+	historyMetrics           historyMetrics
 }
 
 func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Monitor, dependencies ...any) http.Handler {

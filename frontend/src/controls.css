@@ -1,0 +1,82 @@
+@layer components {
+  .faro-select, .faro-textarea {
+    width: 100%; min-width: 0; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--input-bg, var(--surface)); color: var(--ink); font: inherit;
+    font-size: 13px; padding: 8px 10px; box-shadow: none;
+  }
+  .faro-select { min-height: 36px; }
+  .faro-textarea { min-height: 96px; resize: vertical; line-height: 1.6; }
+  .faro-select:focus-visible, .faro-textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .faro-select:disabled, .faro-textarea:disabled { opacity: .5; cursor: not-allowed; }
+  .auth-input { min-height: 46px; overflow: hidden; }
+  .auth-input:focus-within, .activity-search:focus-within, .search-modal-bar:focus-within,
+  .onboarding-suffix-input:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; box-shadow: none; }
+  .auth-password-toggle { color: var(--text-muted); }
+  .faro-checkbox { display: inline-grid; flex: 0 0 auto; place-items: center; width: 17px; height: 17px; min-height: 0; padding: 0; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--on-accent); cursor: pointer; }
+  .faro-popover { width: min(438px, calc(100vw - 24px)); max-height: var(--available-height); overflow-y: auto; border: 1px solid var(--border); border-radius: 12px; padding: 16px; background: var(--surface-raised); color: var(--ink); box-shadow: 0 12px 32px #0002; outline: none; }
+  .activity-range-popover :is(.activity-time-popover-heading strong, .activity-common-ranges > strong, .activity-now-heading strong) { color: var(--ink); }
+  .activity-range-popover :is(.activity-now-heading span, .activity-now-panel p) { color: var(--text-muted); }
+  .activity-range-popover .activity-relative-form { grid-template-columns: minmax(0, .8fr) minmax(0, .8fr) minmax(0, 1.2fr) auto; gap: 6px; }
+  .activity-range-error { color: var(--blocked); }
+  .faro-checkbox[data-checked] { background: var(--action); border-color: var(--accent); color: var(--on-action); }
+  .faro-checkbox:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .faro-checkbox[data-disabled] { opacity: .5; cursor: not-allowed; }
+  .faro-dialog-backdrop { position: fixed; inset: 0; z-index: 100; background: #090f2070; backdrop-filter: blur(4px); }
+  .faro-dialog-layer { position: fixed; inset: 0; z-index: 101; width: 100%; height: 100dvh; max-width: none; max-height: none; margin: 0; border: 0; padding: 24px; background: transparent; color: var(--ink); pointer-events: none; outline: none; overflow-y: auto; }
+  .faro-dialog-layer > * { pointer-events: auto; }
+  .faro-dialog-layer.drawer-backdrop { padding: 0; }
+  .faro-dialog-layer.blocklist-modal-backdrop { display: grid; place-items: center; }
+  .faro-dialog-layer .blocklist-modal { display: block; position: relative; margin: auto; }
+  .faro-dialog-layer :is(.search-modal, .about-modal, .protection-wizard, .blocklist-modal) { max-width: 100%; background: var(--surface); color: var(--ink); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 24px 80px #0003; }
+  .faro-dialog-layer :is(.domain-drawer, .notification-drawer, .device-detail-drawer) { background: var(--surface); color: var(--ink); border-left: 1px solid var(--border); box-shadow: none; }
+  :is(.settings-page, .protection-page, .blocklists-page, .devices-page, .upstreams-page) .panel { background: var(--surface); }
+  .stack-form { gap: 18px; }
+  .faro-tabs-list { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-muted); }
+  .faro-tab { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 12px; min-height: 36px; border: 0; border-radius: 7px; background: transparent; color: var(--text-muted); font-size: 12px; font-weight: 550; box-shadow: none; }
+  .faro-tab[data-active] { background: var(--surface); color: var(--accent); box-shadow: 0 1px 4px #0000000a; }
+  .faro-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .faro-tab-panel { min-width: 0; outline: none; }
+  .faro-tab-panel:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+  .faro-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .faro-table th { padding: 12px; background: var(--surface-muted); color: var(--text-muted); font-size: 10px; font-weight: 600; letter-spacing: .6px; text-align: left; border-bottom: 1px solid var(--border); }
+  .faro-table td { padding: 14px 12px; border-bottom: 1px solid var(--border-subtle); }
+  .faro-table tbody tr:hover { background: var(--surface-muted); }
+  .faro-table tbody tr:last-child td { border-bottom: 0; }
+  .stack-form > label > span { color: var(--text-muted); font-size: 12px; font-weight: 550; }
+  .form-panel .stack-form > .faro-button { align-self: start; }
+  @media (max-width: 640px) {
+    .faro-dialog-layer { padding: 12px; }
+    .faro-dialog-layer.protection-wizard-backdrop { padding: 0; }
+    .faro-dialog-layer .protection-wizard { width: 100%; height: 100dvh; min-height: 0; max-height: 100dvh; border: 0; border-radius: 0; }
+    .protection-wizard > header, .protection-wizard-body { padding: 20px; }
+    .protection-step-track { padding-inline: 20px; }
+    .protection-wizard-body .protection-device-choices { max-height: none; overflow: visible; }
+    .protection-wizard > footer { padding: 16px 20px max(16px, env(safe-area-inset-bottom)); }
+  }
+}
+
+@layer components {
+  .faro-switch { display: inline-flex; align-items: center; position: relative; flex: 0 0 auto; width: 34px; height: 20px; padding: 2px; border: 1px solid var(--text-soft); border-radius: 999px; background: var(--surface-subtle); cursor: pointer; transition: background 150ms ease; }
+  .faro-switch-thumb { display: block; width: 14px; height: 14px; border-radius: 50%; background: var(--text-muted); transition: transform 150ms ease; }
+  .faro-switch[data-checked] { background: var(--action); border-color: var(--accent); }
+  .faro-switch[data-checked] .faro-switch-thumb { background: var(--on-action); transform: translateX(14px); }
+  .faro-switch[data-disabled] { opacity: .5; cursor: not-allowed; }
+  .faro-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+}
+
+@layer components {
+  .faro-radio-card { display: grid; grid-template-columns: 20px minmax(0, 1fr) 16px; align-items: start; gap: 10px; padding: 16px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text-muted); text-align: left; box-shadow: none; cursor: pointer; }
+  .faro-radio-card:hover { background: var(--surface-muted); border-color: var(--accent); }
+  .faro-radio-card[data-checked] { background: var(--surface-subtle); border-color: var(--accent); color: var(--accent); }
+  .faro-radio-card > span { display: grid; gap: 4px; }
+  .faro-radio-card strong { color: var(--ink); font-size: 13px; font-weight: 550; }
+  .faro-radio-card small { color: var(--text-muted); font-size: 12px; font-weight: 450; line-height: 1.6; }
+  .faro-radio-card-indicator:not([data-checked]) { visibility: hidden; }
+  .faro-radio-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  .faro-radio-card[data-disabled] { opacity: .5; cursor: not-allowed; }
+}
+
+@layer components {
+  .faro-radio-card[data-checked]:hover { background: var(--surface-subtle); border-color: var(--accent); }
+  .faro-radio-card:not([data-checked]):hover { border-color: var(--border); }
+}

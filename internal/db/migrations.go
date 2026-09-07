@@ -21,7 +21,7 @@ const (
 	// CurrentSchemaVersion is the highest SQLite schema version understood by
 	// this Faro release. It is deliberately independent of the application
 	// version so a future release can make multiple schema changes safely.
-	CurrentSchemaVersion = 13
+	CurrentSchemaVersion = 14
 
 	upgradeStateFilename = "faro-upgrade.json"
 	migrationBackupDir   = "migrations"
@@ -202,6 +202,15 @@ var migrationDefinitions = []migrationDefinition{
 		);
 		CREATE INDEX IF NOT EXISTS idx_troubleshooting_active ON troubleshooting_exceptions(protection_id, domain, expires_at);
 		CREATE INDEX IF NOT EXISTS idx_troubleshooting_client ON troubleshooting_exceptions(device_id);
+		UPDATE settings SET value = ? WHERE key = 'database_schema_version';`, strconv.Itoa(CurrentSchemaVersion))
+		return err
+	}},
+	{version: 14, name: "transactional-query-log-progress", apply: func(ctx context.Context, store *Store) error {
+		_, err := store.DB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS query_log_progress (
+			path TEXT PRIMARY KEY,
+			identity TEXT NOT NULL,
+			offset INTEGER NOT NULL CHECK(offset >= 0)
+		);
 		UPDATE settings SET value = ? WHERE key = 'database_schema_version';`, strconv.Itoa(CurrentSchemaVersion))
 		return err
 	}},

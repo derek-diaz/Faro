@@ -1,8 +1,17 @@
+import { DialogSurface } from "./DialogSurface";
+import { Button } from "./ui/button";
+import { Badge } from "./ui/badge";
 import { Ban, CheckCircle2, Database, GitBranch, Route, Server, ShieldCheck, ShieldX, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, type DecisionRule, type DNSDecision, type DNSQuery, type DomainSummary } from "../api/client";
 import { DomainFavicon } from "./DomainFavicon";
 import { StatusBadge } from "./StatusBadge";
+
+const observedStatusStyles: Record<string, string> = {
+  allowed: "bg-accent text-accent-foreground",
+  blocked: "bg-destructive/10 text-destructive",
+  mixed: "bg-[var(--warn-soft)] text-[var(--warn)]",
+};
 
 type DomainDrawerProps = {
   readonly domain: string | null;
@@ -11,17 +20,8 @@ type DomainDrawerProps = {
 };
 
 export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) {
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  const previousFocus = useRef<HTMLElement | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  useEffect(() => {
-    if (!domain) return;
-    const dialog = dialogRef.current;
-    previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    dialog?.showModal();
-    return () => { dialog?.close(); previousFocus.current?.focus({ preventScroll: true }); };
-  }, [domain]);
   const [summary, setSummary] = useState<DomainSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<"allow" | "block" | null>(null);
@@ -74,14 +74,10 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
   if (!domain) return null;
 
   return (
-    <dialog
+    <DialogSurface
+      onClose={onClose}
       className="drawer-backdrop"
-      ref={dialogRef}
-      onCancel={(event) => { event.preventDefault(); onClose(); }}
       aria-label={`${domain} details`}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
     >
       <aside className="domain-drawer domain-inspector">
         <header className="domain-inspector-header">
@@ -89,32 +85,32 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
             <DomainFavicon domain={domain} />
             <div>
               <strong>{domain}</strong>
-              <span className={`domain-status ${summary?.status.toLowerCase() ?? "loading"}`}>{summary ? `Observed: ${summary.status}` : "Loading"}</span>
+              <Badge variant="secondary" className={`domain-observed-status ${observedStatusStyles[summary?.status.toLowerCase() ?? ""] ?? ""}`}>{summary ? `Observed: ${summary.status}` : "Loading"}</Badge>
             </div>
           </div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close domain details">
+          <Button variant="ghost" size="icon" className="icon-button" type="button" onClick={onClose} aria-label="Close domain details">
             <X size={18} />
-          </button>
+          </Button>
         </header>
 
         {error && <div className="error-banner" role="alert">{error}</div>}
-        {notice && <p role="status">{notice}</p>}
+        {notice && <p className="domain-notice" role="status">{notice}</p>}
         {loading && <div className="drawer-loading">Loading domain activity...</div>}
 
         {!loading && summary && (
           <div className="domain-inspector-body">
             <div className="domain-action-bar">
               {(
-                <button type="button" onClick={() => void addRule("block")} disabled={busy !== null || Boolean(summary.current_home_decision.allowlist) || Boolean(summary.current_home_decision.manual_block)}>
+                <Button variant="default" type="button" onClick={() => void addRule("block")} disabled={busy !== null || Boolean(summary.current_home_decision.allowlist) || Boolean(summary.current_home_decision.manual_block)}>
                   <Ban size={16} />
                   <span>Block in Home</span>
-                </button>
+                </Button>
               )}
               {(
-                <button type="button" className="secondary" onClick={() => void addRule("allow")} disabled={busy !== null || summary.home_allow_exception}>
+                <Button variant="outline" type="button" className="secondary" onClick={() => void addRule("allow")} disabled={busy !== null || summary.home_allow_exception}>
                   <ShieldCheck size={16} />
                   <span>Allow in Home</span>
-                </button>
+                </Button>
               )}
             </div>
 
@@ -169,7 +165,7 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
           </div>
         )}
       </aside>
-    </dialog>
+    </DialogSurface>
   );
 }
 

@@ -1,3 +1,5 @@
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import { Check, Eye, EyeOff, LockKeyhole, LogIn, Network, ShieldCheck, UserRound } from "lucide-react";
 import { useState, type SubmitEvent } from "react";
 import type { ThemeMode } from "../theme";
@@ -107,7 +109,7 @@ function AuthForm({ mode, username, setUsername, password, setPassword, confirma
       <form className="auth-form" onSubmit={(event) => void onSubmit(event)}>
         <label>
           <span>Username</span>
-          <div className="auth-input"><UserRound size={18} /><input autoComplete="username" autoFocus value={username} onChange={(event) => setUsername(event.target.value)} required minLength={3} maxLength={64} /></div>
+          <div className="auth-input"><UserRound size={18} /><Input variant="embedded" autoComplete="username" autoFocus value={username} onChange={(event) => setUsername(event.target.value)} required minLength={3} maxLength={64} /></div>
         </label>
         <PasswordField mode={mode} password={password} setPassword={setPassword} visible={visible} setVisible={setVisible} />
         {mode === "setup" && <SetupPasswordFields confirmation={confirmation} setConfirmation={setConfirmation} visible={visible} passwordLongEnough={passwordLongEnough} passwordsMatch={passwordsMatch} />}
@@ -154,7 +156,7 @@ function PasswordField({ mode, password, setPassword, visible, setVisible }: Pas
   return (
     <label>
       <span>Password</span>
-      <div className="auth-input"><LockKeyhole size={18} /><input type={inputType} autoComplete={mode === "setup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} required minLength={mode === "setup" ? 8 : undefined} /><button type="button" onClick={() => setVisible(!visible)} aria-label={visibilityLabel}>{visible ? <EyeOff size={18} /> : <Eye size={18} />}</button></div>
+      <div className="auth-input"><LockKeyhole size={18} /><Input variant="embedded" type={inputType} autoComplete={mode === "setup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} required minLength={mode === "setup" ? 8 : undefined} /><Button variant="ghost" size="icon" className="auth-password-toggle size-11 self-stretch rounded-none" type="button" onClick={() => setVisible(!visible)} aria-label={visibilityLabel}>{visible ? <EyeOff size={18} /> : <Eye size={18} />}</Button></div>
     </label>
   );
 }
@@ -173,7 +175,7 @@ function SetupPasswordFields({ confirmation, setConfirmation, visible, passwordL
     <>
       <label>
         <span>Confirm password</span>
-        <div className="auth-input"><LockKeyhole size={18} /><input type={inputType} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required minLength={8} /></div>
+        <div className="auth-input"><LockKeyhole size={18} /><Input variant="embedded" type={inputType} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required minLength={8} /></div>
       </label>
       <div className="password-requirements" aria-label="Password requirements">
         <span className={passwordLongEnough ? "met" : ""}><Check size={13} /> 8 or more characters</span>
@@ -185,10 +187,10 @@ function SetupPasswordFields({ confirmation, setConfirmation, visible, passwordL
 
 function SubmitButton({ mode, busy }: Readonly<Pick<AuthLayoutProps, "mode" | "busy">>) {
   return (
-    <button className="auth-submit" type="submit" disabled={busy}>
+    <Button variant="default" className="auth-submit h-11 w-full" type="submit" disabled={busy}>
       {mode === "setup" ? <ShieldCheck size={17} /> : <LogIn size={17} />}
       <span>{authSubmitLabel(mode, busy)}</span>
-    </button>
+    </Button>
   );
 }
 
@@ -196,7 +198,7 @@ function JoinExisting({ onJoinExisting }: Readonly<Pick<AuthLayoutProps, "onJoin
   return (
     <div className="auth-join-existing">
       <span>Already have Faro running elsewhere?</span>
-      <button type="button" className="secondary" onClick={onJoinExisting}><Network size={16} />Join an existing Faro home</button>
+      <Button variant="outline" type="button" className="secondary" onClick={onJoinExisting}><Network size={16} />Join an existing Faro home</Button>
     </div>
   );
 }

@@ -1,7 +1,10 @@
-import { Activity, Ban, CheckCircle2, ChevronLeft, ChevronRight, Filter, Globe2, Search, Settings2, ShieldCheck, ShieldX, X } from "lucide-react";
+import { Table } from "../components/ui/table";
+import { Button } from "../components/ui/button";
+import { Input } from "../components/ui/input";
+import { AlertTriangle, Ban, CheckCircle2, ChevronLeft, ChevronRight, RefreshCw, Search, ShieldCheck, X } from "lucide-react";
 import { tableFeatures, useTable } from "@tanstack/react-table";
 import type { ColumnDef } from "@tanstack/react-table";
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { api, type ActivityPage, type ActivityRows, type ActivitySummary, type FaroEvent } from "../api/client";
 import { ActivityTimePicker, activityTimeRangeLabel, type ActivityTimeRange } from "../components/ActivityTimePicker";
 import { ActivityTableLoading, ActivityTimelineLoading } from "../components/ActivityLoading";
@@ -195,8 +198,8 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
         const isBlocked = event.type === "dns.blocked";
         return domain ? (
           <div className="table-icon-actions">
-            <button type="button" title={`Block ${domain}`} aria-label={`Block ${domain}`} disabled={busy !== null || isBlocked} onClick={() => void addRule(domain, "block")}><Ban size={16} /></button>
-            <button type="button" title={`Allow ${domain}`} aria-label={`Allow ${domain}`} disabled={busy !== null} onClick={() => void addRule(domain, "allow")}><ShieldCheck size={16} /></button>
+            <Button variant="ghost" size="icon-sm" type="button" title={`Block ${domain}`} aria-label={`Block ${domain}`} disabled={busy !== null || isBlocked} onClick={() => void addRule(domain, "block")}><Ban size={16} /></Button>
+            <Button variant="ghost" size="icon-sm" type="button" title={`Allow ${domain}`} aria-label={`Allow ${domain}`} disabled={busy !== null} onClick={() => void addRule(domain, "allow")}><ShieldCheck size={16} /></Button>
           </div>
         ) : null;
       }
@@ -225,55 +228,53 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
           }}
         >
           <Search size={17} />
-          <input value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="Search domains, devices, or events" />
-          <button className="clear-search" type="button" disabled={!searchInput && !search} onClick={clearSearch} aria-label="Clear search"><X size={16} /></button>
-          <button className="search-submit" type="submit">Search</button>
+          <Input variant="embedded" aria-label="Search activity" value={searchInput} onChange={(event) => setSearchInput(event.target.value)} placeholder="Search domains, devices, or events" />
+          {(searchInput || search) && <Button variant="ghost" size="icon-sm" type="button" onClick={clearSearch} aria-label="Clear search"><X size={16} /></Button>}
+          <Button type="submit">Search</Button>
         </form>
       </section>
 
       <section className="panel activity-timeline-panel" aria-label="Activity timeline" aria-busy={summaryLoading}>
         <div className="activity-timeline-header">
-          <div>
-            <span className="activity-timeline-kicker">Activity timeline</span>
-            <h2>Queries and events over time</h2>
-            <p>See when activity happened, then narrow the table to the same window.</p>
-          </div>
+          <h2>Activity over time</h2>
           <ActivityTimePicker value={timeRange} onChange={(nextRange) => { setTimeRange(nextRange); setPage(1); }} />
         </div>
         <Suspense fallback={<ActivityTimelineLoading />}>
-          <ActivityTimeline timeline={summaryError ? null : activity.timeline} rangeLabel={rangeLabel} loading={summaryLoading} />
+          {summaryError ? <div className="activity-chart-unavailable">The timeline couldn’t be loaded. Use Retry below to refresh activity.</div> : <ActivityTimeline timeline={activity.timeline} rangeLabel={rangeLabel} loading={summaryLoading} />}
         </Suspense>
       </section>
 
       <section className="activity-summary" aria-label="Activity summary" aria-busy={summaryLoading}>
-        <ActivityStat icon={<Activity size={16} />} label="All events" value={counts.all} tone="all" loading={!totalsReady} />
-        <ActivityStat icon={<Globe2 size={16} />} label="DNS requests" value={counts.dns} tone="dns" loading={initialLoading} />
-        <ActivityStat icon={<ShieldX size={16} />} label="Blocked" value={counts.blocked} tone="blocked" loading={initialLoading} />
-        <ActivityStat icon={<Settings2 size={16} />} label="System changes" value={counts.system} tone="system" loading={initialLoading} />
+        <ActivityStat label="All events" value={counts.all} loading={!totalsReady} />
+        <ActivityStat label="DNS requests" value={counts.dns} loading={!totalsReady} />
+        <ActivityStat label="Blocked" value={counts.blocked} loading={!totalsReady} />
+        <ActivityStat label="System changes" value={counts.system} loading={!totalsReady} />
       </section>
 
       <section className="panel activity-results-panel" aria-busy={loading}>
         <div className="activity-results-toolbar">
-          <div className="filter-label"><Filter size={16} /><span>Filter</span></div>
           <fieldset className="event-filter-tabs">
             <legend className="sr-only">Filter activity</legend>
-            <FilterButton active={filter === "all"} label="All" count={counts.all} loading={initialLoading} onClick={() => selectFilter("all")} />
-            <FilterButton active={filter === "dns"} label="DNS" count={counts.dns} loading={initialLoading} onClick={() => selectFilter("dns")} />
-            <FilterButton active={filter === "cache"} label="Cache" count={counts.cache} loading={initialLoading} onClick={() => selectFilter("cache")} />
-            <FilterButton active={filter === "upstream"} label="Upstream" count={counts.upstream} loading={initialLoading} onClick={() => selectFilter("upstream")} />
-            <FilterButton active={filter === "blocked"} label="Blocked" count={counts.blocked} loading={initialLoading} onClick={() => selectFilter("blocked")} />
-            <FilterButton active={filter === "system"} label="System" count={counts.system} loading={initialLoading} onClick={() => selectFilter("system")} />
+            <FilterButton active={filter === "all"} label="All" count={counts.all} loading={!totalsReady} onClick={() => selectFilter("all")} />
+            <FilterButton active={filter === "dns"} label="DNS" count={counts.dns} loading={!totalsReady} onClick={() => selectFilter("dns")} />
+            <FilterButton active={filter === "cache"} label="Cache" count={counts.cache} loading={!totalsReady} onClick={() => selectFilter("cache")} />
+            <FilterButton active={filter === "upstream"} label="Upstream" count={counts.upstream} loading={!totalsReady} onClick={() => selectFilter("upstream")} />
+            <FilterButton active={filter === "blocked"} label="Blocked" count={counts.blocked} loading={!totalsReady} onClick={() => selectFilter("blocked")} />
+            <FilterButton active={filter === "system"} label="System" count={counts.system} loading={!totalsReady} onClick={() => selectFilter("system")} />
           </fieldset>
           <span className="results-count" role={loading ? "status" : undefined}>{loading ? (initialLoading ? "Preparing activity…" : "Updating activity…") : `Showing ${firstResult}–${lastResult}${resultTotal}`}</span>
         </div>
 
-        {summaryError && <p role="alert">Totals unavailable: {summaryError} <button className="secondary" type="button" onClick={() => setRefreshVersion((value) => value + 1)}>Retry</button></p>}
-        {loadError && <EmptyState title="Activity unavailable" body={loadError} />}
+        {(loadError || summaryError) && <div className="activity-refresh-error" role="alert">
+          <AlertTriangle size={18} aria-hidden="true" />
+          <div><strong>{loadError ? "Couldn’t refresh activity" : "Activity totals unavailable"}</strong><p>{loadError ? (visibleEvents.length ? "The last loaded events are still shown. Try again in a moment." : "Try again in a moment to load events.") : "The event list is available, but totals and the timeline couldn’t be updated."}</p><details><summary>Technical details</summary><p>{[loadError, summaryError].filter(Boolean).join(" · ")}</p></details></div>
+          <Button variant="outline" size="sm" disabled={loading || summaryLoading} onClick={() => setRefreshVersion((value) => value + 1)}><RefreshCw size={14} />Retry</Button>
+        </div>}
         {!loadError && loadingRows && <ActivityTableLoading />}
         {!loadError && !loading && visibleEvents.length === 0 && <EmptyState title="No matching activity" body="Try another filter or point a device at Faro to begin collecting DNS activity." />}
-        {!loadError && !loadingRows && visibleEvents.length > 0 && (
+        {!loadingRows && visibleEvents.length > 0 && (
           <div className="activity-table-wrap">
-            <table className="monitor-table event-table">
+            <Table className="monitor-table event-table">
               <thead>
                 {eventTable.getHeaderGroups().map((headerGroup) => (
                   <tr key={headerGroup.id}>
@@ -296,16 +297,16 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </Table>
           </div>
         )}
         {activity.items.length > 0 && (
           <div className="activity-pagination" aria-label="Activity pages">
             <span>{firstResult}–{lastResult}{resultTotal} events</span>
             <div>
-              <button type="button" disabled={loading || page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={16} /> Newer</button>
+              <Button variant="outline" type="button" disabled={loading || page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={16} /> Newer</Button>
               <strong>Page {activity.page}{totalsReady ? ` of ${Math.max(activity.total_pages, activity.page)}` : ""}</strong>
-              <button type="button" disabled={loading || !hasMore} onClick={() => setPage((current) => current + 1)}>Older <ChevronRight size={16} /></button>
+              <Button variant="outline" type="button" disabled={loading || !hasMore} onClick={() => setPage((current) => current + 1)}>Older <ChevronRight size={16} /></Button>
             </div>
           </div>
         )}
@@ -326,12 +327,12 @@ function eventUpstream(event: FaroEvent) {
   return typeof value === "string" ? value : null;
 }
 
-function ActivityStat({ icon, label, value, tone = "all", loading = false }: { readonly icon: ReactNode; readonly label: string; readonly value: number; readonly tone?: "all" | "dns" | "blocked" | "system"; readonly loading?: boolean }) {
-  return <div className={`activity-stat ${tone}`}><span className="activity-stat-icon" aria-hidden="true">{icon}</span><div className="activity-stat-copy"><span>{label}</span>{loading ? <span className="activity-stat-skeleton" aria-hidden="true" /> : <strong>{value}</strong>}</div></div>;
+function ActivityStat({ label, value, loading = false }: { readonly label: string; readonly value: number; readonly loading?: boolean }) {
+  return <dl className="activity-metric"><dt>{label}</dt><dd>{loading ? <><span className="activity-count-skeleton" aria-hidden="true" /><span className="sr-only">Loading</span></> : value.toLocaleString()}</dd></dl>;
 }
 
 function FilterButton({ active, label, count, loading = false, onClick }: { readonly active: boolean; readonly label: string; readonly count: number; readonly loading?: boolean; readonly onClick: () => void }) {
-  return <button className={active ? "active" : ""} type="button" onClick={onClick}>{label}{loading ? <span className="activity-count-skeleton" aria-hidden="true" /> : <span>{count}</span>}</button>;
+  return <Button variant="ghost" size="sm" className={active ? "bg-secondary text-accent-foreground" : undefined} aria-pressed={active} type="button" onClick={onClick}>{label}{loading ? <span className="activity-count-skeleton" aria-hidden="true" /> : <span>{count.toLocaleString()}</span>}</Button>;
 }
 
 function EventResult({ event }: { readonly event: FaroEvent }) {
@@ -352,7 +353,6 @@ function EventType({ event }: { readonly event: FaroEvent }) {
     return (
       <span className="event-type-chip dns-record-type" title={`${type} record request (${family})`}>
         <strong>{type}</strong>
-        <small>{family}</small>
       </span>
     );
   }

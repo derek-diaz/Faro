@@ -1,3 +1,6 @@
+import { PageHeader } from "./PageHeader";
+import { Button } from "./ui/button";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuItem, DropdownMenuSeparator } from "./ui/dropdown-menu";
 import {
 	Activity,
 	ArrowUpRight,
@@ -82,6 +85,7 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
                 key={item.id}
                 className={page === item.id ? "nav-item active" : "nav-item"}
                 href={item.href}
+                aria-current={page === item.id ? "page" : undefined}
                 onClick={(event) => {
                   event.preventDefault();
                   setPage(item.id);
@@ -117,47 +121,32 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
       </aside>
 
       <main className="main">
-        <header className="topbar">
-          <div>
-            <h1>{currentPage.label}</h1>
-            <p>{currentPage.description}</p>
-          </div>
-          <div className="topbar-actions">
-            <button className="search-trigger" type="button" onClick={onOpenSearch}>
+        <PageHeader title={currentPage.label} description={currentPage.description} actions={<>
+            <Button variant="outline" className="gap-2 bg-card" onClick={onOpenSearch}>
               <Search size={17} />
               <span>Search</span>
-              <kbd>Ctrl K</kbd>
-            </button>
+              <kbd className="rounded bg-muted px-1 text-[10px] text-muted-foreground">Ctrl K</kbd>
+            </Button>
             <div className={`system-status ${apiState}`} title={apiStatusTitle}>
               <CheckCircle2 size={17} />
               <span>{apiStatusLabel}</span>
             </div>
-            <button className="icon-button notification-button" type="button" onClick={onOpenNotifications} aria-label="Network updates">
+            <Button variant="ghost" size="icon" className="notification-button relative" onClick={onOpenNotifications} aria-label="Network updates">
               <Bell size={18} />
               {notifications.unread_count > 0 && <span>{Math.min(notifications.unread_count, 9)}</span>}
-            </button>
+            </Button>
             <AppearanceMenu themeMode={themeMode} onThemeModeChange={onThemeModeChange} />
-            <details className="account-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute("open"); }}>
-              <summary
-                aria-label={`Account menu for ${username}`}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") {
-                    const details = event.currentTarget.closest("details");
-                    details?.removeAttribute("open");
-                    event.currentTarget.focus();
-                  }
-                }}
-              >
-                <UserBadge username={username} /><ChevronDown size={14} />
-              </summary>
-              <div className="account-menu-popover">
-                <header><small>Signed in as</small><strong>{username}</strong></header>
-                <button type="button" onClick={(event) => { event.currentTarget.closest("details")?.removeAttribute("open"); setPage("settings"); }}><Settings size={16} /><span>Settings</span></button>
-                <button type="button" onClick={(event) => { event.currentTarget.closest("details")?.removeAttribute("open"); void onSignOut(); }}><LogOut size={16} /><span>Sign out</span></button>
-              </div>
-            </details>
-          </div>
-        </header>
+            <DropdownMenu>
+              <DropdownMenuTrigger render={<Button variant="ghost" className="gap-2" aria-label={`Account menu for ${username}`} />}><UserBadge username={username} /><ChevronDown size={14} /></DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="min-w-48">
+                <DropdownMenuGroup><DropdownMenuLabel>Signed in as {username}</DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => setPage("settings")}><Settings size={16} />Settings</DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => void onSignOut()}><LogOut size={16} />Sign out</DropdownMenuItem>
+                </DropdownMenuGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+        </>} />
         {showReleaseUpdate && releaseUpdate && (
           <aside className="update-banner" role="status" aria-label={`Faro ${releaseUpdate.display} update available`}>
             <span className="update-banner-icon" aria-hidden="true"><ArrowUpRight size={18} /></span>

@@ -26,23 +26,26 @@ const (
 	sessionLifetime               = 7 * 24 * time.Hour
 	maxFailures                   = 5
 	lockoutDuration               = 5 * time.Minute
+	maxFailureEntries             = 4096
 	authenticationRequiredMessage = "authentication required"
 )
 
 var usernamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]{3,64}$`)
 
 type Manager struct {
-	store      *db.Store
-	now        func() time.Time
-	dummyHash  []byte
-	trustProxy bool
-	mu         sync.Mutex
-	failures   map[string]failureState
+	store            *db.Store
+	now              func() time.Time
+	dummyHash        []byte
+	trustProxy       bool
+	mu               sync.Mutex
+	failures         map[string]failureState
+	nextFailurePrune time.Time
 }
 
 type failureState struct {
 	Count       int
 	LockedUntil time.Time
+	ExpiresAt   time.Time
 }
 
 type credentials struct {
@@ -324,19 +327,25 @@ func (manager *Manager) authenticate(request *http.Request) (sessionUser, bool) 
 	}
 	now := manager.now().UTC().Format(time.RFC3339)
 	var user sessionUser
+	var lastSeen string
 	err = manager.store.DB.QueryRowContext(request.Context(), `
-		SELECT u.id, u.username
+		SELECT u.id, u.username, s.last_seen_at
 		FROM auth_sessions s
 		JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = ? AND datetime(s.expires_at) > datetime(?)
-	`, tokenHash(cookie.Value), now).Scan(&user.ID, &user.Username)
+	`, tokenHash(cookie.Value), now).Scan(&user.ID, &user.Username, &lastSeen)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			_, _ = manager.store.DB.ExecContext(request.Context(), `DELETE FROM auth_sessions WHERE token_hash = ?`, tokenHash(cookie.Value))
 		}
 		return sessionUser{}, false
 	}
-	_, _ = manager.store.DB.ExecContext(request.Context(), `UPDATE auth_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE token_hash = ?`, tokenHash(cookie.Value))
+	// Read-only polling should not compete with ingestion for SQLite's writer.
+	// The compare-and-swap also coalesces requests that read the same old value.
+	seen, parseErr := time.Parse("2006-01-02 15:04:05", lastSeen)
+	if parseErr != nil || manager.now().UTC().Sub(seen) >= time.Minute {
+		_, _ = manager.store.DB.ExecContext(request.Context(), `UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ? AND last_seen_at = ?`, manager.now().UTC().Format("2006-01-02 15:04:05"), tokenHash(cookie.Value), lastSeen)
+	}
 	return user, true
 }
 
@@ -416,15 +425,33 @@ func (manager *Manager) failureKey(request *http.Request, username string) strin
 			host = forwarded.String()
 		}
 	}
-	return strings.ToLower(strings.TrimSpace(username)) + "|" + host
+	// Keep retained keys fixed-size even for an oversized login name.
+	return tokenHash(strings.ToLower(strings.TrimSpace(username)) + "|" + host)
 }
 
 func (manager *Manager) blocked(key string) (string, bool) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	state := manager.failures[key]
-	if state.LockedUntil.After(manager.now()) {
-		seconds := int(state.LockedUntil.Sub(manager.now()).Seconds())
+	now := manager.now()
+	manager.pruneFailures(now)
+	state, exists := manager.failures[key]
+	if exists && !now.Before(state.ExpiresAt) {
+		delete(manager.failures, key)
+		exists = false
+		state = failureState{}
+	}
+	if !exists && len(manager.failures) >= maxFailureEntries {
+		// Do not evict active lockouts to make room for a flood of new keys.
+		retry := lockoutDuration
+		for _, entry := range manager.failures {
+			if remaining := entry.ExpiresAt.Sub(now); remaining < retry {
+				retry = remaining
+			}
+		}
+		return strconv.Itoa(max(1, int(retry.Seconds())+1)), true
+	}
+	if state.LockedUntil.After(now) {
+		seconds := int(state.LockedUntil.Sub(now).Seconds())
 		seconds = max(seconds, 1)
 		return strconv.Itoa(seconds), true
 	}
@@ -437,12 +464,35 @@ func (manager *Manager) blocked(key string) (string, bool) {
 func (manager *Manager) recordFailure(key string) {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	state := manager.failures[key]
+	now := manager.now()
+	manager.pruneFailures(now)
+	state, exists := manager.failures[key]
+	if !exists && len(manager.failures) >= maxFailureEntries {
+		return
+	}
+	if !now.Before(state.ExpiresAt) {
+		state = failureState{}
+	}
 	state.Count++
+	state.ExpiresAt = now.Add(lockoutDuration)
 	if state.Count >= maxFailures {
-		state.LockedUntil = manager.now().Add(lockoutDuration)
+		state.LockedUntil = now.Add(lockoutDuration)
 	}
 	manager.failures[key] = state
+}
+
+// Caller holds manager.mu. Cleanup is driven by requests, with a hard size
+// bound so dormant entries cannot accumulate indefinitely between sweeps.
+func (manager *Manager) pruneFailures(now time.Time) {
+	if now.Before(manager.nextFailurePrune) && len(manager.failures) < maxFailureEntries {
+		return
+	}
+	for key, state := range manager.failures {
+		if !now.Before(state.ExpiresAt) {
+			delete(manager.failures, key)
+		}
+	}
+	manager.nextFailurePrune = now.Add(time.Minute)
 }
 
 func (manager *Manager) clearFailures(key string) {

@@ -25,14 +25,15 @@ type resolverState struct {
 // Proxy is a loopback-only DNS gateway. CoreDNS sends ordinary DNS packets to
 // it, and Proxy exchanges them with the selected providers using RFC 8484.
 type Proxy struct {
-	store      *db.Store
-	address    string
-	state      atomic.Pointer[resolverState]
-	previous   *resolverState
-	next       atomic.Uint64
-	reloadMu   sync.Mutex
-	serveOnce  sync.Once
-	concurrent chan struct{}
+	store          *db.Store
+	address        string
+	state          atomic.Pointer[resolverState]
+	previous       *resolverState
+	next           atomic.Uint64
+	reloadMu       sync.Mutex
+	serveOnce      sync.Once
+	concurrent     chan struct{}
+	tcpConnections chan struct{}
 }
 
 func New(store *db.Store, address string) *Proxy {
@@ -40,9 +41,10 @@ func New(store *db.Store, address string) *Proxy {
 		address = DefaultAddress
 	}
 	return &Proxy{
-		store:      store,
-		address:    address,
-		concurrent: make(chan struct{}, 256),
+		store:          store,
+		address:        address,
+		concurrent:     make(chan struct{}, 256),
+		tcpConnections: make(chan struct{}, 256),
 	}
 }
 
@@ -65,8 +67,7 @@ func (proxy *Proxy) ReloadConfig(config RuntimeConfig) error {
 		return err
 	}
 	if transport != "encrypted" {
-		proxy.previous = proxy.state.Load()
-		proxy.state.Store(&resolverState{})
+		proxy.replaceState(&resolverState{})
 		return nil
 	}
 	endpoints, err := EndpointsForAddresses(addresses)
@@ -74,15 +75,21 @@ func (proxy *Proxy) ReloadConfig(config RuntimeConfig) error {
 		return err
 	}
 	clients := make([]*endpointClient, 0, len(endpoints))
+	created := &resolverState{}
 	for _, endpoint := range endpoints {
-		client, clientErr := newEndpointClient(endpoint)
-		if clientErr != nil {
-			return clientErr
+		client := matchingClient(endpoint, proxy.state.Load(), proxy.previous)
+		if client == nil {
+			var clientErr error
+			client, clientErr = newEndpointClient(endpoint)
+			if clientErr != nil {
+				closeUnusedClients(created)
+				return clientErr
+			}
+			created.clients = append(created.clients, client)
 		}
 		clients = append(clients, client)
 	}
-	proxy.previous = proxy.state.Load()
-	proxy.state.Store(&resolverState{clients: clients})
+	proxy.replaceState(&resolverState{clients: clients})
 	return nil
 }
 
@@ -92,7 +99,8 @@ func (proxy *Proxy) ReloadConfig(config RuntimeConfig) error {
 func (proxy *Proxy) RestorePrevious(_ context.Context) error {
 	proxy.reloadMu.Lock()
 	defer proxy.reloadMu.Unlock()
-	proxy.state.Store(proxy.previous)
+	failed := proxy.state.Swap(proxy.previous)
+	closeUnusedClients(failed, proxy.previous)
 	return nil
 }
 
@@ -135,6 +143,10 @@ func (proxy *Proxy) StartWithConfig(ctx context.Context, config RuntimeConfig) e
 			<-ctx.Done()
 			_ = udpConnection.Close()
 			_ = tcpListener.Close()
+			proxy.reloadMu.Lock()
+			closeUnusedClients(proxy.previous, proxy.state.Load())
+			closeUnusedClients(proxy.state.Load())
+			proxy.reloadMu.Unlock()
 		}()
 		go proxy.serveUDP(ctx, udpConnection)
 		go proxy.serveTCP(ctx, tcpListener)
@@ -152,13 +164,22 @@ func (proxy *Proxy) serveUDP(ctx context.Context, connection *net.UDPConn) {
 			}
 			return
 		}
+		// Admit before allocating a packet and goroutine. Overload must not
+		// create an unbounded queue behind slow upstream providers.
+		if !proxy.acquire(ctx) {
+			if response := serverFailure(buffer[:n]); response != nil {
+				_, _ = connection.WriteToUDP(response, client)
+			}
+			continue
+		}
 		query := append([]byte(nil), buffer[:n]...)
 		go proxy.handleUDP(ctx, connection, client, query)
 	}
 }
 
 func (proxy *Proxy) handleUDP(ctx context.Context, connection *net.UDPConn, client *net.UDPAddr, query []byte) {
-	response := proxy.response(ctx, query)
+	defer proxy.release()
+	response := proxy.responseAdmitted(ctx, query)
 	if len(response) == 0 {
 		return
 	}
@@ -176,11 +197,21 @@ func (proxy *Proxy) serveTCP(ctx context.Context, listener net.Listener) {
 			}
 			return
 		}
-		go proxy.handleTCP(ctx, connection)
+		select {
+		case proxy.tcpConnections <- struct{}{}:
+			go func() {
+				defer func() { <-proxy.tcpConnections }()
+				proxy.handleTCP(ctx, connection)
+			}()
+		default:
+			_ = connection.Close()
+		}
 	}
 }
 
 func (proxy *Proxy) handleTCP(ctx context.Context, connection net.Conn) {
+	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
+	defer stop()
 	defer func() {
 		if err := connection.Close(); err != nil && ctx.Err() == nil {
 			log.Printf("encrypted DNS TCP connection close failed: %v", err)
@@ -226,9 +257,13 @@ func writeTCPResponse(connection net.Conn, response []byte) error {
 
 func (proxy *Proxy) response(ctx context.Context, query []byte) []byte {
 	if !proxy.acquire(ctx) {
-		return nil
+		return serverFailure(query)
 	}
 	defer proxy.release()
+	return proxy.responseAdmitted(ctx, query)
+}
+
+func (proxy *Proxy) responseAdmitted(ctx context.Context, query []byte) []byte {
 	queryCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 	defer cancel()
 	response, err := proxy.exchange(queryCtx, query)
@@ -246,8 +281,18 @@ func (proxy *Proxy) exchange(ctx context.Context, query []byte) ([]byte, error) 
 	start := int(proxy.next.Add(1)-1) % len(state.clients)
 	var lastErr error
 	for offset := range state.clients {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		client := state.clients[(start+offset)%len(state.clients)]
-		response, err := client.exchange(ctx, query)
+		// Reserve a fair share of the remaining deadline for fallback.
+		attemptCtx := ctx
+		cancel := func() {}
+		if deadline, ok := ctx.Deadline(); ok {
+			attemptCtx, cancel = context.WithTimeout(ctx, time.Until(deadline)/time.Duration(len(state.clients)-offset))
+		}
+		response, err := client.exchange(attemptCtx, query)
+		cancel()
 		if err == nil && dnsResponseCode(response) != 2 {
 			return response, nil
 		}
@@ -260,10 +305,13 @@ func (proxy *Proxy) exchange(ctx context.Context, query []byte) ([]byte, error) 
 }
 
 func (proxy *Proxy) acquire(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	select {
 	case proxy.concurrent <- struct{}{}:
 		return true
-	case <-ctx.Done():
+	default:
 		return false
 	}
 }

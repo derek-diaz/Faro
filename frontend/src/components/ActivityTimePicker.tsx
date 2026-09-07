@@ -1,5 +1,10 @@
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
+import { NativeSelect } from "./ui/native-select";
+import { Popover, PopoverTrigger, PopoverContent, PopoverClose } from "./ui/popover";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { CalendarDays, ChevronDown, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 
 export type ActivityTimeRangePreset = "all" | "15m" | "1h" | "4h" | "24h" | "7d" | "30d" | "90d" | "custom";
 
@@ -54,7 +59,6 @@ const presetDurations: ReadonlyArray<{ readonly preset: ActivityTimeRangePreset;
 ];
 
 export function ActivityTimePicker({ value, onChange }: ActivityTimePickerProps) {
-  const pickerRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<PickerView>("relative");
   const [relativeAmount, setRelativeAmount] = useState("30");
@@ -62,22 +66,6 @@ export function ActivityTimePicker({ value, onChange }: ActivityTimePickerProps)
   const [absoluteFrom, setAbsoluteFrom] = useState("");
   const [absoluteTo, setAbsoluteTo] = useState("");
   const [error, setError] = useState("");
-
-  useEffect(() => {
-    if (!open) return undefined;
-    function closeOnOutsideClick(event: MouseEvent) {
-      if (pickerRef.current && !pickerRef.current.contains(event.target as Node)) setOpen(false);
-    }
-    function closeOnEscape(event: KeyboardEvent) {
-      if (event.key === "Escape") setOpen(false);
-    }
-    document.addEventListener("mousedown", closeOnOutsideClick);
-    document.addEventListener("keydown", closeOnEscape);
-    return () => {
-      document.removeEventListener("mousedown", closeOnOutsideClick);
-      document.removeEventListener("keydown", closeOnEscape);
-    };
-  }, [open]);
 
   function showPicker(nextView: PickerView = "relative") {
     setError("");
@@ -144,65 +132,65 @@ export function ActivityTimePicker({ value, onChange }: ActivityTimePickerProps)
   }
 
   return (
-    <div className="activity-time-picker" ref={pickerRef}>
+    <Popover open={open} onOpenChange={(nextOpen) => { if (nextOpen) showPicker(); else setOpen(false); }}>
+    <div className="activity-time-picker">
       <div className="activity-time-picker-bar">
-        <button className="activity-time-picker-trigger" type="button" aria-expanded={open} aria-haspopup="dialog" onClick={() => (open ? setOpen(false) : showPicker())}>
+        <PopoverTrigger render={<Button variant="outline" />} className="activity-time-picker-trigger">
           <CalendarDays size={15} aria-hidden="true" />
           <span>{activityTimeRangeLabel(value)}</span>
           <ChevronDown size={14} aria-hidden="true" />
-        </button>
+        </PopoverTrigger>
       </div>
-      {open && (
-        <div className="activity-time-popover" role="dialog" aria-label="Activity time range">
-          <div className="activity-time-mode-tabs" role="tablist" aria-label="Time range mode">
-            <button className={view === "absolute" ? "active" : ""} type="button" role="tab" aria-selected={view === "absolute"} onClick={() => showPicker("absolute")}>Absolute</button>
-            <button className={view === "relative" ? "active" : ""} type="button" role="tab" aria-selected={view === "relative"} onClick={() => { setView("relative"); setError(""); }}>Relative</button>
-            <button className={view === "now" ? "active" : ""} type="button" role="tab" aria-selected={view === "now"} onClick={() => { setView("now"); setError(""); }}>Now</button>
+        <PopoverContent className="activity-range-popover" aria-label="Activity time range">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <strong className="text-sm">Activity time range</strong>
+            <PopoverClose render={<Button variant="ghost" size="icon" />} aria-label="Close time range picker"><X size={15} /></PopoverClose>
           </div>
+          <Tabs value={view} onValueChange={(next) => { if (next === "absolute") showPicker("absolute"); else { setView(next as PickerView); setError(""); } }}>
+          <TabsList className="mb-4" aria-label="Time range mode">
+            <TabsTrigger value="absolute">Absolute</TabsTrigger>
+            <TabsTrigger value="relative">Relative</TabsTrigger>
+            <TabsTrigger value="now">Now</TabsTrigger>
+          </TabsList>
 
-          {view === "relative" && (
-            <>
+            <TabsContent value="relative">
               <div className="activity-time-popover-heading">
                 <strong>Quick select</strong>
               </div>
               <div className="activity-relative-form">
-                <select aria-label="Relative range direction" value="last" disabled><option value="last">Last</option></select>
-                <input aria-label="Relative range amount" min="1" type="number" value={relativeAmount} onChange={(event) => setRelativeAmount(event.target.value)} />
-                <select aria-label="Relative range unit" value={relativeUnit} onChange={(event) => setRelativeUnit(event.target.value as RelativeUnit)}>
+                <NativeSelect aria-label="Relative range direction" value="last" disabled><option value="last">Last</option></NativeSelect>
+                <Input aria-label="Relative range amount" min="1" type="number" value={relativeAmount} onChange={(event) => setRelativeAmount(event.target.value)} />
+                <NativeSelect aria-label="Relative range unit" value={relativeUnit} onChange={(event) => setRelativeUnit(event.target.value as RelativeUnit)}>
                   {relativeUnits.map((unit) => <option key={unit.value} value={unit.value}>{unit.label}</option>)}
-                </select>
-                <button type="button" onClick={applyRelative}>Apply</button>
+                </NativeSelect>
+                <Button variant="default" type="button" onClick={applyRelative}>Apply</Button>
               </div>
               <div className="activity-common-ranges">
                 <strong>Commonly used</strong>
                 <div>
-                  {commonRanges.map((range) => <button key={range.label} type="button" onClick={() => applyRange(range.getRange())}>{range.label}</button>)}
+                  {commonRanges.map((range) => <Button variant="ghost" className="justify-start" key={range.label} type="button" onClick={() => applyRange(range.getRange())}>{range.label}</Button>)}
                 </div>
               </div>
-            </>
-          )}
+            </TabsContent>
 
-          {view === "absolute" && (
-            <div className="activity-absolute-form">
-              <div className="activity-time-popover-heading"><strong>Absolute range</strong><button type="button" aria-label="Close time range picker" onClick={() => setOpen(false)}><X size={15} /></button></div>
-              <label>Start<input type="datetime-local" value={absoluteFrom} onChange={(event) => setAbsoluteFrom(event.target.value)} /></label>
-              <label>End<input type="datetime-local" value={absoluteTo} onChange={(event) => setAbsoluteTo(event.target.value)} /></label>
-              <div className="activity-absolute-actions"><button className="secondary" type="button" onClick={() => setView("relative")}>Cancel</button><button type="button" onClick={applyAbsolute}>Update</button></div>
-            </div>
-          )}
+            <TabsContent value="absolute" className="activity-absolute-form">
+              <div className="activity-time-popover-heading"><strong>Absolute range</strong></div>
+              <label>Start<Input type="datetime-local" value={absoluteFrom} onChange={(event) => setAbsoluteFrom(event.target.value)} /></label>
+              <label>End<Input type="datetime-local" value={absoluteTo} onChange={(event) => setAbsoluteTo(event.target.value)} /></label>
+              <div className="activity-absolute-actions"><Button variant="outline" className="secondary" type="button" onClick={() => setView("relative")}>Cancel</Button><Button variant="default" type="button" onClick={applyAbsolute}>Update</Button></div>
+            </TabsContent>
 
-          {view === "now" && (
-            <div className="activity-now-panel">
+            <TabsContent value="now" className="activity-now-panel">
               <div className="activity-now-heading"><span>Current time</span><strong>{formatPickerDate(new Date().toISOString())}</strong></div>
               <p>Move the end of this range to the current time while keeping its duration.</p>
-              <div className="activity-now-actions"><button className="secondary" type="button" onClick={() => setView("relative")}>Cancel</button><button type="button" onClick={applyNow}>Update to now</button></div>
-            </div>
-          )}
+              <div className="activity-now-actions"><Button variant="outline" className="secondary" type="button" onClick={() => setView("relative")}>Cancel</Button><Button variant="default" type="button" onClick={applyNow}>Update to now</Button></div>
+            </TabsContent>
+          </Tabs>
 
           {error && <p className="activity-range-error" role="alert">{error}</p>}
-        </div>
-      )}
+        </PopoverContent>
     </div>
+    </Popover>
   );
 }
 

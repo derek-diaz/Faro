@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -25,6 +26,13 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Printf("api server: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 	dbPath := env("FARO_DB_PATH", "/data/faro.db")
 	configDir := env("FARO_COREDNS_CONFIG_DIR", "/coredns")
 	logPath := env("FARO_COREDNS_LOG_PATH", "/var/log/coredns/query.log")
@@ -55,6 +63,13 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	workerCtx, cancelWorkers := context.WithCancel(context.Background())
+	var workers sync.WaitGroup
+	startWorker := func(run func(context.Context)) {
+		workers.Add(1)
+		go func() { defer workers.Done(); run(workerCtx) }()
+	}
+	defer func() { cancelWorkers(); workers.Wait() }()
 
 	dohRuntimePath := env("FARO_DOH_RUNTIME_PATH", filepath.Join(filepath.Dir(dbPath), "faro-doh.json"))
 	encryptedDNS := dohproxy.New(store, dohproxy.DefaultAddress)
@@ -73,22 +88,22 @@ func main() {
 	if err := reloader.Apply(context.Background()); err != nil {
 		log.Printf("initial coredns render failed: %v", err)
 	}
-	go reloader.RunTemporalReloads(ctx)
-	go redundancyManager.Run(ctx)
+	startWorker(reloader.RunTemporalReloads)
+	startWorker(redundancyManager.Run)
 
 	tailer := querylog.NewTailer(store, logPath)
-	go tailer.Run(ctx)
+	startWorker(tailer.Run)
 	retentionManager := retention.NewManager(store)
-	go retentionManager.Run(ctx)
+	startWorker(retentionManager.Run)
 	blocklistManager := blocklists.NewManager(store, reloader.Apply)
-	go blocklistManager.Run(ctx)
+	startWorker(blocklistManager.Run)
 	upstreamMonitor := upstreamhealth.NewMonitor(store, upstreamhealth.DefaultInterval, nil)
-	go upstreamMonitor.Run(ctx)
+	startWorker(upstreamMonitor.Run)
 	unifiManager := unifi.NewManager(store, secretKeyPath)
-	go unifiManager.Run(ctx)
+	startWorker(unifiManager.Run)
 	deviceCatalog := devicecatalog.NewManager(env("FARO_DEVICE_CATALOG_PATH", ""))
 	deviceClassifier := devicecatalog.NewClassifier(store, deviceCatalog)
-	go deviceClassifier.Run(ctx)
+	startWorker(deviceClassifier.Run)
 
 	srv := &http.Server{
 		Addr:              addr,
@@ -98,19 +113,34 @@ func main() {
 		MaxHeaderBytes:    1 << 20,
 	}
 
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := srv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("shut down api server: %v", err)
-		}
-	}()
-
 	log.Printf("faro api listening on %s", addr)
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatalf("api server: %v", err)
+	// Returning runs worker cleanup before the deferred database close.
+	return serveUntilStopped(ctx, srv, srv.ListenAndServe)
+}
+
+// The caller must not close shared resources until Shutdown has finished.
+func serveUntilStopped(ctx context.Context, srv *http.Server, serve func() error) error {
+	stopped := make(chan error, 1)
+	go func() { stopped <- serve() }()
+	select {
+	case err := <-stopped:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
 	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	shutdownErr := srv.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		_ = srv.Close()
+	}
+	serveErr := <-stopped
+	if errors.Is(serveErr, http.ErrServerClosed) {
+		serveErr = nil
+	}
+	return errors.Join(shutdownErr, serveErr)
 }
 
 func env(key, fallback string) string {

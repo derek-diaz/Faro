@@ -1,28 +1,52 @@
-# Faro on Unraid
+# Install Faro on Unraid
 
-Unraid runs the same `tabierto/faro` image used by standard Docker Compose. The template only presents Faro's normal ports, `/config` volume, and optional environment settings in the Unraid interface; there is no separate Unraid edition or container architecture.
+[All guides](README.md) · Next: [Connect devices](connect-devices.md)
 
-## Install
+Faro uses the same Docker image on Unraid as on other systems. Its template fills in the container's ports and data folder.
 
-1. Add the [`templates/faro.xml`](../templates/faro.xml) template to Unraid or install Faro from Community Applications after it is published.
-2. Keep the application-data mapping at `/mnt/user/appdata/faro` or choose another cache-backed appdata directory.
-3. Publish TCP and UDP port `53`, and choose the web interface port (default `1787`).
-4. Open `http://YOUR-FARO-IP:1787` and complete the guided setup.
-5. Configure the router's DHCP DNS server to distribute Faro's fixed address.
+## 1. Add the template
 
-TCP and UDP port `53` must be available. Giving Faro its own static LAN IP through an Unraid custom `ipvlan` or `macvlan` network is recommended when the Unraid host already uses port `53`; it also gives the router one clear address to distribute as DNS.
+1. Open the Unraid terminal from the web interface.
+2. Download the repository's template:
 
-## Persistent data
+   ```sh
+   mkdir -p /boot/config/plugins/dockerMan/templates-user
+   curl -fL https://raw.githubusercontent.com/derek-diaz/Faro/main/templates/faro.xml -o /boot/config/plugins/dockerMan/templates-user/my-faro.xml
+   ```
 
-The single `/config` mapping contains:
+3. Open **Docker → Add Container**.
+4. Select **Faro** from the template list. Refresh the page if needed.
 
-- `faro.db`: SQLite configuration and retained activity
-- `coredns`: generated and last-known-good resolver configuration
-- `favicons`: optional cached domain icons
-- `logs`: bounded raw DNS query-log buffers
+Unraid stores Docker application settings in this user-template folder. See [Unraid's application documentation](https://docs.unraid.net/unraid-os/manual/applications/) for background.
 
-For routine backups, use **Settings → Health & data → Encrypted backup & restore**. Backing up `/mnt/user/appdata/faro` provides a complete host-level recovery copy.
+## 2. Review the settings
 
-## Updating
+| Setting | What to use |
+| --- | --- |
+| Repository | `tabierto/faro:latest` to follow releases, or a specific published version to pin it. The repository template may arrive with a version already pinned. |
+| Application Data | `/mnt/user/appdata/faro` on the host, mapped to `/config` in the container. |
+| Web Interface | Host port `1787` to container port `1787`, TCP. |
+| DNS | Host port `53` to container port `53`, with separate TCP and UDP mappings. |
 
-Use **Check for Updates** on Unraid's Docker page. The web interface, API, and DNS engine update atomically with the same Faro image published for every supported Docker installation.
+For **bridge** networking, Faro uses the Unraid host's LAN address. Reserve it in your router.
+
+If the host already uses port 53, choose an existing custom LAN network and give Faro its own unused fixed IP. Use that container IP and its internal ports: `53` for DNS and `1787` for the interface. Host port remapping does not change these ports in custom-IP mode.
+
+## 3. Start and test
+
+1. Choose **Apply** and wait for the container to start.
+2. Open `http://YOUR-FARO-IP:1787`.
+3. Create your administrator account and complete setup.
+4. From another device, run `nslookup example.com YOUR-FARO-IP`.
+5. Look for the request in **Activity**.
+
+**You are done when:** Faro answers a direct lookup. Follow [Connect devices](connect-devices.md) to use it across your network.
+
+## Update and back up
+
+1. [Download a Faro backup](backup-restore.md).
+2. On Unraid's **Docker** page, check for updates and apply the Faro update.
+3. If the repository uses a pinned tag, edit that tag to the intended published version first. Checking for updates alone does not move a pinned installation to the next version.
+4. Repeat the DNS test.
+
+Keep the `/config` mapping across updates. Include the appdata folder in your normal Unraid backups; stop Faro before making a plain file copy.

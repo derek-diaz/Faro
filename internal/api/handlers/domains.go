@@ -34,7 +34,7 @@ func (handler *Handler) domainSummary(responseWriter http.ResponseWriter, reques
 	start := todayStart(request)
 	var total, blocked, allowedAll, blockedAll int
 	var firstSeen, lastSeen sql.NullString
-	_ = handler.store.DB.QueryRowContext(request.Context(), `
+	err = handler.store.DB.QueryRowContext(request.Context(), `
 		SELECT
 			COALESCE(SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN timestamp >= ? AND action = 'blocked' THEN 1 ELSE 0 END), 0),
@@ -45,6 +45,10 @@ func (handler *Handler) domainSummary(responseWriter http.ResponseWriter, reques
 		FROM dns_queries
 		WHERE domain = ?
 	`, start, start, domain).Scan(&total, &blocked, &firstSeen, &lastSeen, &allowedAll, &blockedAll)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
 	status := "Not seen"
 	if allowedAll > 0 {
 		status = "Allowed"
@@ -56,7 +60,11 @@ func (handler *Handler) domainSummary(responseWriter http.ResponseWriter, reques
 	}
 	var related []map[string]any
 	if request.URL.Query().Get("include_events") != "false" {
-		related = localEvents(request.Context(), handler.store.DB, 12, domain)
+		related, err = localEvents(request.Context(), handler.store.DB, 12, domain)
+		if err != nil {
+			writeError(responseWriter, err)
+			return
+		}
 	}
 	writeJSON(responseWriter, http.StatusOK, map[string]any{
 		"domain":                domain,

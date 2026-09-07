@@ -1,3 +1,6 @@
+import { Checkbox } from "./ui/checkbox";
+import { Input } from "./ui/input";
+import { Button } from "./ui/button";
 import { ArrowLeft, ArrowRight, Check, CheckCircle2, Database, Gauge, LockKeyhole, Network, Router, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, type Blocklist, type EncryptedUpstreamEndpoint, type Setting } from "../api/client";
@@ -153,13 +156,13 @@ export function Onboarding({ username, onComplete, onJoinExisting, themeMode, on
           {error && <div className="onboarding-error" role="alert">{error}</div>}
           <div className="onboarding-join-existing">
             <span>Already have Faro running elsewhere?</span>
-            <button type="button" className="secondary" onClick={onJoinExisting} disabled={busy}><Network size={16} />Join an existing Faro home</button>
+            <Button variant="outline" type="button" className="secondary" onClick={onJoinExisting} disabled={busy}><Network size={16} />Join an existing Faro home</Button>
           </div>
           <footer className="onboarding-actions">
-            <button type="button" className="secondary" disabled={step === 0 || busy} onClick={() => { setError(""); setStep((current) => Math.max(0, current - 1)); }}><ArrowLeft size={16} /><span>Back</span></button>
+            <Button variant="outline" type="button" className="secondary" disabled={step === 0 || busy} onClick={() => { setError(""); setStep((current) => Math.max(0, current - 1)); }}><ArrowLeft size={16} /><span>Back</span></Button>
             {step < steps.length - 1
-              ? <button type="button" onClick={next}><span>Continue</span><ArrowRight size={16} /></button>
-              : <button type="button" onClick={() => void finish()} disabled={busy}><CheckCircle2 size={16} /><span>{busy ? "Applying configuration" : "Apply and open Faro"}</span></button>}
+              ? <Button variant="default" type="button" onClick={next}><span>Continue</span><ArrowRight size={16} /></Button>
+              : <Button variant="default" type="button" onClick={() => void finish()} disabled={busy}><CheckCircle2 size={16} /><span>{busy ? "Applying configuration" : "Apply and open Faro"}</span></Button>}
           </footer>
         </div>
       </section>
@@ -175,7 +178,7 @@ function LocalStep({ suffix, setSuffix, lanAddress, setLanAddress, cache, setCac
   readonly cache: boolean;
   readonly setCache: (value: boolean) => void;
 }) {
-  return <div className="onboarding-form-section"><label><span>Faro LAN address</span><input value={lanAddress} onChange={(event) => setLanAddress(event.target.value)} placeholder="LAN IP address" inputMode="decimal" autoFocus /><small>The fixed IP assigned to the computer running Faro. Your router will use this as its DNS server.</small></label><label><span>Local domain suffix</span><div className="onboarding-suffix-input"><input value={suffix} onChange={(event) => setSuffix(event.target.value)} placeholder="home" /><strong>.{suffix || "home"}</strong></div><small>Examples: plex.{suffix || "home"}, router.{suffix || "home"}</small></label><div className="onboarding-toggle-row"><span className="onboarding-option-icon"><Gauge size={19} /></span><div><strong>DNS response cache</strong><p>Serve repeated lookups locally for lower latency.</p></div><label className="compact-toggle"><input type="checkbox" checked={cache} onChange={(event) => setCache(event.target.checked)} /><span>{cache ? "Enabled" : "Disabled"}</span></label></div></div>;
+  return <div className="onboarding-form-section"><label><span>Faro LAN address</span><Input value={lanAddress} onChange={(event) => setLanAddress(event.target.value)} placeholder="LAN IP address" inputMode="decimal" autoFocus /><small>The fixed IP assigned to the computer running Faro. Your router will use this as its DNS server.</small></label><label><span>Local domain suffix</span><div className="onboarding-suffix-input"><Input variant="embedded" value={suffix} onChange={(event) => setSuffix(event.target.value)} placeholder="home" /><strong>.{suffix || "home"}</strong></div><small>Examples: plex.{suffix || "home"}, router.{suffix || "home"}</small></label><div className="onboarding-toggle-row"><span className="onboarding-option-icon"><Gauge size={19} /></span><div><strong>DNS response cache</strong><p>Serve repeated lookups locally for lower latency.</p></div><label className="compact-toggle"><Checkbox  checked={cache} onCheckedChange={(checked) => setCache(checked)} /><span>{cache ? "Enabled" : "Disabled"}</span></label></div></div>;
 }
 
 function UpstreamStep({ selected, setSelected, transport, setTransport, encryptedByAddress, catalogLoaded }: {

@@ -16,7 +16,7 @@ export function applyThemeMode(mode: ThemeMode) {
   const resolved = mode === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : mode;
   document.documentElement.dataset.theme = mode;
   document.documentElement.dataset.themeResolved = resolved;
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", resolved === "dark" ? "#0e1923" : "#eaf0f4");
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", resolved === "dark" ? "#090f20" : "#f4f7fb");
 }
 
 export function persistThemeMode(mode: ThemeMode) {

@@ -1,3 +1,5 @@
+import { DialogSurface } from "./DialogSurface";
+import { Button } from "./ui/button";
 import {
   AlertTriangle,
   BellRing,
@@ -34,7 +36,7 @@ export function NotificationDrawer({ open, notifications, attentionCount, unread
   const recentChanges = notifications.filter((event) => event.severity !== "warning" && event.severity !== "critical");
   const hasAttention = attentionCount > 0;
   const attentionTitle = formatAttentionTitle(attentionCount);
-  const attentionMessage = hasAttention ? "Review the issue below to keep DNS healthy." : "Faro will flag failures and unusual changes here.";
+  const attentionMessage = hasAttention ? "Review the issues below to keep DNS healthy." : "Faro will flag failures and unusual changes here.";
 
   function openEvent(event: FaroEvent) {
     if (!event.is_read) onMarkRead(event.id);
@@ -48,32 +50,33 @@ export function NotificationDrawer({ open, notifications, attentionCount, unread
   }
 
   return (
-    <dialog
+    <DialogSurface
+      onClose={onClose}
       className="drawer-backdrop"
-      open
-      aria-label="Network updates"
+      aria-labelledby="network-updates-title"
     >
       <aside className="notification-drawer network-updates-drawer">
         <header className="network-updates-header">
           <div>
             <span className="notification-mark"><BellRing size={17} /></span>
-            <div><strong>Network updates</strong><span>Important changes and DNS issues</span></div>
+            <div><h2 id="network-updates-title">Network updates</h2><span>Important changes and DNS issues</span></div>
           </div>
           <div className="notification-header-actions">
-            <button className="notification-mark-all" type="button" onClick={onMarkAllRead} disabled={unreadCount === 0}><CheckCheck size={15} /><span>Mark all read</span></button>
-            <button className="icon-button" type="button" onClick={onClose} aria-label="Close network updates"><X size={18} /></button>
+            <Button variant="ghost" size="icon" className="icon-button" type="button" onClick={onClose} aria-label="Close network updates"><X size={18} /></Button>
           </div>
         </header>
 
-        <div className={`notification-health ${hasAttention ? "attention" : "clear"}`}>
-          {hasAttention ? <AlertTriangle size={19} /> : <CheckCircle2 size={19} />}
-          <div>
-            <strong>{attentionTitle}</strong>
-            <span>{attentionMessage}</span>
-          </div>
-        </div>
+        <div className="notification-toolbar"><span>{unreadCount > 0 ? `${unreadCount} unread` : "All updates read"}</span><Button variant="ghost" className="notification-mark-all" type="button" onClick={onMarkAllRead} disabled={unreadCount === 0}><CheckCheck size={15} /><span>Mark all read</span></Button></div>
 
         <div className="network-updates-content">
+          {(notifications.length > 0 || hasAttention) && <div className={`notification-health ${hasAttention ? "attention" : "clear"}`}>
+            {hasAttention ? <AlertTriangle size={19} /> : <CheckCircle2 size={19} />}
+            <div>
+              <strong>{attentionTitle}</strong>
+              <span>{attentionMessage}</span>
+            </div>
+          </div>}
+
           {attention.length > 0 && (
             <NotificationSection title="Needs attention" count={attention.length} events={attention} onOpen={openEvent} onDismiss={onDismiss} />
           )}
@@ -87,7 +90,7 @@ export function NotificationDrawer({ open, notifications, attentionCount, unread
           )}
         </div>
       </aside>
-    </dialog>
+    </DialogSurface>
   );
 }
 
@@ -103,22 +106,21 @@ function NotificationSection({ title, count, events, onOpen, onDismiss }: Notifi
   return (
     <section className="notification-section">
       <div className="notification-section-heading"><h3>{title}</h3><span>{count}</span></div>
-      <div className="notification-list">
+      <ul className="notification-list">
         {events.map((event) => (
-          <div key={event.id} className={`notification-item-row ${event.is_read ? "read" : "unread"}`}>
+          <li key={event.id} className={`notification-item-row ${event.is_read ? "read" : "unread"}`}>
             <button type="button" className={`notification-item ${event.severity}`} onClick={() => onOpen(event)}>
               <span className="notification-event-icon">{notificationIcon(event)}</span>
               <span className="notification-event-copy">
-                <span><strong>{notificationTitle(event)}</strong><time dateTime={event.timestamp}>{relativeTime(event.timestamp)}</time></span>
+                <span className="notification-event-title"><strong>{notificationTitle(event)}</strong>{!event.is_read && <span className="notification-unread-dot"><span className="sr-only">Unread</span></span>}</span>
                 <small>{event.description || event.source}</small>
-                <em>{notificationTypeLabel(event)}</em>
+                <span className="notification-event-footer"><em>{notificationTypeLabel(event)}<ChevronRight size={13} /></em><time dateTime={event.timestamp} title={new Date(event.timestamp).toLocaleString()}>{relativeTime(event.timestamp)}</time></span>
               </span>
-              <ChevronRight className="notification-chevron" size={17} />
             </button>
-            <button className="notification-dismiss" type="button" onClick={() => onDismiss(event.id)} aria-label={`Dismiss ${notificationTitle(event)}`} title="Dismiss"><X size={14} /></button>
-          </div>
+            <Button variant="ghost" size="icon" className="notification-dismiss" type="button" onClick={() => onDismiss(event.id)} aria-label={`Dismiss ${notificationTitle(event)}`} title="Dismiss"><X size={14} /></Button>
+          </li>
         ))}
-      </div>
+      </ul>
     </section>
   );
 }

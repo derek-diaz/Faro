@@ -28,7 +28,10 @@ type deviceNameResolver struct {
 	pending    map[string]bool
 	slots      chan struct{}
 	generation uint64
+	nextPrune  time.Time
 }
+
+const maxDeviceNameEntries = 4096
 
 // noinspection SpellCheckingInspection
 const localDomainSuffix = ".localdomain"
@@ -201,7 +204,27 @@ func (resolver *deviceNameResolver) store(clientIP, name string) {
 		ttl = 30 * time.Minute
 	}
 	resolver.mu.Lock()
-	resolver.entries[clientIP] = cachedDeviceName{name: name, expiresAt: time.Now().Add(ttl)}
+	now := time.Now()
+	if resolver.entries == nil {
+		resolver.entries = make(map[string]cachedDeviceName)
+	}
+	if len(resolver.entries) >= maxDeviceNameEntries || !now.Before(resolver.nextPrune) {
+		for ip, entry := range resolver.entries {
+			if !now.Before(entry.expiresAt) {
+				delete(resolver.entries, ip)
+			}
+		}
+		resolver.nextPrune = now.Add(time.Minute)
+	}
+	if _, exists := resolver.entries[clientIP]; !exists && len(resolver.entries) >= maxDeviceNameEntries {
+		// An evicted name can be resolved again; cache size must not follow
+		// the lifetime number of addresses observed on the network.
+		for ip := range resolver.entries {
+			delete(resolver.entries, ip)
+			break
+		}
+	}
+	resolver.entries[clientIP] = cachedDeviceName{name: name, expiresAt: now.Add(ttl)}
 	resolver.generation++
 	resolver.mu.Unlock()
 }

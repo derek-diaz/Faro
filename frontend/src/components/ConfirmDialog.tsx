@@ -1,5 +1,6 @@
-import { LoaderCircle, Trash2, X } from "lucide-react";
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { LoaderCircle, Trash2 } from "lucide-react";
+import { useRef, type ReactNode } from "react";
+import { AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogCancel, AlertDialogAction, AlertDialogMedia } from "./ui/alert-dialog";
 
 type ConfirmDialogProps = {
   readonly title: string;
@@ -14,44 +15,21 @@ type ConfirmDialogProps = {
   readonly onConfirm: () => void;
 };
 
+
 export function ConfirmDialog({ title, body, confirmLabel, busyLabel = "Removing…", busy = false, detail, icon, autoFocusCancel = true, onCancel, onConfirm }: ConfirmDialogProps) {
-  const titleID = useId();
-  const bodyID = useId();
   const cancelRef = useRef<HTMLButtonElement>(null);
-  const busyRef = useRef(busy);
-  const onCancelRef = useRef(onCancel);
-  busyRef.current = busy;
-  onCancelRef.current = onCancel;
-
-  useEffect(() => {
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    if (autoFocusCancel) cancelRef.current?.focus();
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && !busyRef.current) onCancelRef.current();
-    }
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [autoFocusCancel]);
-
-  return (
-    <dialog open className="confirm-dialog-backdrop" aria-modal="true" aria-labelledby={titleID} aria-describedby={bodyID}>
-      <button type="button" className="confirm-dialog-backdrop-close" aria-label="Close confirmation" disabled={busy} onClick={onCancel} />
-      <div className="confirm-dialog">
-        <header>
-          <span className="confirm-dialog-icon">{icon ?? <Trash2 size={20} />}</span>
-          <div><h2 id={titleID}>{title}</h2><p id={bodyID}>{body}</p></div>
-          <button type="button" className="icon-button" aria-label="Close confirmation" disabled={busy} onClick={onCancel}><X size={17} /></button>
-        </header>
-        {detail}
-        <footer>
-          <button ref={cancelRef} type="button" className="secondary" disabled={busy} onClick={onCancel}>Cancel</button>
-          <button type="button" className="danger confirm-dialog-action" disabled={busy} onClick={onConfirm}>{busy && <LoaderCircle className="spinning" size={16} />}<span>{busy ? busyLabel : confirmLabel}</span></button>
-        </footer>
-      </div>
-    </dialog>
-  );
+  return <AlertDialog open onOpenChange={(open, event) => { if (!open) { if (busy) event.cancel(); else onCancel(); } }}>
+    <AlertDialogContent className="max-h-[85vh] overflow-y-auto" initialFocus={autoFocusCancel ? cancelRef : undefined}>
+      <AlertDialogHeader>
+        <AlertDialogMedia>{icon ?? <Trash2 size={20} />}</AlertDialogMedia>
+        <AlertDialogTitle>{title}</AlertDialogTitle>
+        <AlertDialogDescription>{body}</AlertDialogDescription>
+      </AlertDialogHeader>
+      {detail}
+      <AlertDialogFooter>
+        <AlertDialogCancel ref={cancelRef} disabled={busy}>Cancel</AlertDialogCancel>
+        <AlertDialogAction variant="destructive" disabled={busy} onClick={onConfirm}>{busy && <LoaderCircle className="spinning" size={16} />}{busy ? busyLabel : confirmLabel}</AlertDialogAction>
+      </AlertDialogFooter>
+    </AlertDialogContent>
+  </AlertDialog>;
 }

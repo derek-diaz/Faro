@@ -1,5 +1,7 @@
 import { Moon, Sun, SunMoon } from "lucide-react";
-import type { ThemeMode } from "../theme";
+import type { ThemeMode } from "@/theme";
+import { Button } from "./ui/button";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuGroup, DropdownMenuLabel, DropdownMenuRadioGroup, DropdownMenuRadioItem } from "./ui/dropdown-menu";
 
 type AppearanceMenuProps = Readonly<{
   themeMode: ThemeMode;
@@ -8,32 +10,27 @@ type AppearanceMenuProps = Readonly<{
 }>;
 
 export function AppearanceMenu({ themeMode, onThemeModeChange, className }: AppearanceMenuProps) {
-  const menuClassName = ["theme-menu", className].filter(Boolean).join(" ");
   return (
-    <details className={menuClassName} onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.removeAttribute("open"); }}>
-      <summary className="icon-button" aria-label="Choose appearance" title="Choose appearance">
+    <DropdownMenu>
+      <DropdownMenuTrigger render={<Button variant="ghost" size="icon" className={className} aria-label="Choose appearance" title="Choose appearance" />}>
         {themeIcon(themeMode, 18)}
-      </summary>
-      <div className="theme-menu-popover" role="menu" aria-label="Appearance">
-        <span>Appearance</span>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-40" aria-label="Appearance">
+        <DropdownMenuGroup><DropdownMenuLabel>Appearance</DropdownMenuLabel>
+        <DropdownMenuRadioGroup value={themeMode} onValueChange={(value) => onThemeModeChange(value as ThemeMode)}>
         {(["system", "light", "dark"] as ThemeMode[]).map((mode) => (
-          <button
+          <DropdownMenuRadioItem
             key={mode}
-            type="button"
-            role="menuitemradio"
-            aria-checked={themeMode === mode}
-            className={themeMode === mode ? "selected" : ""}
-            onClick={(event) => {
-              onThemeModeChange(mode);
-              event.currentTarget.closest("details")?.removeAttribute("open");
-            }}
+            value={mode}
+            closeOnClick
           >
             {themeIcon(mode, 15)}
             <span>{themeModeLabel(mode)}</span>
-          </button>
+          </DropdownMenuRadioItem>
         ))}
-      </div>
-    </details>
+        </DropdownMenuRadioGroup></DropdownMenuGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

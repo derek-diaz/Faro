@@ -1,3 +1,8 @@
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
+import { Checkbox } from "../components/ui/checkbox";
+import { Textarea } from "../components/ui/textarea";
+import { Input } from "../components/ui/input";
+import { Button } from "../components/ui/button";
 import { AlertTriangle, Cable, Check, CheckCircle2, Clock3, Code2, Cpu, Database, Download, Eye, EyeOff, FileArchive, Gauge, Globe2, HardDrive, Image, KeyRound, LockKeyhole, Network, RefreshCw, RotateCw, Save, Server, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode, type SubmitEvent } from "react";
 import { api, type CoreDNSDiagnosticFile, type CoreDNSDiagnostics, type MaintenanceStatus, type PruneResult, type Setting } from "../api/client";
@@ -22,6 +27,7 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
   const [message, setMessage] = useState("");
   const [maintenance, setMaintenance] = useState<MaintenanceStatus | null>(null);
   const [maintenanceLoading, setMaintenanceLoading] = useState(true);
+  const [maintenanceError, setMaintenanceError] = useState("");
   const [pruneDays, setPruneDays] = useState(30);
   const [compact, setCompact] = useState(true);
   const [pruneResult, setPruneResult] = useState<PruneResult | null>(null);
@@ -49,8 +55,11 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
 
   async function loadMaintenance() {
     setMaintenanceLoading(true);
+    setMaintenanceError("");
     try {
       setMaintenance(await api.maintenance());
+    } catch (error_) {
+      setMaintenanceError(error_ instanceof Error ? error_.message : "Application health could not be loaded. Try refreshing health.");
     } finally {
       setMaintenanceLoading(false);
     }
@@ -144,7 +153,7 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
 
   return <SettingsWorkspace
     tab={tab}
-    setTab={setTab}
+    setTab={(nextTab) => { setTab(nextTab); setMessage(""); }}
     message={message}
     actionState={actionState}
     form={form}
@@ -157,6 +166,7 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
     setAdvancedNetworkOpen={setAdvancedNetworkOpen}
     maintenance={maintenance}
     maintenanceLoading={maintenanceLoading}
+    maintenanceError={maintenanceError}
     saveRetention={() => void saveRetention()}
     pruneDays={pruneDays}
     setPruneDays={setPruneDays}
@@ -193,6 +203,7 @@ type SettingsWorkspaceProps = {
   readonly setAdvancedNetworkOpen: (open: boolean) => void;
   readonly maintenance: MaintenanceStatus | null;
   readonly maintenanceLoading: boolean;
+  readonly maintenanceError: string;
   readonly saveRetention: () => void;
   readonly pruneDays: number;
   readonly setPruneDays: (days: number) => void;
@@ -215,7 +226,7 @@ type SettingsWorkspaceProps = {
 
 function SettingsWorkspace(props: SettingsWorkspaceProps) {
   const { tab, setTab, message, actionState } = props;
-  return <div className="settings-workspace"><div className="settings-tabs" role="tablist" aria-label="Settings sections"><button type="button" role="tab" aria-selected={tab === "general"} className={tab === "general" ? "active" : ""} onClick={() => setTab("general")}><Gauge size={16} /> DNS & interface</button><button type="button" role="tab" aria-selected={tab === "data"} className={tab === "data" ? "active" : ""} onClick={() => setTab("data")}><Database size={16} /> Health & data</button><button type="button" role="tab" aria-selected={tab === "advanced"} className={tab === "advanced" ? "active" : ""} onClick={() => setTab("advanced")}><Code2 size={16} /> Advanced</button><button type="button" role="tab" aria-selected={tab === "redundancy"} className={tab === "redundancy" ? "active" : ""} onClick={() => setTab("redundancy")}><Network size={16} /> Redundancy</button><button type="button" role="tab" aria-selected={tab === "integrations"} className={tab === "integrations" ? "active" : ""} onClick={() => setTab("integrations")}><Cable size={16} /> Integrations</button><button type="button" role="tab" aria-selected={tab === "account"} className={tab === "account" ? "active" : ""} onClick={() => setTab("account")}><UserRound size={16} /> Account</button></div>{message && <div className={`settings-feedback ${actionState === "error" ? "error" : "success"}`}><CheckCircle2 size={16} /><span>{message}</span></div>}<SettingsTabContent {...props} /></div>;
+  return <Tabs value={tab} onValueChange={(value) => setTab(value as SettingsTab)} className="settings-workspace"><TabsList className="settings-tabs"  aria-label="Settings sections"><TabsTrigger value="general"     ><Gauge size={16} /> DNS & interface</TabsTrigger><TabsTrigger value="data"     ><Database size={16} /> Health & data</TabsTrigger><TabsTrigger value="advanced"     ><Code2 size={16} /> Advanced</TabsTrigger><TabsTrigger value="redundancy"     ><Network size={16} /> Redundancy</TabsTrigger><TabsTrigger value="integrations"     ><Cable size={16} /> Integrations</TabsTrigger><TabsTrigger value="account"     ><UserRound size={16} /> Account</TabsTrigger></TabsList>{message && <div role={actionState === "error" ? "alert" : "status"} className={`settings-feedback ${actionState === "error" ? "error" : "success"}`}>{actionState === "error" ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}<span>{message}</span></div>}<TabsContent value={tab}><SettingsTabContent {...props} /></TabsContent></Tabs>;
 }
 
 function SettingsTabContent(props: SettingsWorkspaceProps) {
@@ -225,7 +236,7 @@ function SettingsTabContent(props: SettingsWorkspaceProps) {
     case "redundancy":
       return <RedundancySettings />;
     case "data":
-      return <DataAndHealth maintenance={props.maintenance} loading={props.maintenanceLoading} retentionDays={props.form.retention_days || "30"} setRetentionDays={(value) => props.setForm({ ...props.form, retention_days: value })} saveRetention={props.saveRetention} pruneDays={props.pruneDays} setPruneDays={props.setPruneDays} compact={props.compact} setCompact={props.setCompact} prune={props.prune} refresh={props.refreshMaintenance} busy={props.actionState === "working"} result={props.pruneResult} />;
+      return <DataAndHealth maintenance={props.maintenance} loading={props.maintenanceLoading} error={props.maintenanceError} retentionDays={props.form.retention_days || "30"} setRetentionDays={(value) => props.setForm({ ...props.form, retention_days: value })} saveRetention={props.saveRetention} pruneDays={props.pruneDays} setPruneDays={props.setPruneDays} compact={props.compact} setCompact={props.setCompact} prune={props.prune} refresh={props.refreshMaintenance} busy={props.actionState === "working"} result={props.pruneResult} />;
     case "advanced":
       return <AdvancedSettings />;
     case "integrations":
@@ -236,11 +247,66 @@ function SettingsTabContent(props: SettingsWorkspaceProps) {
 }
 
 function GeneralSettings({ form, setForm, upstreams, onManageUpstreams, reloadDNS, saveGeneral, actionState, advancedNetworkOpen, setAdvancedNetworkOpen }: SettingsWorkspaceProps) {
-  return <div className="settings-general-grid"><section className="panel settings-compact-panel"><div className="panel-title with-actions"><div><h2>DNS & resolution</h2><p>Core behavior for local and public lookups.</p></div><button type="button" className="secondary icon-text-button" onClick={reloadDNS} disabled={actionState === "working"}><RotateCw size={16} /><span>Reload DNS</span></button></div><form className="settings-rows" onSubmit={(event) => void saveGeneral(event)}><SettingRow icon={<Server size={19} />} title="Upstream providers" description={`${upstreams.length} selected: ${upstreams.join(", ") || "none"}`}><button type="button" className="secondary" onClick={onManageUpstreams}>Manage</button></SettingRow><SettingRow icon={<Globe2 size={19} />} title="Local domain suffix" description="Default suffix suggested for local records."><input className="settings-short-input" value={form.local_domain_suffix ?? ""} onChange={(event) => setForm({ ...form, local_domain_suffix: event.target.value })} placeholder="home" /></SettingRow><SettingRow icon={<Network size={19} />} title="Faro LAN address" description="Fixed address distributed to devices as their DNS server."><input className="settings-short-input" value={form.faro_lan_ip ?? ""} onChange={(event) => setForm({ ...form, faro_lan_ip: event.target.value })} placeholder="Faro LAN address" required /></SettingRow><SettingRow icon={<ShieldCheck size={19} />} title="Network access" description="Faro automatically accepts DNS requests from devices on home and private networks."><div className="settings-network-access"><div className="settings-network-access-summary"><span className="settings-access-badge"><Check size={13} /> Home networks</span><button type="button" className="secondary" aria-expanded={advancedNetworkOpen} onClick={() => setAdvancedNetworkOpen(!advancedNetworkOpen)}>{advancedNetworkOpen ? "Hide advanced" : "Advanced"}</button></div>{advancedNetworkOpen && <label className="settings-network-advanced"><span>Custom network ranges</span><textarea className="settings-cidr-input" rows={4} value={form.allowed_client_cidrs ?? ""} onChange={(event) => setForm({ ...form, allowed_client_cidrs: event.target.value })} aria-label="Custom allowed DNS client network ranges" /><small>Most people never need this. Only change these ranges if your network uses addresses outside standard home networks.</small></label>}</div></SettingRow><SettingRow icon={<Gauge size={19} />} title="DNS response cache" description="Keep repeated answers local to reduce latency and upstream traffic."><div className="settings-inline-controls"><label className="compact-toggle"><input type="checkbox" checked={form.dns_cache_enabled !== "false"} onChange={(event) => setForm({ ...form, dns_cache_enabled: String(event.target.checked) })} /><span>Enabled</span></label><label className="unit-input"><input type="number" min="30" max="3600" step="30" disabled={form.dns_cache_enabled === "false"} value={form.dns_cache_ttl ?? "300"} onChange={(event) => setForm({ ...form, dns_cache_ttl: event.target.value })} /><span>sec max</span></label></div></SettingRow><SettingRow icon={<Image size={19} />} title="Domain favicons" description="Fetch and cache icons for public domains; local names retain initials."><label className="compact-toggle"><input type="checkbox" checked={form.favicon_fetching_enabled === "true"} onChange={(event) => setForm({ ...form, favicon_fetching_enabled: String(event.target.checked) })} /><span>Enabled</span></label></SettingRow><div className="settings-save-row"><button type="submit" className="icon-text-button" disabled={actionState === "working"}><Save size={16} /><span>{actionState === "working" ? "Saving" : "Save changes"}</span></button></div></form></section><aside className="settings-overview-column"><section className="panel settings-summary"><div className="panel-title"><h2>Current configuration</h2></div><div className="settings-summary-list"><SummaryRow label="Upstreams" value={upstreams.join(", ") || "Not configured"} /><SummaryRow label="Local suffix" value={form.local_domain_suffix || "home"} /><SummaryRow label="LAN address" value={form.faro_lan_ip || "Not configured"} /><SummaryRow label="Cache" value={cacheSummary(form)} /><SummaryRow label="Favicons" value={form.favicon_fetching_enabled === "true" ? "Enabled" : "Disabled"} /></div></section></aside></div>;
+  return (
+    <div className="settings-general-grid">
+      <section className="panel settings-compact-panel">
+        <div className="panel-title with-actions">
+          <div><h2>DNS & resolution</h2><p>Core behavior for local and public lookups.</p></div>
+          <Button variant="outline" type="button" onClick={reloadDNS} disabled={actionState === "working"}><RotateCw size={16} />Reload DNS</Button>
+        </div>
+        <form className="settings-rows" onSubmit={(event) => void saveGeneral(event)}>
+          <SettingRow icon={<Server size={19} />} title="Upstream providers" description={`${upstreams.length} selected: ${upstreams.join(", ") || "none"}`}>
+            <Button variant="outline" type="button" onClick={onManageUpstreams}>Manage</Button>
+          </SettingRow>
+          <SettingRow icon={<Globe2 size={19} />} title="Local domain suffix" description="Default suffix suggested for local records.">
+            <Input aria-label="Local domain suffix" className="settings-short-input" value={form.local_domain_suffix ?? ""} onChange={(event) => setForm({ ...form, local_domain_suffix: event.target.value })} placeholder="home" />
+          </SettingRow>
+          <SettingRow icon={<Network size={19} />} title="Faro LAN address" description="Fixed address distributed to devices as their DNS server.">
+            <Input aria-label="Faro LAN address" className="settings-short-input" value={form.faro_lan_ip ?? ""} onChange={(event) => setForm({ ...form, faro_lan_ip: event.target.value })} placeholder="Faro LAN address" required />
+          </SettingRow>
+          <SettingRow icon={<ShieldCheck size={19} />} title="Network access" description="Accept DNS requests from devices on home and private networks.">
+            <div className="settings-network-access">
+              <div className="settings-network-access-summary">
+                <span className="settings-access-badge"><Check size={13} />Home networks</span>
+                <Button variant="outline" type="button" aria-expanded={advancedNetworkOpen} aria-controls="settings-network-ranges" onClick={() => setAdvancedNetworkOpen(!advancedNetworkOpen)}>{advancedNetworkOpen ? "Hide advanced" : "Advanced"}</Button>
+              </div>
+              {advancedNetworkOpen && <label id="settings-network-ranges" className="settings-network-advanced">
+                <span>Custom network ranges</span>
+                <Textarea className="settings-cidr-input" rows={4} value={form.allowed_client_cidrs ?? ""} onChange={(event) => setForm({ ...form, allowed_client_cidrs: event.target.value })} aria-label="Custom allowed DNS client network ranges" />
+                <small>Only change these ranges if your network uses addresses outside standard home networks.</small>
+              </label>}
+            </div>
+          </SettingRow>
+          <SettingRow icon={<Gauge size={19} />} title="DNS response cache" description="Keep repeated answers local to reduce latency and upstream traffic.">
+            <div className="settings-inline-controls">
+              <label className="compact-toggle"><Checkbox aria-label="Enable DNS response cache" checked={form.dns_cache_enabled !== "false"} onCheckedChange={(checked) => setForm({ ...form, dns_cache_enabled: String(checked) })} /><span>Enabled</span></label>
+              <label className="unit-input"><Input variant="embedded" aria-label="Maximum cache lifetime in seconds" type="number" min="30" max="3600" step="30" disabled={form.dns_cache_enabled === "false"} value={form.dns_cache_ttl ?? "300"} onChange={(event) => setForm({ ...form, dns_cache_ttl: event.target.value })} /><span>sec max</span></label>
+            </div>
+          </SettingRow>
+          <SettingRow icon={<Image size={19} />} title="Domain favicons" description="Fetch icons for public domains; local names retain initials.">
+            <label className="compact-toggle"><Checkbox aria-label="Enable domain favicons" checked={form.favicon_fetching_enabled === "true"} onCheckedChange={(checked) => setForm({ ...form, favicon_fetching_enabled: String(checked) })} /><span>Enabled</span></label>
+          </SettingRow>
+          <div className="settings-save-row"><Button type="submit" disabled={actionState === "working"}><Save size={16} />{actionState === "working" ? "Saving" : "Save changes"}</Button></div>
+        </form>
+      </section>
+      <aside className="settings-overview-column">
+        <section className="panel settings-summary">
+          <div className="panel-title"><div><h2>Configuration preview</h2><p>Reflects your changes before saving.</p></div></div>
+          <div className="settings-summary-list">
+            <SummaryRow label="Upstreams" value={upstreams.join(", ") || "Not configured"} />
+            <SummaryRow label="Local suffix" value={form.local_domain_suffix || "home"} />
+            <SummaryRow label="LAN address" value={form.faro_lan_ip || "Not configured"} />
+            <SummaryRow label="Cache" value={cacheSummary(form)} />
+            <SummaryRow label="Favicons" value={form.favicon_fetching_enabled === "true" ? "Enabled" : "Disabled"} />
+          </div>
+        </section>
+      </aside>
+    </div>
+  );
 }
 
 function AccountSettings({ currentPassword, newPassword, confirmPassword, setCurrentPassword, setNewPassword, setConfirmPassword, passwordVisible, setPasswordVisible, changePassword, actionState }: SettingsWorkspaceProps) {
-  return <section className="panel account-password-panel"><div className="panel-title"><div><h2>Change password</h2><p>Enter your current password, then choose a new one.</p></div></div><form className="account-password-form" onSubmit={(event) => void changePassword(event)}><PasswordField label="Current password" value={currentPassword} setValue={setCurrentPassword} visible={passwordVisible} autoComplete="current-password" /><PasswordField label="New password" value={newPassword} setValue={setNewPassword} visible={passwordVisible} autoComplete="new-password" /><PasswordField label="Confirm new password" value={confirmPassword} setValue={setConfirmPassword} visible={passwordVisible} autoComplete="new-password" /><div className="account-password-footer"><div className="password-requirements" aria-label="Password requirements"><span className={newPassword.length >= 8 ? "met" : ""}><Check size={13} /> 8 or more characters</span><span className={confirmPassword.length > 0 && newPassword === confirmPassword ? "met" : ""}><Check size={13} /> Passwords match</span></div><button type="button" className="secondary password-visibility" onClick={() => setPasswordVisible(!passwordVisible)}>{passwordVisible ? <EyeOff size={15} /> : <Eye size={15} />}<span>{passwordVisible ? "Hide" : "Show"}</span></button></div><div className="settings-save-row account-password-action"><span>Other sessions will be signed out.</span><button type="submit" className="icon-text-button" disabled={actionState === "working" || !currentPassword || !newPassword || !confirmPassword}><KeyRound size={16} /><span>{actionState === "working" ? "Changing password" : "Change password"}</span></button></div></form></section>;
+  return <section className="panel account-password-panel"><div className="panel-title"><div><h2>Change password</h2><p>Enter your current password, then choose a new one.</p></div></div><form className="account-password-form" onSubmit={(event) => void changePassword(event)}><PasswordField label="Current password" value={currentPassword} setValue={setCurrentPassword} visible={passwordVisible} autoComplete="current-password" /><PasswordField label="New password" value={newPassword} setValue={setNewPassword} visible={passwordVisible} autoComplete="new-password" /><PasswordField label="Confirm new password" value={confirmPassword} setValue={setConfirmPassword} visible={passwordVisible} autoComplete="new-password" /><div className="account-password-footer"><div className="password-requirements" aria-label="Password requirements"><span className={newPassword.length >= 8 ? "met" : ""}><Check size={13} /> 8 or more characters</span><span className={confirmPassword.length > 0 && newPassword === confirmPassword ? "met" : ""}><Check size={13} /> Passwords match</span></div><Button variant="outline" type="button" className="secondary password-visibility" aria-label={passwordVisible ? "Hide passwords" : "Show passwords"} aria-pressed={passwordVisible} onClick={() => setPasswordVisible(!passwordVisible)}>{passwordVisible ? <EyeOff size={15} /> : <Eye size={15} />}<span>{passwordVisible ? "Hide" : "Show"}</span></Button></div><div className="settings-save-row account-password-action"><span>Other sessions will be signed out.</span><Button variant="default" type="submit" className="icon-text-button" disabled={actionState === "working" || !currentPassword || !newPassword || !confirmPassword}><KeyRound size={16} /><span>{actionState === "working" ? "Changing password" : "Change password"}</span></Button></div></form></section>;
 }
 
 function cacheSummary(form: Record<string, string>) {
@@ -249,12 +315,13 @@ function cacheSummary(form: Record<string, string>) {
 }
 
 function PasswordField({ label, value, setValue, visible, autoComplete }: { readonly label: string; readonly value: string; readonly setValue: (value: string) => void; readonly visible: boolean; readonly autoComplete: string }) {
-  return <label className="account-password-field"><span>{label}</span><div><LockKeyhole size={17} /><input type={visible ? "text" : "password"} value={value} onChange={(event) => setValue(event.target.value)} autoComplete={autoComplete} required /></div></label>;
+  return <label className="account-password-field"><span>{label}</span><div><LockKeyhole size={17} aria-hidden="true" /><Input variant="embedded" type={visible ? "text" : "password"} value={value} onChange={(event) => setValue(event.target.value)} autoComplete={autoComplete} required /></div></label>;
 }
 
-function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, saveRetention, pruneDays, setPruneDays, compact, setCompact, prune, refresh, busy, result }: {
+function DataAndHealth({ maintenance, loading, error, retentionDays, setRetentionDays, saveRetention, pruneDays, setPruneDays, compact, setCompact, prune, refresh, busy, result }: {
   readonly maintenance: MaintenanceStatus | null;
   readonly loading: boolean;
+  readonly error: string;
   readonly retentionDays: string;
   readonly setRetentionDays: (value: string) => void;
   readonly saveRetention: () => void;
@@ -337,8 +404,9 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
       <section className="panel maintenance-health-panel">
         <div className="panel-title with-actions">
           <div><h2>Application health</h2><p>{maintenance ? `Faro has been running for ${formatDuration(maintenance.uptime_seconds)}.` : "Live resource use and local data footprint."}</p></div>
-          <button type="button" className="secondary icon-button" title="Refresh health" aria-label="Refresh health" onClick={refresh} disabled={loading}><RefreshCw size={16} /></button>
+          <Button variant="outline" type="button" className="secondary icon-button" title="Refresh health" aria-label="Refresh health" onClick={refresh} disabled={loading}><RefreshCw size={16} /></Button>
         </div>
+        {error && <div className="settings-feedback error" role="alert"><AlertTriangle size={16} /><span>{error}</span></div>}
         <div className="maintenance-metrics">
           <HealthMetric icon={<Cpu size={18} />} label="App memory" value={maintenance ? formatBytes(maintenance.process_memory_bytes) : "—"} detail="Current Go heap" />
           <HealthMetric icon={<HardDrive size={18} />} label="Database storage" value={storage ? formatBytes(storage.database_bytes) : "—"} detail={storage ? `${formatBytes(storage.database_reclaimable_bytes)} reclaimable` : "SQLite file allocation"} />
@@ -350,8 +418,8 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
       <div className="maintenance-columns">
         <section className="panel retention-panel">
           <div className="maintenance-section-heading"><Clock3 size={19} /><div><h2>Automatic retention</h2><p>Faro removes expired DNS queries and system events on startup and every six hours.</p></div></div>
-          <label className="retention-days-field"><span>Keep logs for</span><div><input type="number" min="1" max="3650" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} /><span>days</span></div></label>
-          <button type="button" className="secondary icon-text-button" onClick={saveRetention} disabled={busy}><Save size={16} /><span>Save retention</span></button>
+          <label className="retention-days-field"><span>Keep logs for</span><div><Input variant="embedded" aria-label="Keep logs for days" type="number" min="1" max="3650" value={retentionDays} onChange={(event) => setRetentionDays(event.target.value)} /><span>days</span></div></label>
+          <Button variant="outline" type="button" className="secondary icon-text-button" onClick={saveRetention} disabled={busy}><Save size={16} /><span>Save retention</span></Button>
           <div className="retention-status">
             <SummaryRow label="Oldest DNS query" value={formatTimestamp(storage?.oldest_query)} />
             <SummaryRow label="Last automatic cleanup" value={formatTimestamp(storage?.last_pruned_at)} />
@@ -362,33 +430,33 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
         <section className="panel prune-panel">
           <div className="maintenance-section-heading"><Trash2 size={19} /><div><h2>Prune database now</h2><p>Delete data older than the selected age. This does not change the automatic retention policy.</p></div></div>
           <div className="prune-controls">
-            <label className="retention-days-field"><span>Delete logs older than</span><div><input type="number" min="1" max="3650" value={pruneDays} onChange={(event) => setPruneDays(Number(event.target.value))} /><span>days</span></div></label>
-            <label className="compact-toggle prune-compact"><input type="checkbox" checked={compact} onChange={(event) => setCompact(event.target.checked)} /><span>Compact SQLite afterward to reclaim disk space</span></label>
+            <label className="retention-days-field"><span>Delete logs older than</span><div><Input variant="embedded" aria-label="Delete logs older than days" type="number" min="1" max="3650" value={pruneDays} onChange={(event) => setPruneDays(Number(event.target.value))} /><span>days</span></div></label>
+            <label className="compact-toggle prune-compact"><Checkbox  checked={compact} onCheckedChange={(checked) => setCompact(checked)} /><span>Reclaim unused disk space after cleanup</span></label>
           </div>
           {result && <div className="prune-result"><strong>{formatNumber(result.queries_deleted + result.events_deleted)} rows removed</strong><span>{result.compacted ? `${formatBytes(result.reclaimed_bytes)} returned to disk.` : "Free pages retained for SQLite reuse."}</span></div>}
           <div className="prune-action-footer">
             <span>Only DNS query history and system events are removed.</span>
-            <button type="button" className="danger-outline icon-text-button" onClick={prune} disabled={busy}><Trash2 size={16} /><span>{busy ? "Pruning" : "Prune now"}</span></button>
+            <Button variant="destructive" type="button" className="danger-outline icon-text-button" onClick={prune} disabled={busy}><Trash2 size={16} /><span>{busy ? "Pruning" : "Prune now"}</span></Button>
           </div>
         </section>
       </div>
 
       <section className="panel backup-panel">
         <div className="maintenance-section-heading"><ShieldCheck size={20} /><div><h2>Encrypted backup & restore</h2><p>Download a portable copy of Faro's configuration, account, rules, records, and database history.</p></div></div>
-        <div className="backup-security-note"><LockKeyhole size={16} /><span>Backups use Argon2id and AES-256-GCM. Active login sessions, cached favicon files, and the raw query-log buffer are excluded.</span></div>
+        <div className="backup-security-note"><LockKeyhole size={16} /><span>Your passphrase encrypts the backup. Active sessions, cached icons, and buffered query logs are excluded.</span></div>
         {backupMessage && <output className={`backup-message ${backupMessage.tone}`}>{backupMessage.tone === "error" ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}<span>{backupMessage.text}</span></output>}
         <div className="backup-actions-grid">
           <div className="backup-action-card">
             <div className="backup-card-heading"><FileArchive size={19} /><div><strong>Create encrypted backup</strong><span>Choose a unique passphrase. It is required to restore the file.</span></div></div>
-            <label><span>Backup passphrase</span><input type="password" minLength={12} autoComplete="new-password" value={backupPassphrase} onChange={(event) => setBackupPassphrase(event.target.value)} placeholder="At least 12 characters" /></label>
-            <label><span>Confirm passphrase</span><input type="password" minLength={12} autoComplete="new-password" value={backupConfirmation} onChange={(event) => setBackupConfirmation(event.target.value)} /></label>
-            <button type="button" className="secondary icon-text-button" onClick={() => void exportBackup()} disabled={busy || backupBusy !== null}><Download size={16} /><span>{backupBusy === "export" ? "Encrypting backup" : "Download backup"}</span></button>
+            <label><span>Backup passphrase</span><Input type="password" minLength={12} autoComplete="new-password" value={backupPassphrase} onChange={(event) => setBackupPassphrase(event.target.value)} placeholder="At least 12 characters" /></label>
+            <label><span>Confirm passphrase</span><Input type="password" minLength={12} autoComplete="new-password" value={backupConfirmation} onChange={(event) => setBackupConfirmation(event.target.value)} /></label>
+            <Button variant="outline" type="button" className="secondary icon-text-button" onClick={() => void exportBackup()} disabled={busy || backupBusy !== null}><Download size={16} /><span>{backupBusy === "export" ? "Encrypting backup" : "Download backup"}</span></Button>
           </div>
 
           <div className="backup-action-card restore-card">
             <div className="backup-card-heading"><Upload size={19} /><div><strong>Restore encrypted backup</strong><span>This replaces the existing Faro configuration, records, rules, and query history, then reloads DNS.</span></div></div>
             <label><span>Backup file</span><input type="file" accept=".faro-backup,application/octet-stream" onChange={(event) => setRestoreFile(event.target.files?.[0] ?? null)} /></label>
-            <label><span>Backup passphrase</span><input type="password" minLength={12} autoComplete="off" value={restorePassphrase} onChange={(event) => setRestorePassphrase(event.target.value)} /></label>
+            <label><span>Backup passphrase</span><Input type="password" minLength={12} autoComplete="off" value={restorePassphrase} onChange={(event) => setRestorePassphrase(event.target.value)} /></label>
             <div className="restore-impact-note">
               <strong>Before you restore</strong>
               <ul>
@@ -398,8 +466,8 @@ function DataAndHealth({ maintenance, loading, retentionDays, setRetentionDays, 
                 <li>The backup passphrase cannot be recovered.</li>
               </ul>
             </div>
-            <label className="restore-confirmation"><input type="checkbox" checked={restoreConfirmed} onChange={(event) => setRestoreConfirmed(event.target.checked)} /><span>I understand this replaces the backup-covered state and signs out every session.</span></label>
-            <button type="button" className="danger-outline icon-text-button" onClick={() => void restoreBackup()} disabled={busy || backupBusy !== null || !restoreConfirmed}><Upload size={16} /><span>{backupBusy === "restore" ? "Validating and restoring" : "Restore backup"}</span></button>
+            <label className="restore-confirmation"><Checkbox  checked={restoreConfirmed} onCheckedChange={(checked) => setRestoreConfirmed(checked)} /><span>I understand this replaces the backup-covered state and signs out every session.</span></label>
+            <Button variant="destructive" type="button" className="danger-outline icon-text-button" onClick={() => void restoreBackup()} disabled={busy || backupBusy !== null || !restoreConfirmed}><Upload size={16} /><span>{backupBusy === "restore" ? "Validating and restoring" : "Restore backup"}</span></Button>
           </div>
         </div>
       </section>
@@ -495,13 +563,13 @@ function CoreDNSDiagnosticsPanel() {
 }
 
 function DiagnosticsRequestError({ message, onRetry }: { readonly message: string; readonly onRetry: () => void }) {
-  return <div className="diagnostics-request-error" role="alert"><AlertTriangle size={17} /><div><strong>CoreDNS diagnostics are unavailable</strong><span>{message}</span></div><button type="button" className="secondary" onClick={onRetry}>Try again</button></div>;
+  return <div className="diagnostics-request-error" role="alert"><AlertTriangle size={17} /><div><strong>CoreDNS diagnostics are unavailable</strong><span>{message}</span></div><Button variant="outline" type="button" className="secondary" onClick={onRetry}>Try again</Button></div>;
 }
 
 function ConfigurationHealth({ diagnostics, corefile, loading, onRefresh, onViewCorefile, onViewDifferences }: { readonly diagnostics: CoreDNSDiagnostics; readonly corefile?: CoreDNSDiagnosticFile; readonly loading: boolean; readonly onRefresh: () => void; readonly onViewCorefile: () => void; readonly onViewDifferences: () => void }) {
   const health = configurationHealthCopy(diagnostics);
   const hasMismatch = diagnostics.status === "drifted" && diagnostics.files.some((file) => file.referenced && !file.matches);
-  return <div className={`configuration-health ${health.tone}`}><span className="configuration-health-icon">{health.tone === "healthy" ? <CheckCircle2 size={21} /> : <AlertTriangle size={20} />}</span><div className="configuration-health-copy"><strong>{health.title}</strong><span>{health.description}</span></div><div className="configuration-health-actions"><button type="button" className="secondary icon-text-button" onClick={onRefresh} disabled={loading}><RefreshCw size={15} /><span>Refresh</span></button><button type="button" className="secondary" onClick={hasMismatch ? onViewDifferences : onViewCorefile} disabled={hasMismatch ? false : !corefile}>{hasMismatch ? "View differences" : "View active Corefile"}</button></div></div>;
+  return <div className={`configuration-health ${health.tone}`}><span className="configuration-health-icon">{health.tone === "healthy" ? <CheckCircle2 size={21} /> : <AlertTriangle size={20} />}</span><div className="configuration-health-copy"><strong>{health.title}</strong><span>{health.description}</span></div><div className="configuration-health-actions"><Button variant="outline" type="button" className="secondary icon-text-button" onClick={onRefresh} disabled={loading}><RefreshCw size={15} /><span>Refresh</span></Button><Button variant="outline" type="button" className="secondary" onClick={hasMismatch ? onViewDifferences : onViewCorefile} disabled={hasMismatch ? false : !corefile}>{hasMismatch ? "View differences" : "View active Corefile"}</Button></div></div>;
 }
 
 function configurationHealthCopy(diagnostics: CoreDNSDiagnostics): { readonly title: string; readonly description: string; readonly tone: "healthy" | "warning" | "error" } {
@@ -520,7 +588,7 @@ function configurationHealthCopy(diagnostics: CoreDNSDiagnostics): { readonly ti
 }
 
 function GeneratedDNSFileRow({ file, expanded, comparing, onToggle, onCompare }: { readonly file: CoreDNSDiagnosticFile; readonly expanded: boolean; readonly comparing: boolean; readonly onToggle: () => void; readonly onCompare: () => void }) {
-  return <div id={diagnosticFileId(file.name)} className={`generated-file-item ${expanded ? "expanded" : ""} ${file.matches ? "current" : "different"}`}><button type="button" className="generated-file-row" aria-expanded={expanded} onClick={onToggle}><span className="generated-file-name"><Code2 size={15} /><strong>{file.name}</strong></span><span className={`generated-file-state ${file.matches ? "current" : "different"}`}>{diagnosticFileState(file)}</span><span className="generated-file-chevron" aria-hidden="true">{expanded ? "−" : "+"}</span></button>{expanded && <div className="generated-file-inspector"><div className="generated-file-inspector-meta"><span>Active file · {formatBytes(file.active_bytes)}</span><span>Read only</span></div><pre>{file.active || "File not present."}</pre>{file.active_truncated && <small>Preview truncated at 1 MiB; the byte count and hash cover the full file.</small>}<div className="generated-file-inspector-footer"><span className={file.matches ? "" : "different"}>{file.matches ? "Active file matches Faro’s generated output." : "Active file differs from Faro’s generated output."}</span><button type="button" className="secondary" onClick={onCompare}>{comparing ? "Hide comparison" : "Compare configurations"}</button></div>{comparing && <CoreDNSComparison file={file} />}</div>}</div>;
+  return <div id={diagnosticFileId(file.name)} className={`generated-file-item ${expanded ? "expanded" : ""} ${file.matches ? "current" : "different"}`}><button type="button" className="generated-file-row" aria-expanded={expanded} onClick={onToggle}><span className="generated-file-name"><Code2 size={15} /><strong>{file.name}</strong></span><span className={`generated-file-state ${file.matches ? "current" : "different"}`}>{diagnosticFileState(file)}</span><span className="generated-file-chevron" aria-hidden="true">{expanded ? "−" : "+"}</span></button>{expanded && <div className="generated-file-inspector"><div className="generated-file-inspector-meta"><span>Active file · {formatBytes(file.active_bytes)}</span><span>Read only</span></div><pre>{file.active || "File not present."}</pre>{file.active_truncated && <small>Preview truncated at 1 MiB; the byte count and hash cover the full file.</small>}<div className="generated-file-inspector-footer"><span className={file.matches ? "" : "different"}>{file.matches ? "Active file matches Faro’s generated output." : "Active file differs from Faro’s generated output."}</span><Button variant="outline" type="button" className="secondary" onClick={onCompare}>{comparing ? "Hide comparison" : "Compare configurations"}</Button></div>{comparing && <CoreDNSComparison file={file} />}</div>}</div>;
 }
 
 function diagnosticFileState(file: CoreDNSDiagnosticFile) {
@@ -602,6 +670,7 @@ function formatTimestamp(value?: string) {
 }
 
 function formatDuration(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "unknown";
   if (seconds < 60) return `${seconds}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;

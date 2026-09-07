@@ -1,3 +1,6 @@
+import { DialogSurface } from "./DialogSurface";
+import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import { Database, FileText, HardDrive, ListFilter, RadioTower, Search, Shield, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, type SearchItem, type SearchResults } from "../api/client";
@@ -29,6 +32,8 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchResults>(emptyResults);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   const flatResults = useMemo(() => flattenResults(results), [results]);
 
@@ -36,17 +41,26 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
     if (!open) {
       return undefined;
     }
+    let cancelled = false;
+    setError("");
+    setResults(emptyResults);
+    setLoading(query.trim() !== "");
     const timer = window.setTimeout(() => {
       if (query.trim() === "") {
         setResults(emptyResults);
         return;
       }
       void api.search(query).then((nextResults) => {
+        if (cancelled) return;
         setResults(nextResults);
         setActiveIndex(0);
+      }).catch(() => {
+        if (!cancelled) setError("Search is unavailable. Try again in a moment.");
+      }).finally(() => {
+        if (!cancelled) setLoading(false);
       });
     }, 180);
-    return () => window.clearTimeout(timer);
+    return () => { cancelled = true; window.clearTimeout(timer); };
   }, [open, query]);
 
   useEffect(() => {
@@ -86,22 +100,22 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
   }
 
   return (
-    <dialog
+    <DialogSurface
+      onClose={onClose}
       className="modal-backdrop"
-      open
       aria-label="Search Faro"
     >
       <div className="search-modal command-palette">
         <div className="search-modal-bar">
           <Search size={19} />
-          <input
+          <Input variant="embedded"
             autoFocus
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "ArrowDown") {
                 event.preventDefault();
-                setActiveIndex((index) => Math.min(index + 1, flatResults.length - 1));
+                setActiveIndex((index) => Math.max(0, Math.min(index + 1, flatResults.length - 1)));
               }
               if (event.key === "ArrowUp") {
                 event.preventDefault();
@@ -111,20 +125,18 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
                 event.preventDefault();
                 runResult(flatResults[activeIndex]);
               }
-              if (event.key === "Escape") {
-                onClose();
-              }
             }}
             placeholder="Search devices, domains, events, rules, DNS records, blocklists"
+            aria-label="Search Faro"
           />
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close search">
+          <Button variant="ghost" size="icon" className="icon-button" type="button" onClick={onClose} aria-label="Close search">
             <X size={18} />
-          </button>
+          </Button>
         </div>
 
-        <div className="command-results">
-          {flatResults.length === 0 ? (
-            <p>{query.trim() === "" ? "Type to search local Faro data." : "No matches"}</p>
+        <div className="command-results" aria-busy={loading}>
+          {error ? <p role="alert">{error}</p> : flatResults.length === 0 ? (
+            <p role="status">{loading ? "Searching…" : query.trim() === "" ? "Type to search local Faro data." : "No matches"}</p>
           ) : (
             flatResults.map((item, index) => {
               const Icon = iconForGroup(item.group);
@@ -148,7 +160,7 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
           )}
         </div>
       </div>
-    </dialog>
+    </DialogSurface>
   );
 }
 

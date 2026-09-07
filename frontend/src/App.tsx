@@ -13,6 +13,8 @@ import {
   type VersionCheck
 } from "./api/client";
 import { DomainDrawer } from "./components/DomainDrawer";
+import { FaviconEnabledContext } from "./components/DomainFavicon";
+import { Button } from "./components/ui/button";
 import { AuthLoading, AuthScreen } from "./components/AuthScreen";
 import { Onboarding } from "./components/Onboarding";
 import { GlobalSearch } from "./components/GlobalSearch";
@@ -447,7 +449,7 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
   const releaseUpdate = versionInfo?.latest ?? null;
   const showReleaseUpdate = releaseUpdate !== null && releaseUpdate.version !== dismissedReleaseVersion;
 
-  return (
+  const layout = (
     <Layout
       page={page}
       setPage={navigateToPage}
@@ -468,9 +470,9 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
         <div className="error-banner">
           <strong>Faro API is not reachable.</strong>
           <span>{error}</span>
-          <button type="button" onClick={() => void loadAll()}>
+          <Button variant="outline" className="secondary" type="button" onClick={() => void loadAll()}>
             Retry
-          </button>
+          </Button>
         </div>
       )}
       {content}
@@ -496,6 +498,12 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
         setPage={navigateToPage}
       />
     </Layout>
+  );
+
+  return (
+    <FaviconEnabledContext.Provider value={settings.some((setting) => setting.key === "favicon_fetching_enabled" && setting.value === "true")}>
+      {layout}
+    </FaviconEnabledContext.Provider>
   );
 }
 

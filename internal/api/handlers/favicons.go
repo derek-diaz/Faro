@@ -42,12 +42,16 @@ func (handler *Handler) favicon(responseWriter http.ResponseWriter, request *htt
 		return
 	}
 	if settingValue(request.Context(), handler.store.DB, "favicon_fetching_enabled") != "true" {
-		http.NotFound(responseWriter, request)
+		// A disabled optional feature is an expected miss. Do not cache this
+		// response, so enabling it takes effect on the next request.
+		responseWriter.Header().Set("Cache-Control", "no-store")
+		responseWriter.Header().Set("X-Faro-Favicon", "placeholder")
+		responseWriter.WriteHeader(http.StatusNoContent)
 		return
 	}
 	domain, err := db.NormalizeDomain(strings.TrimPrefix(request.URL.Path, "/api/favicons/"))
 	if err != nil || !isSafeFaviconDomain(domain) {
-		http.NotFound(responseWriter, request)
+		serveFaviconPlaceholder(responseWriter, domain)
 		return
 	}
 
@@ -506,7 +510,12 @@ func hasRepeatedFaviconLabels(labels []string) bool {
 }
 
 func hasUnsafeFaviconSuffix(domain string) bool {
-	return strings.HasSuffix(domain, ".home") || strings.HasSuffix(domain, ".local") || strings.HasSuffix(domain, ".lan")
+	for _, suffix := range []string{"home", "local", "lan", "localhost", "invalid", "test", "example", "bind", "arpa"} {
+		if domain == suffix || strings.HasSuffix(domain, "."+suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 func safeFaviconFilename(domain string) string {

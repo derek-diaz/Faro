@@ -12,3 +12,5 @@ frontend/dist/
 coverage/
 .cache/
 .idea
+.playwright-cli/
+frontend/output/playwright/

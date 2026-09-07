@@ -174,7 +174,7 @@ func (service *Service) Create(ctx context.Context, passphrase string) (string, 
 		SchemaVersion:      db.CurrentSchemaVersion,
 		CreatedAt:          time.Now().UTC().Format(time.RFC3339),
 		DatabaseBytes:      info.Size(),
-		Excluded:           []string{"temporary troubleshooting exceptions", "auth_sessions", "redundancy pairing secrets and node membership", "integration credentials and derived router observations", "favicon cache files", "raw query-log buffer"},
+		Excluded:           []string{"temporary troubleshooting exceptions", "auth_sessions", "redundancy pairing secrets and node membership", "integration credentials and derived router observations", "favicon cache files", "raw query-log buffer", "query-log ingestion checkpoints"},
 	}
 	archivePath := filepath.Join(tempDir, "payload.zip")
 	if err := writeArchive(archivePath, databasePath, manifest); err != nil {
@@ -364,7 +364,7 @@ func scrubSnapshot(path string) error {
 		return err
 	}
 	defer func() { _ = database.Close() }()
-	if _, err := database.Exec(`DELETE FROM auth_sessions WHERE 1 = 1; DELETE FROM troubleshooting_exceptions WHERE 1 = 1`); err != nil {
+	if _, err := database.Exec(`DELETE FROM auth_sessions WHERE 1 = 1; DELETE FROM troubleshooting_exceptions WHERE 1 = 1; DELETE FROM query_log_progress`); err != nil {
 		return err
 	}
 	if _, err := database.Exec(`

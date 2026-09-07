@@ -41,7 +41,10 @@ func TestActivityRowsCanLoadWithoutSummaryAndPaginateWithoutGaps(t *testing.T) {
 	if h.activityCountsCache != nil {
 		t.Fatal("rows unnecessarily loaded aggregate counts")
 	}
-	full := activityEvents(context.Background(), h.store.DB, 20, "", "dns")
+	full, err := activityEvents(context.Background(), h.store.DB, 20, "", "dns")
+	if err != nil {
+		t.Fatal(err)
+	}
 	var expected []string
 	for _, item := range full {
 		expected = append(expected, item["id"].(string))

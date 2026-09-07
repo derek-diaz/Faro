@@ -10,6 +10,7 @@ import {
 } from "chart.js";
 import { Bar } from "react-chartjs-2";
 import { useMemo } from "react";
+import { useChartColors } from "../lib/use-chart-colors";
 import type { ActivityTimeline as ActivityTimelineData } from "../api/client";
 import { ActivityTimelineLoading } from "./ActivityLoading";
 
@@ -33,27 +34,23 @@ type BarGeometry = {
   readonly width: number;
 };
 
-const accentColor = "#2cb1a4";
-const blockedColor = "#d76b63";
-const gridColor = "rgba(118, 145, 160, 0.28)";
-const axisColor = "#7b8d9a";
-
 export function ActivityTimeline({ timeline, rangeLabel, loading = false }: ActivityTimelineProps) {
+  const colors = useChartColors();
   const buckets = timeline?.buckets ?? [];
   const hasActivity = buckets.some((bucket) => bucket.total > 0);
   const data = useMemo<ChartData<"bar", TimelinePoint[]>>(() => ({
     datasets: [{
       label: "Queries and events",
       data: buckets.map((bucket) => ({ x: new Date(bucket.timestamp).getTime(), y: bucket.total })),
-      backgroundColor: accentColor,
-      borderColor: accentColor,
+      backgroundColor: colors.accent,
+      borderColor: colors.accent,
       borderRadius: 3,
       borderSkipped: false,
       barPercentage: 0.92,
       categoryPercentage: 0.98,
       maxBarThickness: 28
     }]
-  }), [buckets]);
+  }), [buckets, colors]);
   const options = useMemo<ChartOptions<"bar">>(() => ({
     responsive: true,
     maintainAspectRatio: false,
@@ -89,7 +86,7 @@ export function ActivityTimeline({ timeline, rangeLabel, loading = false }: Acti
         grid: { display: false },
         border: { display: false },
         ticks: {
-          color: axisColor,
+          color: colors.axis,
           maxTicksLimit: 6,
           maxRotation: 0,
           autoSkip: true,
@@ -100,18 +97,18 @@ export function ActivityTimeline({ timeline, rangeLabel, loading = false }: Acti
       y: {
         beginAtZero: true,
         border: { display: false },
-        grid: { color: gridColor, drawTicks: false },
-        ticks: { color: axisColor, precision: 0, padding: 8, font: { size: 10, weight: 600 } }
+        grid: { color: colors.grid, drawTicks: false },
+        ticks: { color: colors.axis, precision: 0, padding: 8, font: { size: 10, weight: 600 } }
       }
     }
-  }), [buckets, timeline?.bucket_seconds]);
+  }), [buckets, timeline?.from, timeline?.to, colors]);
   const blockedOverlayPlugin = useMemo<Plugin<"bar">>(() => ({
     id: "activity-blocked-overlay",
     afterDatasetsDraw: (chart) => {
       const meta = chart.getDatasetMeta(0);
       const context = chart.ctx;
       context.save();
-      context.fillStyle = blockedColor;
+      context.fillStyle = colors.blocked;
       context.globalAlpha = 0.96;
       meta.data.forEach((element, index) => {
         const bucket = buckets[index];
@@ -123,7 +120,7 @@ export function ActivityTimeline({ timeline, rangeLabel, loading = false }: Acti
       });
       context.restore();
     }
-  }), [buckets]);
+  }), [buckets, colors]);
 
   if (loading && !timeline) return <ActivityTimelineLoading />;
 

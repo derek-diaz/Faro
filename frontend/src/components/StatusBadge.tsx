@@ -4,5 +4,6 @@ type StatusBadgeProps = {
 
 export function StatusBadge({ value }: StatusBadgeProps) {
   const normalized = value.toLowerCase();
-  return <span className={`status-badge ${normalized}`}>{normalized === "blocked" ? "Blocked" : "Allowed"}</span>;
+  return <Badge variant={normalized === "blocked" ? "destructive" : "secondary"} className={normalized === "blocked" ? undefined : "bg-accent text-accent-foreground"}>{normalized === "blocked" ? "Blocked" : "Allowed"}</Badge>;
 }
+import { Badge } from "./ui/badge";

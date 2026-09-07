@@ -17,6 +17,7 @@ func ProbeAddress(ctx context.Context, address string) (time.Duration, error) {
 	if err != nil {
 		return 0, err
 	}
+	defer client.client.CloseIdleConnections()
 	query := probeQuery(uint16(time.Now().UnixNano()))
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()

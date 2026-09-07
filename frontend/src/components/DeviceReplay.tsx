@@ -1,3 +1,4 @@
+import { Button } from "./ui/button";
 import { AlertCircle, Pause, Play, RotateCcw } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api, type DNSQuery, type DeviceReplay as DeviceReplayData } from "../api/client";
@@ -207,7 +208,7 @@ type ReplayRankListProps = {
 function ReplayRankList({ items, empty, onSelect }: ReplayRankListProps) {
   const max = Math.max(...items.map((item) => item.count), 1);
   if (!items.length) return <div className="replay-empty compact">{empty}</div>;
-  return <div className="replay-rank-list">{items.map((item) => <div key={item.label}><button type="button" disabled={!onSelect} onClick={() => onSelect?.(item.label)}>{item.label}</button><strong>{item.count}</strong><span><i style={{ width: `${Math.max(5, (item.count / max) * 100)}%` }} /></span></div>)}</div>;
+  return <div className="replay-rank-list">{items.map((item) => <div key={item.label}><Button variant="default" type="button" disabled={!onSelect} onClick={() => onSelect?.(item.label)}>{item.label}</Button><strong>{item.count}</strong><span><i style={{ width: `${Math.max(5, (item.count / max) * 100)}%` }} /></span></div>)}</div>;
 }
 
 type GroupedReplayEvent = {

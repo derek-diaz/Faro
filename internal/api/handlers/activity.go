@@ -87,6 +87,9 @@ func (handler *Handler) events(responseWriter http.ResponseWriter, request *http
 		methodNotAllowed(responseWriter)
 		return
 	}
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	request = request.WithContext(ctx)
 	page := positiveInt(request.URL.Query().Get("page"), 1, maxActivityPage)
 	pageSize := positiveInt(request.URL.Query().Get("page_size"), 50, 200)
 	scope := strings.ToLower(strings.TrimSpace(request.URL.Query().Get("scope")))
@@ -105,7 +108,11 @@ func (handler *Handler) events(responseWriter http.ResponseWriter, request *http
 	}
 	detail := request.URL.Query().Get("detail")
 	if detail == "rows" {
-		items := pagedActivityEventsWithMore(request.Context(), handler.store.DB, page, pageSize, search, scope, window)
+		items, err := pagedActivityEventsWithMore(request.Context(), handler.store.DB, page, pageSize, search, scope, window)
+		if err != nil {
+			writeError(responseWriter, err)
+			return
+		}
 		hasMore := len(items) > pageSize
 		if hasMore {
 			items = items[:pageSize]
@@ -113,7 +120,16 @@ func (handler *Handler) events(responseWriter http.ResponseWriter, request *http
 		writeJSON(responseWriter, http.StatusOK, map[string]any{"items": items, "page": page, "page_size": pageSize, "has_more": hasMore})
 		return
 	}
-	counts := handler.cachedActivityCounts(request.Context(), search, window)
+	counts, err := handler.cachedActivityCounts(request.Context(), search, window)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	timeline, err := activityTimelineFor(request.Context(), handler.store.DB, search, scope, window)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
 	total := counts[scope]
 	totalPages := 0
 	if total > 0 {
@@ -121,7 +137,11 @@ func (handler *Handler) events(responseWriter http.ResponseWriter, request *http
 	}
 	var items []map[string]any
 	if detail != "summary" {
-		items = pagedActivityEvents(request.Context(), handler.store.DB, page, pageSize, search, scope, window)
+		items, err = pagedActivityEvents(request.Context(), handler.store.DB, page, pageSize, search, scope, window)
+		if err != nil {
+			writeError(responseWriter, err)
+			return
+		}
 	}
 	writeJSON(responseWriter, http.StatusOK, map[string]any{
 		"items":       items,
@@ -130,7 +150,7 @@ func (handler *Handler) events(responseWriter http.ResponseWriter, request *http
 		"total":       total,
 		"total_pages": totalPages,
 		"counts":      counts,
-		"timeline":    activityTimelineFor(request.Context(), handler.store.DB, search, scope, window),
+		"timeline":    timeline,
 	})
 }
 
@@ -265,7 +285,11 @@ func (handler *Handler) notifications(responseWriter http.ResponseWriter, reques
 		writeJSON(responseWriter, http.StatusUnauthorized, map[string]any{"error": "authentication required"})
 		return
 	}
-	allEvents := notificationCandidates(request.Context(), handler.store.DB, 1000)
+	allEvents, err := notificationCandidates(request.Context(), handler.store.DB, 1000)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
 	states, readAllAt, err := loadNotificationStates(request.Context(), handler.store.DB, userID)
 	if err != nil {
 		writeError(responseWriter, err)
@@ -375,8 +399,9 @@ func collectNotifications(events []map[string]any, states map[string]storedNotif
 	return notifications, attentionCount, unreadCount
 }
 
-func notificationCandidates(ctx context.Context, database *sql.DB, limit int) []map[string]any {
-	return activityRecordsToMaps(activityRecords(ctx, database, limit, 0, "", "system", activityWindow{}))
+func notificationCandidates(ctx context.Context, database *sql.DB, limit int) ([]map[string]any, error) {
+	records, err := activityRecords(ctx, database, limit, 0, "", "system", activityWindow{})
+	return activityRecordsToMaps(records), err
 }
 
 func loadNotificationStates(ctx context.Context, database *sql.DB, userID int64) (map[string]storedNotificationState, time.Time, error) {
@@ -465,21 +490,24 @@ func (handler *Handler) recordEvent(ctx context.Context, event eventInput) {
 	handler.invalidateActivityCounts()
 }
 
-func localEvents(ctx context.Context, database *sql.DB, limit int, search string) []map[string]any {
+func localEvents(ctx context.Context, database *sql.DB, limit int, search string) ([]map[string]any, error) {
 	return activityEvents(ctx, database, limit, search, "all")
 }
 
-func pagedActivityEventsWithMore(ctx context.Context, database *sql.DB, page, pageSize int, search, scope string, window activityWindow) []map[string]any {
-	return activityRecordsToMaps(activityRecords(ctx, database, pageSize+1, (page-1)*pageSize, search, scope, window))
+func pagedActivityEventsWithMore(ctx context.Context, database *sql.DB, page, pageSize int, search, scope string, window activityWindow) ([]map[string]any, error) {
+	records, err := activityRecords(ctx, database, pageSize+1, (page-1)*pageSize, search, scope, window)
+	return activityRecordsToMaps(records), err
 }
 
-func pagedActivityEvents(ctx context.Context, database *sql.DB, page, pageSize int, search, scope string, window activityWindow) []map[string]any {
+func pagedActivityEvents(ctx context.Context, database *sql.DB, page, pageSize int, search, scope string, window activityWindow) ([]map[string]any, error) {
 	offset := (page - 1) * pageSize
-	return activityRecordsToMaps(activityRecords(ctx, database, pageSize, offset, search, scope, window))
+	records, err := activityRecords(ctx, database, pageSize, offset, search, scope, window)
+	return activityRecordsToMaps(records), err
 }
 
-func activityEvents(ctx context.Context, database *sql.DB, limit int, search, scope string) []map[string]any {
-	return activityRecordsToMaps(activityRecords(ctx, database, limit, 0, search, scope, activityWindow{}))
+func activityEvents(ctx context.Context, database *sql.DB, limit int, search, scope string) ([]map[string]any, error) {
+	records, err := activityRecords(ctx, database, limit, 0, search, scope, activityWindow{})
+	return activityRecordsToMaps(records), err
 }
 
 type activityRecord struct {
@@ -535,12 +563,12 @@ const (
 	deviceTimestampAggregate = "MIN(q.timestamp)"
 )
 
-func activityRecords(ctx context.Context, database *sql.DB, limit, offset int, search, scope string, window activityWindow) []activityRecord {
+func activityRecords(ctx context.Context, database *sql.DB, limit, offset int, search, scope string, window activityWindow) ([]activityRecord, error) {
 	query, args := activityRecordsQuery(search, scope, window, limit+offset)
 	args = append(args, limit, offset)
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return make([]activityRecord, 0)
+		return nil, err
 	}
 	defer closeRows(rows)
 
@@ -553,11 +581,11 @@ func activityRecords(ctx context.Context, database *sql.DB, limit, offset int, s
 			&item.queryType, &item.action, &item.upstream, &item.rcode, &item.latency,
 			&item.decisionReason, &item.decisionMetadata, &item.deviceName, &item.location,
 		); err != nil {
-			return items
+			return nil, err
 		}
 		items = append(items, item)
 	}
-	return items
+	return items, rows.Err()
 }
 
 func activityRecordsQuery(search, scope string, window activityWindow, maximum ...int) (string, []any) {
@@ -693,9 +721,9 @@ func activityRecordsUnionQuery(parts []string) string {
 	return strings.Replace(query, placeholder, "("+strings.Join(parts, ` UNION ALL `)+")", 1)
 }
 
-func activityTimelineFor(ctx context.Context, database *sql.DB, search, scope string, window activityWindow) *activityTimeline {
+func activityTimelineFor(ctx context.Context, database *sql.DB, search, scope string, window activityWindow) (*activityTimeline, error) {
 	if !window.enabled {
-		return nil
+		return nil, nil
 	}
 
 	from := window.from.Format(time.RFC3339Nano)
@@ -723,20 +751,20 @@ func activityTimelineFor(ctx context.Context, database *sql.DB, search, scope st
 
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return timeline
+		return nil, err
 	}
 	defer closeRows(rows)
 	for rows.Next() {
 		var index, total, blocked int
 		if err := rows.Scan(&index, &total, &blocked); err != nil {
-			return timeline
+			return nil, err
 		}
 		if index >= 0 && index < len(timeline.Buckets) {
 			timeline.Buckets[index].Total = total
 			timeline.Buckets[index].Blocked = blocked
 		}
 	}
-	return timeline
+	return timeline, rows.Err()
 }
 
 func activityTimelineParts(search, scope string, window activityWindow, from string, bucketSeconds int) ([]string, []any) {
@@ -800,6 +828,9 @@ func activityTimelineQueryPart(search, scope string, window activityWindow, from
 		       CASE WHEN q.action = 'blocked' THEN 1 ELSE 0 END AS blocked
 		FROM dns_queries q
 		LEFT JOIN devices a ON a.id = q.device_id`
+	if search == "" {
+		query = strings.Replace(query, "LEFT JOIN devices a ON a.id = q.device_id", "", 1)
+	}
 	query = strings.Replace(query, "faro_activity_bucket", activityTimelineBucketExpression(queryTimestampField), 1)
 	args := []any{from, bucketSeconds}
 	clauses, clauseArgs := activityFilterClauses(search, []string{queryDomainField, queryClientIPField, queryTypeField, queryActionField, querySourceField, queryDeviceNameField}, queryTimestampField, window)
@@ -943,7 +974,7 @@ func queryRecordMap(record activityRecord) map[string]any {
 	}
 }
 
-func activityCounts(ctx context.Context, database *sql.DB, search string, window activityWindow) map[string]int {
+func activityCounts(ctx context.Context, database *sql.DB, search string, window activityWindow) (map[string]int, error) {
 	parts := make([]string, 0, 3)
 	args := make([]any, 0, 6)
 
@@ -967,10 +998,18 @@ func activityCounts(ctx context.Context, database *sql.DB, search string, window
 	args = append(args, queryArgs...)
 
 	query := activityCountsQuery(parts)
+	if search == "" {
+		history := activityWithClauses("FROM dns_queries q", "WHERE", queryClauses)
+		query = `SELECT COUNT(*),
+   COALESCE(SUM(q.source = 'cache'),0),
+   COALESCE(SUM(q.source = 'upstream'),0),
+   COALESCE(SUM(q.action = 'blocked'),0),
+   (SELECT COUNT(*) FROM (` + eventPart + ` UNION ALL ` + devicePart + `)) ` + history
+	}
 
 	var dns, cache, upstream, blocked, system int
 	if err := database.QueryRowContext(ctx, query, args...).Scan(&dns, &cache, &upstream, &blocked, &system); err != nil {
-		return map[string]int{"all": 0, "dns": 0, "cache": 0, "upstream": 0, "blocked": 0, "system": 0}
+		return nil, err
 	}
 	return map[string]int{
 		"all":      dns + system,
@@ -979,7 +1018,7 @@ func activityCounts(ctx context.Context, database *sql.DB, search string, window
 		"upstream": upstream,
 		"blocked":  blocked,
 		"system":   system,
-	}
+	}, nil
 }
 
 func activityDeviceCountPart(search string, window activityWindow) (string, []any) {
@@ -1016,22 +1055,30 @@ func activityCountsQuery(parts []string) string {
 	return strings.Replace(query, placeholder, "("+strings.Join(parts, ` UNION ALL `)+")", 1)
 }
 
-func (handler *Handler) cachedActivityCounts(ctx context.Context, search string, window activityWindow) map[string]int {
+func (handler *Handler) cachedActivityCounts(ctx context.Context, search string, window activityWindow) (map[string]int, error) {
+	release, err := handler.readGate.acquire(ctx, "activity:"+search+"\x00"+window.cacheKey())
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	now := time.Now()
 	cacheKey := search + "\x00" + window.cacheKey()
 	handler.activityCountsMu.Lock()
 	if entry, ok := handler.activityCountsCache[cacheKey]; ok && now.Before(entry.expiresAt) {
 		counts := cloneActivityCounts(entry.counts)
 		handler.activityCountsMu.Unlock()
-		return counts
+		return counts, nil
 	}
 	generation := handler.activityCountsGeneration
 	handler.activityCountsMu.Unlock()
-	counts := activityCounts(ctx, handler.store.DB, search, window)
+	counts, err := activityCounts(ctx, handler.store.DB, search, window)
+	if err != nil {
+		return nil, err
+	}
 	handler.activityCountsMu.Lock()
 	if generation != handler.activityCountsGeneration {
 		handler.activityCountsMu.Unlock()
-		return counts
+		return counts, nil
 	}
 	if handler.activityCountsCache == nil {
 		handler.activityCountsCache = map[string]activityCountCacheEntry{}
@@ -1044,7 +1091,7 @@ func (handler *Handler) cachedActivityCounts(ctx context.Context, search string,
 	}
 	handler.activityCountsCache[cacheKey] = activityCountCacheEntry{counts: counts, expiresAt: now.Add(activityCountCacheTTL)}
 	handler.activityCountsMu.Unlock()
-	return cloneActivityCounts(counts)
+	return cloneActivityCounts(counts), nil
 }
 
 func (handler *Handler) invalidateActivityCounts() {

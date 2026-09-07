@@ -1,6 +1,8 @@
+import { DialogSurface } from "./DialogSurface";
+import { Button } from "./ui/button";
 import { ExternalLink, X } from "lucide-react";
-import { useEffect, useRef } from "react";
-import type { AppVersion, ReleaseInfo } from "../api/client";
+import { useRef } from "react";
+import type { AppVersion, ReleaseInfo } from "@/api/client";
 import { BrandLogo } from "./BrandLogo";
 
 type AboutDialogProps = Readonly<{
@@ -15,47 +17,20 @@ const creatorURL = "https://github.com/derek-diaz";
 
 export function AboutDialog({ open, onClose, appVersion, releaseUpdate }: AboutDialogProps) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const previousOverflow = document.body.style.overflow;
-    const previousPaddingRight = document.body.style.paddingRight;
-    const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
-    document.body.style.overflow = "hidden";
-    if (scrollbarWidth > 0) document.body.style.paddingRight = `${scrollbarWidth}px`;
-    closeButtonRef.current?.focus();
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onCloseRef.current();
-    }
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      document.body.style.paddingRight = previousPaddingRight;
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open]);
-
   if (!open) return null;
 
   return (
-    <dialog
+    <DialogSurface
+      onClose={onClose}
+      initialFocus={closeButtonRef}
       className="modal-backdrop about-modal-backdrop"
-      open
-      aria-modal="true"
       aria-labelledby="about-faro-title"
-      onClick={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
     >
       <article className="about-modal">
         <header className="about-modal-header">
-          <button ref={closeButtonRef} className="icon-button" type="button" onClick={onClose} aria-label="Close About Faro">
+          <Button variant="ghost" size="icon" ref={closeButtonRef} className="icon-button" type="button" onClick={onClose} aria-label="Close About Faro">
             <X size={18} />
-          </button>
+          </Button>
         </header>
 
         <div className="about-modal-body">
@@ -92,9 +67,9 @@ export function AboutDialog({ open, onClose, appVersion, releaseUpdate }: AboutD
 
         <footer className="about-modal-footer">
           <span>Built by <a href={creatorURL} target="_blank" rel="noreferrer">Derek Diaz Correa</a> in Puerto Rico 🇵🇷</span>
-          <button type="button" className="secondary" onClick={onClose}>Done</button>
+          <Button variant="outline" type="button" className="secondary" onClick={onClose}>Done</Button>
         </footer>
       </article>
-    </dialog>
+    </DialogSurface>
   );
 }

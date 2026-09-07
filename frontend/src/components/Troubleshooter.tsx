@@ -1,3 +1,5 @@
+import { Checkbox } from "./ui/checkbox";
+import { Button } from "./ui/button";
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw, ShieldCheck } from "lucide-react";
 import { api, type TroubleshootingReport, type TroubleshootingTrial } from "../api/client";
@@ -68,8 +70,8 @@ export function Troubleshooter({ clientIP, deviceName, onDomainSelect }: {
       <h3>1. Reproduce the problem</h3>
       <p>Start a fresh capture, open the broken site or app on this device, then refresh the results. Only requests reaching this Faro appear here.</p>
       <div className="troubleshooting-actions">
-        <button type="button" disabled={busy || loading} onClick={() => { setSelected([]); setNotice(""); setReport(null); setSince(new Date().toISOString()); }}>Start fresh capture</button>
-        <button type="button" className="secondary" disabled={busy || loading} onClick={() => setRevision((value) => value + 1)}><RefreshCw size={15} /> Refresh results</button>
+        <Button variant="default" type="button" disabled={busy || loading} onClick={() => { setSelected([]); setNotice(""); setReport(null); setSince(new Date().toISOString()); }}>Start fresh capture</Button>
+        <Button variant="outline" type="button" className="secondary" disabled={busy || loading} onClick={() => setRevision((value) => value + 1)}><RefreshCw size={15} /> Refresh results</Button>
       </div>
       <small>Requests since {new Date(since).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}. Capture reads existing DNS logs.</small>
     </section>
@@ -84,12 +86,12 @@ export function Troubleshooter({ clientIP, deviceName, onDomainSelect }: {
         {!report.temporary_tests_available && <p className="troubleshooting-scope">Temporary tests are available on standalone Faro only. A disconnected replica cannot guarantee expiry. You can inspect these results and make deliberate changes in Protection.</p>}
         {candidates.length === 0 ? <p className="troubleshooting-empty">{report.items.length ? "No blocked requests or DNS failures in this capture. Check the device's DNS settings, connection, or the site itself." : "No requests captured yet. Retry the site on this device, wait a few seconds, and refresh."}</p> : <div className="troubleshooting-candidates">
           {candidates.map((item) => <label className="troubleshooting-candidate" key={item.domain}>
-            <input type="checkbox" aria-label={`Test ${item.domain}`} checked={selected.includes(item.domain)} disabled={busy || loading || !report.temporary_tests_available || item.decision.action !== "blocked" || (!selected.includes(item.domain) && selected.length >= 20)} onChange={(event) => setSelected((current) => event.target.checked ? [...current, item.domain] : current.filter((domain) => domain !== item.domain))} />
+            <Checkbox  aria-label={`Test ${item.domain}`} checked={selected.includes(item.domain)} disabled={busy || loading || !report.temporary_tests_available || item.decision.action !== "blocked" || (!selected.includes(item.domain) && selected.length >= 20)} onCheckedChange={(checked) => setSelected((current) => checked ? [...current, item.domain] : current.filter((domain) => domain !== item.domain))} />
             <span><button className="table-link" type="button" onClick={(event) => { event.preventDefault(); onDomainSelect(item.domain); }}>{item.domain}</button><small>{item.blocked} blocked · {item.failed} failed · {item.requests} requests</small><small>Current policy: {item.decision.reason}</small></span>
           </label>)}
         </div>}
         {report.truncated && <p>Showing the 100 highest-priority domains. Start a fresh capture to narrow the results.</p>}
-        <div className="troubleshooting-actions"><button type="button" disabled={busy || loading || Boolean(error) || !report.temporary_tests_available || selected.length === 0} onClick={() => void change("test")}>Allow {selected.length || "selected"} temporarily</button><small>Up to 20 domains per test</small></div>
+        <div className="troubleshooting-actions"><Button variant="default" type="button" disabled={busy || loading || Boolean(error) || !report.temporary_tests_available || selected.length === 0} onClick={() => void change("test")}>Allow {selected.length || "selected"} temporarily</Button><small>Up to 20 domains per test</small></div>
       </section>
       <section className="troubleshooting-step">
         <h3>3. Retry, then keep or undo</h3>
@@ -101,7 +103,7 @@ export function Troubleshooter({ clientIP, deviceName, onDomainSelect }: {
             <strong>{entries[0].protection_name} · {remaining ? `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")} remaining` : "Expiry reached"}</strong>
             <p>{entries.map((entry) => entry.domain).join(", ")}</p>
             <small>Keeping these creates permanent exceptions for every device using {entries[0].protection_name} and replaces conflicting custom blocks.</small>
-            <div className="troubleshooting-actions"><button type="button" disabled={busy || loading || !report.temporary_tests_available} onClick={() => void change("keep", token)}>It helped — keep exceptions</button><button className="secondary" type="button" disabled={busy || loading || !report.temporary_tests_available} onClick={() => void change("undo", token)}>Undo test</button></div>
+            <div className="troubleshooting-actions"><Button variant="default" type="button" disabled={busy || loading || !report.temporary_tests_available} onClick={() => void change("keep", token)}>It helped — keep exceptions</Button><Button variant="outline" className="secondary" type="button" disabled={busy || loading || !report.temporary_tests_available} onClick={() => void change("undo", token)}>Undo test</Button></div>
           </div>;
         })}
       </section>

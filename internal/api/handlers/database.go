@@ -80,9 +80,18 @@ func databaseRow(columns []string, values []any) map[string]any {
 }
 
 func grouped(ctx context.Context, database *sql.DB, query string, args ...any) []map[string]any {
+	items, err := groupedResult(ctx, database, query, args...)
+	if err != nil {
+		log.Printf("database read: %v", err)
+		return make([]map[string]any, 0)
+	}
+	return items
+}
+
+func groupedResult(ctx context.Context, database *sql.DB, query string, args ...any) ([]map[string]any, error) {
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return make([]map[string]any, 0)
+		return nil, err
 	}
 	defer closeRows(rows)
 	result := make([]map[string]any, 0)
@@ -90,24 +99,24 @@ func grouped(ctx context.Context, database *sql.DB, query string, args ...any) [
 		var label string
 		var count int
 		if err := rows.Scan(&label, &count); err != nil {
-			return result
+			return nil, err
 		}
 		result = append(result, map[string]any{"label": label, "count": count})
 	}
-	return result
+	return result, rows.Err()
 }
 
-func recentQueries(ctx context.Context, database *sql.DB) []map[string]any {
+func recentQueries(ctx context.Context, database *sql.DB) ([]map[string]any, error) {
 	rows, err := database.QueryContext(ctx, `SELECT q.timestamp, q.client_ip, q.domain, q.query_type, q.action, q.source, q.upstream, q.latency_ms, q.rcode, q.decision_reason, q.decision_metadata, `+queryDeviceNameField+` AS device_name FROM dns_queries q LEFT JOIN devices a ON a.id = q.device_id ORDER BY q.timestamp DESC, q.id DESC LIMIT 8`)
 	if err != nil {
-		return make([]map[string]any, 0)
+		return nil, err
 	}
 	defer closeRows(rows)
 	items, err := scanRows(rows)
 	if err != nil {
-		return make([]map[string]any, 0)
+		return nil, err
 	}
-	return items
+	return items, nil
 }
 
 func recentQueriesFor(ctx context.Context, database *sql.DB, where string, args ...any) []map[string]any {
@@ -136,9 +145,18 @@ func decisionMetadataString(value any) string {
 }
 
 func searchRows(ctx context.Context, database *sql.DB, query string, args ...any) []map[string]any {
+	items, err := searchRowsResult(ctx, database, query, args...)
+	if err != nil {
+		log.Printf("database read: %v", err)
+		return make([]map[string]any, 0)
+	}
+	return items
+}
+
+func searchRowsResult(ctx context.Context, database *sql.DB, query string, args ...any) ([]map[string]any, error) {
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
-		return make([]map[string]any, 0)
+		return nil, err
 	}
 	defer closeRows(rows)
 	items := make([]map[string]any, 0)
@@ -146,11 +164,11 @@ func searchRows(ctx context.Context, database *sql.DB, query string, args ...any
 		var label string
 		var subtitle sql.NullString
 		if err := rows.Scan(&label, &subtitle); err != nil {
-			return items
+			return nil, err
 		}
 		items = append(items, map[string]any{"label": label, "subtitle": nullableString(subtitle)})
 	}
-	return items
+	return items, rows.Err()
 }
 
 func topLabels(ctx context.Context, database *sql.DB, query string, args ...any) []string {

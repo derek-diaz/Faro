@@ -1,0 +1,42 @@
+@layer theme, base, legacy, components, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+@import "./styles.css" layer(legacy);
+@import "./modern.css";
+@import "./controls.css";
+
+@custom-variant dark (&:where([data-theme-resolved="dark"], [data-theme-resolved="dark"] *));
+
+@theme inline {
+  --color-background: var(--page-bg);
+  --color-foreground: var(--ink);
+  --color-card: var(--surface);
+  --color-card-foreground: var(--ink);
+  --color-popover: var(--surface-raised);
+  --color-popover-foreground: var(--ink);
+  --color-primary: var(--action);
+  --color-primary-hover: var(--action-hover);
+  --color-primary-foreground: var(--on-action);
+  --color-secondary: var(--surface-subtle);
+  --color-secondary-foreground: var(--ink);
+  --color-muted: var(--surface-muted);
+  --color-muted-foreground: var(--text-muted);
+  --color-accent: var(--accent-soft);
+  --color-accent-foreground: var(--accent);
+  --color-destructive: var(--blocked);
+  --color-border: var(--border);
+  --color-input: var(--border);
+  --color-ring: var(--accent);
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+}
+
+/* Preflight is deliberately omitted while existing pages are migrated. */
+@layer base {
+  [data-slot] { border-style: solid; border-width: 0; }
+}
+@layer components {
+  .faro-button { cursor: pointer; font-family: inherit; color: var(--ink); background: transparent; padding: 0; min-height: 0; }
+}

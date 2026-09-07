@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,8 @@ const (
 )
 
 var logPattern = regexp.MustCompile(`\s(\d+\.\d+\.\d+\.\d+|\[[0-9a-fA-F:]+]|[0-9a-fA-F:]+):\d+\s+-\s+\d+\s+"([A-Z]+)\s+IN\s+([^"\s]+).*"\s+([A-Z]+).*\s([0-9.]+)s`)
+
+var errStoragePaused = errors.New("query history storage is waiting to retry")
 
 type logEntry struct {
 	clientIP  string
@@ -65,11 +68,15 @@ func (tailer *Tailer) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			flushCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_, _ = tailer.readAvailable(flushCtx, cursor)
+			cancel()
 			return
 		case <-ticker.C:
 			next, err := tailer.readAvailable(ctx, cursor)
+			cursor = next
 			if err != nil {
-				if !os.IsNotExist(err) {
+				if !os.IsNotExist(err) && !errors.Is(err, errStoragePaused) && ctx.Err() == nil {
 					log.Printf("query log read failed: %v", err)
 				}
 				continue
@@ -100,6 +107,15 @@ func cursorAtEnd(path string) logCursor {
 }
 
 func (tailer *Tailer) readAvailable(ctx context.Context, cursor logCursor) (next logCursor, err error) {
+	// The database checkpoint commits with the queries. It takes precedence
+	// over the legacy sidecar, including after a crash before sidecar saving.
+	var saved logCursor
+	if err := tailer.Store.DB.QueryRowContext(ctx, `SELECT identity, offset FROM query_log_progress WHERE path = ?`, tailer.Path).Scan(&saved.Identity, &saved.Offset); err == nil {
+		cursor = saved
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return cursor, err
+	}
+	next = cursor
 	file, err := os.Open(tailer.Path)
 	if err != nil {
 		return cursor, err
@@ -122,31 +138,27 @@ func (tailer *Tailer) readAvailable(ctx context.Context, cursor logCursor) (next
 			offset = 0
 		}
 		position, err := tailer.readOpenFile(ctx, file, offset)
-		if err != nil {
-			return cursor, err
-		}
-		return logCursor{Identity: currentIdentity, Offset: position}, nil
+		return logCursor{Identity: currentIdentity, Offset: position}, err
 	}
 
 	rotatedIndex := findRotatedIndex(tailer.Path, cursor.Identity)
 	if rotatedIndex > 0 {
-		if _, err := tailer.readPath(ctx, rotatedPath(tailer.Path, rotatedIndex), cursor.Offset); err != nil {
-			return cursor, err
+		position, err := tailer.readPath(ctx, rotatedPath(tailer.Path, rotatedIndex), cursor.Offset)
+		next = logCursor{Identity: cursor.Identity, Offset: position}
+		if err != nil {
+			return next, err
 		}
 		for index := rotatedIndex - 1; index >= 1; index-- {
 			if _, err := tailer.readPath(ctx, rotatedPath(tailer.Path, index), 0); err != nil {
-				return cursor, err
+				return next, err
 			}
 		}
-	} else {
+	} else if cursor.Offset > 0 {
 		log.Printf("query log rotated beyond retained backups; some raw entries may have been skipped")
 	}
 
 	position, err := tailer.readOpenFile(ctx, file, 0)
-	if err != nil {
-		return cursor, err
-	}
-	return logCursor{Identity: currentIdentity, Offset: position}, nil
+	return logCursor{Identity: currentIdentity, Offset: position}, err
 }
 
 func (tailer *Tailer) readPath(ctx context.Context, path string, offset int64) (position int64, err error) {
@@ -163,34 +175,63 @@ func (tailer *Tailer) readPath(ctx context.Context, path string, offset int64) (
 }
 
 func (tailer *Tailer) readOpenFile(ctx context.Context, file *os.File, offset int64) (int64, error) {
-	if _, err := file.Seek(offset, 0); err != nil {
-		return offset, err
-	}
-
-	scanner := bufio.NewScanner(file)
-	entries := make([]logEntry, 0, queryIngestBatchSize)
-	for scanner.Scan() {
-		entry, ok := parseLine(scanner.Text())
-		if !ok {
-			continue
-		}
-		entries = append(entries, entry)
-		if len(entries) == queryIngestBatchSize {
-			tailer.insertBatch(ctx, entries)
-			entries = entries[:0]
-		}
-	}
-	if len(entries) > 0 {
-		tailer.insertBatch(ctx, entries)
-	}
-	if err := scanner.Err(); err != nil {
-		return offset, err
-	}
-	position, err := file.Seek(0, 1)
+	stat, err := file.Stat()
 	if err != nil {
 		return offset, err
 	}
-	return position, nil
+	// Read a finite snapshot, leave partial final lines for the next poll,
+	// and cap memory even when a malformed line has no newline.
+	reader := bufio.NewReaderSize(io.NewSectionReader(file, offset, max(0, stat.Size()-offset)), 64<<10)
+	identity := fileIdentity(file)
+	position, committed := offset, offset
+	entries := make([]logEntry, 0, queryIngestBatchSize)
+	complete, lines := offset, 0
+	oversized := false
+	flush := func() error {
+		if complete == committed {
+			return nil
+		}
+		if err := tailer.insertBatch(ctx, entries, logCursor{Identity: identity, Offset: complete}); err != nil {
+			return err
+		}
+		committed = complete
+		entries = entries[:0]
+		lines = 0
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return committed, err
+		}
+		line, readErr := reader.ReadSlice('\n')
+		position += int64(len(line))
+		if errors.Is(readErr, bufio.ErrBufferFull) {
+			oversized = true
+			continue
+		}
+		if readErr != nil {
+			if err := flush(); err != nil {
+				return committed, err
+			}
+			if errors.Is(readErr, io.EOF) {
+				return committed, nil
+			}
+			return committed, readErr
+		}
+		if !oversized {
+			if entry, ok := parseLine(string(line)); ok && net.ParseIP(entry.clientIP) != nil {
+				entries = append(entries, entry)
+			}
+		}
+		oversized = false
+		complete = position
+		lines++
+		if lines == queryIngestBatchSize {
+			if err := flush(); err != nil {
+				return committed, err
+			}
+		}
+	}
 }
 
 func findRotatedIndex(path, identity string) int {
@@ -310,77 +351,73 @@ type pendingQuery struct {
 	decisionMetadata string
 }
 
-func (tailer *Tailer) insertBatch(ctx context.Context, entries []logEntry) {
-	if len(entries) == 0 || !tailer.Store.ActivityStorageWriteAllowed() {
-		return
+func (tailer *Tailer) insertBatch(ctx context.Context, entries []logEntry, checkpoint ...logCursor) (err error) {
+	if len(entries) == 0 && len(checkpoint) == 0 {
+		return nil
 	}
-
+	if !tailer.Store.ActivityStorageWriteAllowed() {
+		return errStoragePaused
+	}
+	defer func() {
+		if err != nil && ctx.Err() == nil && !errors.Is(err, errStoragePaused) {
+			tailer.Store.ReportActivityWriteFailure(err)
+		}
+	}()
+	// Scope identity reuse to one batch so address reassignment and device
+	// merges are observed on the next poll without a long-lived stale cache.
+	identities := make(map[string]int64)
 	queries := make([]pendingQuery, 0, len(entries))
 	for _, entry := range entries {
-		if !tailer.Store.ActivityStorageWriteAllowed() {
-			break
+		deviceID, known := identities[entry.clientIP]
+		if !known {
+			deviceID, err = deviceidentity.ResolveAddress(ctx, tailer.Store, entry.clientIP, "dns")
+			if err != nil {
+				return fmt.Errorf("resolve DNS client identity: %w", err)
+			}
+			identities[entry.clientIP] = deviceID
 		}
-		query, ok := tailer.prepareEntry(ctx, entry)
-		if ok {
-			queries = append(queries, query)
-		}
+		queries = append(queries, tailer.prepareEntry(ctx, entry, deviceID))
 	}
-	if len(queries) == 0 {
-		return
-	}
-
 	tx, err := tailer.Store.DB.BeginTx(ctx, nil)
 	if err != nil {
-		tailer.Store.ReportActivityWriteFailure(err)
-		log.Printf("begin dns query batch failed: %v", err)
-		return
+		return err
 	}
+	defer func() { _ = tx.Rollback() }()
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO dns_queries(timestamp, client_ip, device_id, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata)
 		VALUES(?, ?, NULLIF(?, 0), ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
-		_ = tx.Rollback()
-		tailer.Store.ReportActivityWriteFailure(err)
-		log.Printf("prepare dns query batch failed: %v", err)
-		return
+		return err
 	}
+	defer stmt.Close()
 	for _, query := range queries {
 		if _, err := stmt.ExecContext(ctx,
 			query.timestamp, query.clientIP, query.deviceID, query.domain, query.queryType,
 			query.action, query.source, query.upstream, query.latencyMS, query.rcode,
 			query.decisionReason, query.decisionMetadata,
 		); err != nil {
-			_ = stmt.Close()
-			_ = tx.Rollback()
-			tailer.Store.ReportActivityWriteFailure(err)
-			log.Printf("insert dns query batch failed: %v", err)
-			return
+			return err
+		}
+	}
+	if len(checkpoint) > 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO query_log_progress(path, identity, offset) VALUES(?, ?, ?)
+   ON CONFLICT(path) DO UPDATE SET identity = excluded.identity, offset = excluded.offset`,
+			tailer.Path, checkpoint[0].Identity, checkpoint[0].Offset); err != nil {
+			return err
 		}
 	}
 	if err := stmt.Close(); err != nil {
-		_ = tx.Rollback()
-		tailer.Store.ReportActivityWriteFailure(err)
-		log.Printf("close dns query batch failed: %v", err)
-		return
+		return err
 	}
 	if err := tx.Commit(); err != nil {
-		tailer.Store.ReportActivityWriteFailure(err)
-		log.Printf("commit dns query batch failed: %v", err)
-		return
+		return err
 	}
 	tailer.Store.ReportActivityWriteSuccess()
+	return nil
 }
 
-func (tailer *Tailer) prepareEntry(ctx context.Context, entry logEntry) (pendingQuery, bool) {
-	if !tailer.Store.ActivityStorageWriteAllowed() {
-		return pendingQuery{}, false
-	}
-	deviceID, identityErr := deviceidentity.ResolveAddress(ctx, tailer.Store, entry.clientIP, "dns")
-	if identityErr != nil {
-		tailer.Store.ReportActivityWriteFailure(identityErr)
-		log.Printf("resolve DNS client identity failed: %v", identityErr)
-	}
+func (tailer *Tailer) prepareEntry(ctx context.Context, entry logEntry, deviceID int64) pendingQuery {
 	decision := coredns.ExplainDomainForClient(ctx, tailer.Store, entry.domain, entry.clientIP)
 	action := decision.Action
 	source := sourceForEntry(ctx, tailer.Store, entry, decision)
@@ -406,7 +443,7 @@ func (tailer *Tailer) prepareEntry(ctx context.Context, entry logEntry) (pending
 		rcode:            entry.rcode,
 		decisionReason:   decision.Reason,
 		decisionMetadata: string(metadata),
-	}, true
+	}
 }
 
 func sourceForEntry(_ context.Context, _ *db.Store, entry logEntry, decision coredns.DomainDecision) string {

@@ -1,3 +1,7 @@
+import { NativeSelect } from "./ui/native-select";
+import { Checkbox } from "./ui/checkbox";
+import { Input } from "./ui/input";
+import { Button } from "./ui/button";
 import { AlertTriangle, Check, CheckCircle2, KeyRound, Link2, LoaderCircle, LockKeyhole, RefreshCw, Router, ShieldCheck, Unplug, Wifi } from "lucide-react";
 import { useEffect, useState, type ReactNode, type SubmitEvent } from "react";
 import { api, type UnifiCertificate, type UnifiSite, type UnifiStatus } from "../api/client";
@@ -158,9 +162,8 @@ export function UnifiIntegration({ onChanged }: UnifiIntegrationProps) {
         <header className="integration-heading">
           <span className="integration-logo"><Router size={25} /></span>
           <div>
-            <small>LOCAL NETWORK INTEGRATION</small>
             <h2>UniFi Network</h2>
-            <p>Give Faro stable device names and addresses without making Faro your router or DHCP server.</p>
+            <p>Sync device names and addresses from your UniFi console.</p>
           </div>
           <span className={`integration-state ${connected ? "connected" : ""}`}>
             {connected ? <CheckCircle2 size={15} /> : <Link2 size={15} />}
@@ -201,8 +204,8 @@ export function UnifiIntegration({ onChanged }: UnifiIntegrationProps) {
 
       <aside className="panel integration-explainer">
         <ShieldCheck size={20} />
-        <div><strong>What this changes</strong><span>MAC addresses keep a device's Faro history, name, icon, and protection attached when its IP changes.</span></div>
-        <div><strong>What this does not change</strong><span>Faro does not modify UniFi networks, DHCP, firewall rules, Wi-Fi, or DNS settings.</span></div>
+        <div><strong>Stable device identity</strong><span>Keep names, history, and protection linked to each device when its IP address changes.</span></div>
+        <div><strong>Read-only access</strong><span>Faro reads client information. Your UniFi networks, DHCP, firewall, Wi-Fi, and DNS settings stay unchanged.</span></div>
       </aside>
     </div>
   );
@@ -224,12 +227,12 @@ type ConnectedIntegrationProps = Readonly<{
 function ConnectedIntegration({ status, phase, confirmDisconnect, onConfirmDisconnect, onDisconnect, onSyncNow }: ConnectedIntegrationProps) {
   return (
     <div className="integration-connected">
-      <div className="integration-facts">
+      <dl className="integration-facts">
         <IntegrationFact icon={<Wifi size={18} />} label="Site" value={status.site_name || status.site_id} />
         <IntegrationFact icon={<Router size={18} />} label="Console" value={status.base_url} />
         <IntegrationFact icon={<Check size={18} />} label="Devices synchronized" value={status.synced_devices.toLocaleString()} />
         <IntegrationFact icon={<RefreshCw size={18} />} label="Last synchronized" value={formatTimestamp(status.last_sync_at)} />
-      </div>
+      </dl>
 
       {status.last_error && <div className="integration-sync-error"><AlertTriangle size={18} /><div><strong>Synchronization needs attention</strong><span>{status.last_error}</span></div></div>}
 
@@ -237,7 +240,12 @@ function ConnectedIntegration({ status, phase, confirmDisconnect, onConfirmDisco
         <ShieldCheck size={18} />
         <div>
           <strong>{status.tls_mode === "pinned" ? "Trusted local certificate" : "Verified HTTPS connection"}</strong>
-          <span>{status.tls_mode === "pinned" ? `Pinned fingerprint ${status.tls_fingerprint}` : "The console certificate is verified for every connection."}</span>
+          {status.tls_mode === "pinned" ? (
+            <details className="integration-fingerprint">
+              <summary>View certificate fingerprint</summary>
+              <code>{status.tls_fingerprint}</code>
+            </details>
+          ) : <span>The console certificate is verified for every connection.</span>}
         </div>
       </div>
 
@@ -245,13 +253,13 @@ function ConnectedIntegration({ status, phase, confirmDisconnect, onConfirmDisco
         {confirmDisconnect ? (
           <div className="integration-disconnect-confirm">
             <span>Disconnect UniFi? Faro devices and history will remain.</span>
-            <button type="button" className="secondary" onClick={() => onConfirmDisconnect(false)}>Keep connected</button>
-            <button type="button" className="danger-outline icon-text-button" disabled={phase !== "idle"} onClick={() => void onDisconnect()}><Unplug size={15} /><span>{phase === "disconnecting" ? "Disconnecting" : "Disconnect"}</span></button>
+            <Button variant="outline" type="button" className="secondary" onClick={() => onConfirmDisconnect(false)}>Keep connected</Button>
+            <Button variant="destructive" type="button" className="danger-outline icon-text-button" disabled={phase !== "idle"} onClick={() => void onDisconnect()}><Unplug size={15} /><span>{phase === "disconnecting" ? "Disconnecting" : "Disconnect"}</span></Button>
           </div>
         ) : (
           <>
-            <button type="button" className="secondary icon-text-button" onClick={() => onConfirmDisconnect(true)}><Unplug size={15} /><span>Disconnect</span></button>
-            <button type="button" className="icon-text-button" disabled={phase !== "idle"} onClick={() => void onSyncNow()}><RefreshCw className={phase === "syncing" ? "spin" : ""} size={15} /><span>{phase === "syncing" ? "Synchronizing" : "Sync now"}</span></button>
+            <Button variant="outline" type="button" className="secondary icon-text-button" onClick={() => onConfirmDisconnect(true)}><Unplug size={15} /><span>Disconnect</span></Button>
+            <Button variant="default" type="button" className="icon-text-button" disabled={phase !== "idle"} onClick={() => void onSyncNow()}><RefreshCw className={phase === "syncing" ? "spin" : ""} size={15} /><span>{phase === "syncing" ? "Synchronizing" : "Sync now"}</span></Button>
           </>
         )}
       </footer>
@@ -285,12 +293,12 @@ function IntegrationSetup({ baseURL, apiKey, phase, certificate, certificateTrus
       </div>
       <label className="integration-field">
         <span>Console address</span>
-        <div><Router size={17} /><input type="text" inputMode="url" autoComplete="url" value={baseURL} onChange={(event) => onBaseURLChange(event.target.value)} placeholder="https://192.168.1.1" required /></div>
+        <div><Router size={17} /><Input variant="embedded" type="text" inputMode="url" autoComplete="url" value={baseURL} onChange={(event) => onBaseURLChange(event.target.value)} placeholder="https://192.168.1.1" required /></div>
         <small>Use the console's private IP or local hostname. Cloud URLs are not accepted.</small>
       </label>
       <label className="integration-field">
         <span>Network API key</span>
-        <div><KeyRound size={17} /><input type="password" autoComplete="off" value={apiKey} onChange={(event) => onAPIKeyChange(event.target.value)} placeholder="Paste the key shown by UniFi" required /></div>
+        <div><KeyRound size={17} /><Input variant="embedded" type="password" autoComplete="off" value={apiKey} onChange={(event) => onAPIKeyChange(event.target.value)} placeholder="Paste the key shown by UniFi" required /></div>
         <small>The key is encrypted before it is saved and is never shown again.</small>
       </label>
 
@@ -305,8 +313,8 @@ function IntegrationSetup({ baseURL, apiKey, phase, certificate, certificateTrus
               <div><dt>Expires</dt><dd>{formatTimestamp(certificate.expires_at)}</dd></div>
               <div><dt>SHA-256</dt><dd>{certificate.fingerprint_sha256}</dd></div>
             </dl>
-            <label><input type="checkbox" checked={certificateTrusted} onChange={(event) => onCertificateTrustedChange(event.target.checked)} /><span>I verified and trust this local console certificate.</span></label>
-            <button type="button" className="secondary icon-text-button" disabled={!certificateTrusted || phase !== "idle"} onClick={() => void onTrustAndRetry()}><ShieldCheck size={16} /><span>Trust and test again</span></button>
+            <label><Checkbox  checked={certificateTrusted} onCheckedChange={(checked) => onCertificateTrustedChange(checked)} /><span>I verified and trust this local console certificate.</span></label>
+            <Button variant="outline" type="button" className="secondary icon-text-button" disabled={!certificateTrusted || phase !== "idle"} onClick={() => void onTrustAndRetry()}><ShieldCheck size={16} /><span>Trust and test again</span></Button>
           </div>
         </div>
       )}
@@ -316,9 +324,9 @@ function IntegrationSetup({ baseURL, apiKey, phase, certificate, certificateTrus
           <div className="integration-step"><span>2</span><div><strong>Choose the UniFi site</strong><p>Faro will synchronize connected clients from this site every minute.</p></div></div>
           <label className="integration-field">
             <span>Site</span>
-            <select value={siteID} onChange={(event) => onSiteChange(event.target.value)}>
+            <NativeSelect value={siteID} onChange={(event) => onSiteChange(event.target.value)}>
               {sites.map((site) => <option key={site.id} value={site.id}>{site.name || site.id}</option>)}
-            </select>
+            </NativeSelect>
           </label>
         </div>
       )}
@@ -326,8 +334,8 @@ function IntegrationSetup({ baseURL, apiKey, phase, certificate, certificateTrus
       <footer className="integration-actions">
         <span><LockKeyhole size={15} /> Read-only and local-first</span>
         {sites.length > 0
-          ? <button type="button" className="icon-text-button" disabled={!siteID || phase !== "idle"} onClick={() => void onConnect()}><Link2 size={16} /><span>{phase === "connecting" ? "Connecting" : "Connect and sync"}</span></button>
-          : <button type="submit" className="icon-text-button" disabled={!baseURL.trim() || !apiKey.trim() || phase !== "idle" || Boolean(certificate)}><RefreshCw className={phase === "testing" ? "spin" : ""} size={16} /><span>{phase === "testing" ? "Testing" : "Test connection"}</span></button>
+          ? <Button variant="default" type="button" className="icon-text-button" disabled={!siteID || phase !== "idle"} onClick={() => void onConnect()}><Link2 size={16} /><span>{phase === "connecting" ? "Connecting" : "Connect and sync"}</span></Button>
+          : <Button variant="default" type="submit" className="icon-text-button" disabled={!baseURL.trim() || !apiKey.trim() || phase !== "idle" || Boolean(certificate)}><RefreshCw className={phase === "testing" ? "spin" : ""} size={16} /><span>{phase === "testing" ? "Testing" : "Test connection"}</span></Button>
         }
       </footer>
     </form>
@@ -335,7 +343,7 @@ function IntegrationSetup({ baseURL, apiKey, phase, certificate, certificateTrus
 }
 
 function IntegrationFact({ icon, label, value }: Readonly<{ icon: ReactNode; label: string; value: string | number }>) {
-  return <div className="integration-fact"><span>{icon}</span><div><small>{label}</small><strong>{value}</strong></div></div>;
+  return <div className="integration-fact"><dt><span aria-hidden="true">{icon}</span>{label}</dt><dd>{value}</dd></div>;
 }
 
 function formatTimestamp(value?: string) {

@@ -1,3 +1,4 @@
+import { Button } from "./ui/button";
 import { AlertTriangle, Check, CheckCircle2, Clock3, Copy, Network, Plus, RefreshCw, Server, ShieldCheck, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type PairingCode, type RedundancyNode, type RedundancyStatus } from "../api/client";
@@ -11,6 +12,7 @@ export function RedundancySettings() {
   const [pairing, setPairing] = useState<PairingCode | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [statusError, setStatusError] = useState("");
   const [copyState, setCopyState] = useState<CopyState>("idle");
   const copyResetTimer = useRef<number | undefined>(undefined);
   const [pendingRemoval, setPendingRemoval] = useState<RedundancyNode | null>(null);
@@ -20,14 +22,17 @@ export function RedundancySettings() {
     try {
       setStatus(await api.redundancyStatus());
       setError("");
+      setStatusError("");
     } catch (error_) {
-      setError(error_ instanceof Error ? error_.message : "Could not load redundancy status.");
+      setStatusError(error_ instanceof Error ? error_.message : "Could not load redundancy status.");
     }
   }
 
   useEffect(() => {
     let active = true;
-    const refresh = () => api.redundancyStatus().then((next) => { if (active) setStatus(next); }).catch(() => undefined);
+    const refresh = () => api.redundancyStatus().then((next) => { if (active) { setStatus(next); setStatusError(""); } }).catch((error_) => {
+      if (active) setStatusError(error_ instanceof Error ? error_.message : "Could not load redundancy status.");
+    });
     void refresh();
     const timer = window.setInterval(refresh, 5000);
     return () => { active = false; window.clearInterval(timer); };
@@ -90,7 +95,7 @@ export function RedundancySettings() {
     }
   }
 
-  if (!status) return <section className="panel redundancy-loading"><RefreshCw className="spinning" size={20} /><span>Checking Faro servers…</span></section>;
+  if (!status) return <section className="panel redundancy-loading" role={statusError ? "alert" : "status"}>{statusError ? <><AlertTriangle size={20} /><span>{statusError}</span><Button variant="outline" onClick={() => void load()}>Try again</Button></> : <><RefreshCw className="spinning" size={20} /><span>Checking Faro servers…</span></>}</section>;
   const replicas = status.nodes.filter((node) => node.role === "replica");
   const addresses = status.nodes.map((node) => node.lan_address).filter((address): address is string => Boolean(address));
 
@@ -98,7 +103,7 @@ export function RedundancySettings() {
     <div className="redundancy-settings">
       <RedundancyHero status={status} replicaCount={replicas.length} busy={busy} onStartPairing={() => void startPairing()} />
 
-      {error && <div className="settings-feedback error"><AlertTriangle size={16} /><span>{error}</span></div>}
+      {(error || statusError) && <div className="settings-feedback error" role="alert"><AlertTriangle size={16} /><span>{error || statusError}</span></div>}
 
       {pairing && <PairingCard pairing={pairing} copyState={copyState} onCopy={() => void copyPairingCode()} />}
 
@@ -136,11 +141,10 @@ function RedundancyHero({ status, replicaCount, busy, onStartPairing }: Redundan
     <section className="panel redundancy-hero">
       <span className={`redundancy-hero-icon ${heroTone(status, hasReplicas)}`}><Network size={25} /></span>
       <div>
-        <span>DNS redundancy</span>
         <h2>{heroHeading(status, hasReplicas)}</h2>
         <p>{heroDescription(status, hasReplicas)}</p>
       </div>
-      <button type="button" onClick={onStartPairing} disabled={busy}><Plus size={17} />{status.role === "controller" ? "Add another server" : "Set up redundancy"}</button>
+      <Button variant="default" type="button" onClick={onStartPairing} disabled={busy}><Plus size={17} />{status.role === "controller" ? "Add another server" : "Set up redundancy"}</Button>
     </section>
   );
 }
@@ -152,11 +156,11 @@ function heroTone(status: RedundancyStatus, hasReplicas: boolean) {
 
 function heroHeading(status: RedundancyStatus, hasReplicas: boolean) {
   if (hasReplicas) return `Protected by ${status.nodes.length} Faro servers`;
-  return "Keep DNS online when this server is unavailable";
+  return "DNS redundancy";
 }
 
 function heroDescription(status: RedundancyStatus, hasReplicas: boolean) {
-  if (!hasReplicas) return "Pair another Faro container running on a different computer, NAS, or VM host.";
+  if (!hasReplicas) return "Keep DNS available during an outage. Pair another Faro server on a different computer, NAS, or VM host.";
   if (status.healthy) return "Every server is online and running the same validated DNS configuration.";
   return "At least one server needs attention or has not accepted the latest configuration.";
 }
@@ -173,10 +177,10 @@ function PairingCard({ pairing, copyState, onCopy }: PairingCardProps) {
       <div className="panel-title"><div><h2>Pair an additional Faro server</h2><p>On the new installation, choose “Join an existing Faro home” and paste this code.</p></div><span><Clock3 size={14} />Expires {formatTime(pairing.expires_at)}</span></div>
       <div className="redundancy-pairing-code">
         <code>{pairing.code}</code>
-        <button type="button" className={`secondary redundancy-copy-button ${copyState}`} disabled={copyState === "copying"} onClick={onCopy} aria-live="polite">
+        <Button variant="outline" type="button" className={`secondary redundancy-copy-button ${copyState}`} disabled={copyState === "copying"} onClick={onCopy} aria-live="polite">
           {copyStateIcon(copyState)}
           <span>{copyStateLabel(copyState)}</span>
-        </button>
+        </Button>
       </div>
       <div className="redundancy-pairing-note"><ShieldCheck size={17} /><span>The code is used to establish a unique encrypted connection. It is never stored on either server after pairing.</span></div>
     </section>
@@ -228,7 +232,7 @@ function ControllerRedundancyView({ status, addresses, onRefresh, onRemoveReques
   return (
     <>
       <section className="panel redundancy-nodes-panel">
-        <div className="panel-title with-actions"><div><h2>Faro servers</h2><p>Backup servers keep serving their last safe DNS settings if this primary server is offline.</p></div><button type="button" className="secondary" onClick={onRefresh}><RefreshCw size={15} />Refresh</button></div>
+        <div className="panel-title with-actions"><div><h2>Faro servers</h2><p>Backup servers keep serving their last safe DNS settings if this primary server is offline.</p></div><Button variant="outline" type="button" className="secondary" onClick={onRefresh}><RefreshCw size={15} />Refresh</Button></div>
         <RedundancyNodeList nodes={status.nodes} primaryRevision={status.config_revision} onRemoveRequest={onRemoveRequest} />
       </section>
 
@@ -239,7 +243,7 @@ function ControllerRedundancyView({ status, addresses, onRefresh, onRemoveReques
 
       <section className="panel redundancy-disable">
         <div><strong>Stop using redundancy</strong><small>Return this installation to a standalone Faro server.</small></div>
-        <button type="button" className="secondary danger-outline" onClick={onDisableRequest}>Turn off redundancy</button>
+        <Button variant="outline" type="button" className="secondary danger-outline" onClick={onDisableRequest}>Turn off redundancy</Button>
       </section>
     </>
   );
@@ -299,7 +303,7 @@ function nodeRoleLabel(node: RedundancyNode) {
 
 function nodeAction(node: RedundancyNode, onRemoveRequest: (node: RedundancyNode) => void): ReactNode {
   if (node.role === "replica") {
-    return <button type="button" className="icon-button danger-icon" aria-label={`Remove ${node.name}`} title={`Remove ${node.name}`} onClick={() => onRemoveRequest(node)}><Trash2 size={16} /></button>;
+    return <Button variant="destructive" size="icon" type="button" className="icon-button danger-icon" aria-label={`Remove ${node.name}`} title={`Remove ${node.name}`} onClick={() => onRemoveRequest(node)}><Trash2 size={16} /></Button>;
   }
   return <span className="redundancy-controller-badge"><Check size={13} />Primary</span>;
 }

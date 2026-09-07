@@ -42,14 +42,39 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 		methodNotAllowed(responseWriter)
 		return
 	}
+	ctx, cancel := context.WithTimeout(request.Context(), 10*time.Second)
+	defer cancel()
+	request = request.WithContext(ctx)
 	start := todayStart(request)
 	if payload, ok := handler.cachedDashboard(start); ok {
 		writeJSON(responseWriter, http.StatusOK, payload)
 		return
 	}
-	traffic := dashboardTrafficSummary(request.Context(), handler.store.DB, start)
-	counts := dashboardCountsSummary(request.Context(), handler.store.DB, start)
-	settings := dashboardSettingsSummary(request.Context(), handler.store.DB)
+	release, err := handler.readGate.acquire(ctx, "dashboard:"+start)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	defer release()
+	if payload, ok := handler.cachedDashboard(start); ok {
+		writeJSON(responseWriter, http.StatusOK, payload)
+		return
+	}
+	traffic, err := dashboardTrafficSummary(ctx, handler.store.DB, start)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	counts, err := dashboardCountsSummary(ctx, handler.store.DB, start)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	settings, err := dashboardSettingsSummary(ctx, handler.store.DB)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
 	total := traffic.total
 	blocked := traffic.blocked
 	devices, _, inventory, err := handler.loadDeviceInventory(request, deviceInventoryOptions{page: 1, pageSize: 5, sort: "requests", direction: "desc", activeToday: true, paged: true})
@@ -61,7 +86,31 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 	for _, device := range devices {
 		topClients = append(topClients, map[string]any{"label": device["display_name"], "count": device["total_queries_today"], "client_ip": device["client_ip"], "device_id": device["device_id"]})
 	}
-	topBlocked := grouped(request.Context(), handler.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? AND action = 'blocked' GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start)
+	topBlocked, err := groupedResult(request.Context(), handler.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? AND action = 'blocked' GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	topQueried, err := groupedResult(ctx, handler.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	changes, err := whatsNew(ctx, handler.store.DB, start)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	sparklines, err := dashboardSparklines(ctx, handler.store.DB)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	recent, err := recentQueries(ctx, handler.store.DB)
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
 	liveCache, metricsPending := handler.cachedCoreDNSCacheMetrics()
 	upstreamSnapshot := upstreamhealth.Snapshot{Status: "unknown", Summary: "Upstream health has not been checked yet.", Items: make([]upstreamhealth.Probe, 0)}
 	if handler.upstreams != nil {
@@ -106,17 +155,21 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 			start: start, blocked: blocked, newDevices: counts.newDevices, newDevicesKnown: true, topClients: topClients, topBlocked: topBlocked,
 			reloadFailures: counts.reloadFailures, upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available, dnsMetricsPending: metricsPending,
 		}),
-		"whats_new":                whatsNew(request.Context(), handler.store.DB, start),
-		"sparklines":               dashboardSparklines(request.Context(), handler.store.DB),
-		"top_queried_domains":      grouped(request.Context(), handler.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start),
+		"whats_new":                changes,
+		"sparklines":               sparklines,
+		"top_queried_domains":      topQueried,
 		"top_blocked_domains":      topBlocked,
 		"top_clients":              topClients,
-		"recent_activity":          recentQueries(request.Context(), handler.store.DB),
+		"recent_activity":          recent,
 		"upstream_health":          upstreamSnapshot.Summary,
 		"upstream_health_status":   upstreamSnapshot.Status,
 		"upstream_checked_at":      upstreamSnapshot.CheckedAt,
 		"upstream_probes":          upstreamSnapshot.Items,
 		"favicon_fetching_enabled": settings.faviconFetchingEnabled,
+	}
+	if err := ctx.Err(); err != nil {
+		writeError(responseWriter, err)
+		return
 	}
 	handler.rememberDashboard(start, payload)
 	writeJSON(responseWriter, http.StatusOK, payload)
@@ -127,9 +180,9 @@ type dashboardTraffic struct {
 	cacheLatency, upstreamLatency              float64
 }
 
-func dashboardTrafficSummary(ctx context.Context, database *sql.DB, start string) dashboardTraffic {
+func dashboardTrafficSummary(ctx context.Context, database *sql.DB, start string) (dashboardTraffic, error) {
 	var traffic dashboardTraffic
-	_ = database.QueryRowContext(ctx, `
+	err := database.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END), 0),
@@ -145,16 +198,16 @@ func dashboardTrafficSummary(ctx context.Context, database *sql.DB, start string
 	)
 	traffic.cacheLatency = roundedFloat(traffic.cacheLatency)
 	traffic.upstreamLatency = roundedFloat(traffic.upstreamLatency)
-	return traffic
+	return traffic, err
 }
 
 type dashboardCounts struct {
 	enabledBlocklists, blockEntries, deviceCount, reloadFailures, newDevices int
 }
 
-func dashboardCountsSummary(ctx context.Context, database *sql.DB, start string) dashboardCounts {
+func dashboardCountsSummary(ctx context.Context, database *sql.DB, start string) (dashboardCounts, error) {
 	var counts dashboardCounts
-	_ = database.QueryRowContext(ctx, `
+	err := database.QueryRowContext(ctx, `
 		SELECT
 			(SELECT COUNT(*) FROM blocklists WHERE enabled = 1),
 			(SELECT COUNT(*) FROM blocklist_entries),
@@ -165,21 +218,21 @@ func dashboardCountsSummary(ctx context.Context, database *sql.DB, start string)
 		&counts.enabledBlocklists, &counts.blockEntries, &counts.deviceCount,
 		&counts.reloadFailures, &counts.newDevices,
 	)
-	return counts
+	return counts, err
 }
 
 type dashboardSettings struct {
 	cacheEnabled, faviconFetchingEnabled string
 }
 
-func dashboardSettingsSummary(ctx context.Context, database *sql.DB) dashboardSettings {
+func dashboardSettingsSummary(ctx context.Context, database *sql.DB) (dashboardSettings, error) {
 	var settings dashboardSettings
-	_ = database.QueryRowContext(ctx, `
+	err := database.QueryRowContext(ctx, `
 		SELECT
 			COALESCE((SELECT value FROM settings WHERE key = 'dns_cache_enabled'), ''),
 			COALESCE((SELECT value FROM settings WHERE key = 'favicon_fetching_enabled'), '')
 	`).Scan(&settings.cacheEnabled, &settings.faviconFetchingEnabled)
-	return settings
+	return settings, err
 }
 
 func roundedFloat(value float64) float64 {
@@ -484,24 +537,38 @@ func upstreamHealthCard(snapshot upstreamhealth.Snapshot) map[string]any {
 	return map[string]any{"label": "Upstreams", "value": value, "detail": detail, "status": status}
 }
 
-func whatsNew(ctx context.Context, database *sql.DB, start string) map[string]any {
-	return map[string]any{
-		"devices":       searchRows(ctx, database, `SELECT address AS label, 'First seen today' AS subtitle FROM device_addresses WHERE first_seen_at >= ? ORDER BY first_seen_at DESC, id DESC LIMIT 5`, start),
-		"domains":       searchRows(ctx, database, `SELECT q.domain AS label, 'First time observed' AS subtitle FROM dns_queries q WHERE q.timestamp >= ? AND NOT EXISTS (SELECT 1 FROM dns_queries prior WHERE prior.domain = q.domain AND prior.timestamp < ?) GROUP BY q.domain ORDER BY MIN(q.timestamp) DESC LIMIT 5`, start, start),
-		"blocklists":    searchRows(ctx, database, `SELECT name AS label, 'Installed today' AS subtitle FROM blocklists WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5`, start),
-		"local_records": searchRows(ctx, database, `SELECT hostname AS label, 'Local DNS record' AS subtitle FROM dns_records WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5`, start),
+func whatsNew(ctx context.Context, database *sql.DB, start string) (map[string]any, error) {
+	result := make(map[string]any)
+	for _, item := range []struct {
+		key, query string
+		args       []any
+	}{
+		{"devices", `SELECT address AS label, 'First seen today' AS subtitle FROM device_addresses WHERE first_seen_at >= ? ORDER BY first_seen_at DESC, id DESC LIMIT 5`, []any{start}},
+		{"domains", `SELECT q.domain AS label, 'First time observed' AS subtitle FROM dns_queries q WHERE q.timestamp >= ? AND NOT EXISTS (SELECT 1 FROM dns_queries prior WHERE prior.domain = q.domain AND prior.timestamp < ?) GROUP BY q.domain ORDER BY MIN(q.timestamp) DESC LIMIT 5`, []any{start, start}},
+		{"blocklists", `SELECT name AS label, 'Installed today' AS subtitle FROM blocklists WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5`, []any{start}},
+		{"local_records", `SELECT hostname AS label, 'Local DNS record' AS subtitle FROM dns_records WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5`, []any{start}},
+	} {
+		values, err := searchRowsResult(ctx, database, item.query, item.args...)
+		if err != nil {
+			return nil, err
+		}
+		result[item.key] = values
 	}
+	return result, nil
 }
 
-func dashboardSparklines(ctx context.Context, database *sql.DB) map[string]any {
-	activity, blocked := hourlyActivityCounts(ctx, database)
+func dashboardSparklines(ctx context.Context, database *sql.DB) (map[string]any, error) {
+	activity, blocked, err := hourlyActivityCounts(ctx, database)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"activity": activity,
 		"blocked":  blocked,
-	}
+	}, nil
 }
 
-func hourlyActivityCounts(ctx context.Context, database *sql.DB) ([]int, []int) {
+func hourlyActivityCounts(ctx context.Context, database *sql.DB) ([]int, []int, error) {
 	activity, blocked := make([]int, 24), make([]int, 24)
 	cutoff := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
 	rows, err := database.QueryContext(ctx, `
@@ -513,7 +580,7 @@ func hourlyActivityCounts(ctx context.Context, database *sql.DB) ([]int, []int) 
 		GROUP BY hour
 	`, cutoff)
 	if err != nil {
-		return activity, blocked
+		return nil, nil, err
 	}
 	defer closeRows(rows)
 	nowHour := time.Now().UTC().Hour()
@@ -521,7 +588,7 @@ func hourlyActivityCounts(ctx context.Context, database *sql.DB) ([]int, []int) 
 		var hourText string
 		var count, blockedCount int
 		if err := rows.Scan(&hourText, &count, &blockedCount); err != nil {
-			return activity, blocked
+			return nil, nil, err
 		}
 		hour, err := strconv.Atoi(hourText)
 		if err != nil {
@@ -531,5 +598,5 @@ func hourlyActivityCounts(ctx context.Context, database *sql.DB) ([]int, []int) 
 		activity[index] = count
 		blocked[index] = blockedCount
 	}
-	return activity, blocked
+	return activity, blocked, rows.Err()
 }

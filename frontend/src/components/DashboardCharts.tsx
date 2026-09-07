@@ -15,6 +15,7 @@ import {
 } from "chart.js";
 import { Bar, Line } from "react-chartjs-2";
 import { useMemo } from "react";
+import { useChartColors } from "../lib/use-chart-colors";
 import type { ReplayBucket } from "../api/client";
 
 ChartJS.register(BarController, BarElement, CategoryScale, Filler, LineController, LineElement, LinearScale, PointElement, Tooltip);
@@ -44,28 +45,21 @@ type ReplayBarGeometry = {
 
 const pointCount = 24;
 const labels = Array.from({ length: pointCount }, (_, index) => String(index));
-const accentColor = "#2cb1a4";
-const blockedColor = "#d76b63";
-const gridColor = "rgba(118, 145, 160, 0.28)";
-const axisColor = "#7b8d9a";
-const replayTotalColor = "rgba(7, 157, 147, 0.58)";
-const replayBlockedColor = "rgba(245, 79, 73, 0.9)";
-const replayCursorColor = "#2f6c78";
-
 export function TrafficChartCanvas({ activity, blocked }: TrafficChartCanvasProps) {
+  const colors = useChartColors();
   const data = useMemo<ChartData<"line", number[], string>>(() => ({
     labels,
     datasets: [
       {
         label: "Total",
         data: normalizeSeries(activity),
-        borderColor: accentColor,
-        backgroundColor: "rgba(6, 155, 145, 0.09)",
+        borderColor: colors.accent,
+        backgroundColor: colors.fill,
         borderWidth: 2.5,
         pointRadius: 0,
         pointHoverRadius: 4,
-        pointHoverBackgroundColor: accentColor,
-        pointHoverBorderColor: "#ffffff",
+        pointHoverBackgroundColor: colors.accent,
+        pointHoverBorderColor: colors.surface,
         pointHoverBorderWidth: 2,
         tension: 0.35,
         fill: true
@@ -73,19 +67,19 @@ export function TrafficChartCanvas({ activity, blocked }: TrafficChartCanvasProp
       {
         label: "Blocked",
         data: normalizeSeries(blocked),
-        borderColor: blockedColor,
+        borderColor: colors.blocked,
         backgroundColor: "transparent",
         borderWidth: 2.5,
         pointRadius: 0,
         pointHoverRadius: 4,
-        pointHoverBackgroundColor: blockedColor,
-        pointHoverBorderColor: "#ffffff",
+        pointHoverBackgroundColor: colors.blocked,
+        pointHoverBorderColor: colors.surface,
         pointHoverBorderWidth: 2,
         tension: 0.35,
         fill: false
       }
     ]
-  }), [activity, blocked]);
+  }), [activity, blocked, colors]);
 
   const options = useMemo<ChartOptions<"line">>(() => ({
     responsive: true,
@@ -108,7 +102,7 @@ export function TrafficChartCanvas({ activity, blocked }: TrafficChartCanvasProp
         grid: { display: false },
         border: { display: false },
         ticks: {
-          color: axisColor,
+          color: colors.axis,
           maxRotation: 0,
           autoSkip: false,
           font: { size: 10, weight: 600 },
@@ -118,9 +112,9 @@ export function TrafficChartCanvas({ activity, blocked }: TrafficChartCanvasProp
       y: {
         beginAtZero: true,
         border: { display: false },
-        grid: { color: gridColor, drawTicks: false },
+        grid: { color: colors.grid, drawTicks: false },
         ticks: {
-          color: axisColor,
+          color: colors.axis,
           maxTicksLimit: 3,
           padding: 8,
           font: { size: 10, weight: 600 },
@@ -128,7 +122,7 @@ export function TrafficChartCanvas({ activity, blocked }: TrafficChartCanvasProp
         }
       }
     }
-  }), []);
+  }), [colors]);
 
   return (
     <Line
@@ -142,21 +136,22 @@ export function TrafficChartCanvas({ activity, blocked }: TrafficChartCanvasProp
 }
 
 export function ReplayTimelineCanvas({ buckets, progress, onSeek }: ReplayTimelineCanvasProps) {
+  const colors = useChartColors();
   const safeProgress = Math.max(0, Math.min(100, progress));
   const data = useMemo<ChartData<"bar", number[], string>>(() => ({
     labels: buckets.map((_, index) => String(index)),
     datasets: [{
       label: "Queries",
       data: buckets.map((bucket) => bucket.total),
-      backgroundColor: replayTotalColor,
-      borderColor: replayTotalColor,
+      backgroundColor: colors.accent,
+      borderColor: colors.accent,
       borderRadius: 2,
       borderSkipped: false,
       barPercentage: 0.94,
       categoryPercentage: 0.98,
       maxBarThickness: 28
     }]
-  }), [buckets]);
+  }), [buckets, colors]);
 
   const options = useMemo<ChartOptions<"bar">>(() => ({
     responsive: true,
@@ -195,7 +190,7 @@ export function ReplayTimelineCanvas({ buckets, progress, onSeek }: ReplayTimeli
         grid: { display: false },
         border: { display: false },
         ticks: {
-          color: axisColor,
+          color: colors.axis,
           maxTicksLimit: 2,
           maxRotation: 0,
           autoSkip: true,
@@ -206,11 +201,11 @@ export function ReplayTimelineCanvas({ buckets, progress, onSeek }: ReplayTimeli
       y: {
         beginAtZero: true,
         border: { display: false },
-        grid: { color: gridColor, drawTicks: false },
+        grid: { color: colors.grid, drawTicks: false },
         ticks: { display: false }
       }
     }
-  }), [buckets, onSeek]);
+  }), [buckets, onSeek, colors]);
 
   const overlayPlugin = useMemo<Plugin<"bar">>(() => ({
     id: "replay-overlays",
@@ -218,7 +213,7 @@ export function ReplayTimelineCanvas({ buckets, progress, onSeek }: ReplayTimeli
       const context = chart.ctx;
       const meta = chart.getDatasetMeta(0);
       context.save();
-      context.fillStyle = replayBlockedColor;
+      context.fillStyle = colors.blocked;
       context.globalAlpha = 0.96;
       meta.data.forEach((element, index) => {
         const bucket = buckets[index];
@@ -232,7 +227,7 @@ export function ReplayTimelineCanvas({ buckets, progress, onSeek }: ReplayTimeli
       const { left, right, top, bottom } = chart.chartArea;
       const cursorX = left + (safeProgress / 100) * Math.max(0, right - left);
       context.globalAlpha = 1;
-      context.strokeStyle = replayCursorColor;
+      context.strokeStyle = colors.cursor;
       context.lineWidth = 1.4;
       context.setLineDash([4, 3]);
       context.beginPath();
@@ -240,13 +235,13 @@ export function ReplayTimelineCanvas({ buckets, progress, onSeek }: ReplayTimeli
       context.lineTo(cursorX, bottom + 6);
       context.stroke();
       context.setLineDash([]);
-      context.fillStyle = replayCursorColor;
+      context.fillStyle = colors.cursor;
       context.beginPath();
       context.arc(cursorX, top - 4, 5, 0, Math.PI * 2);
       context.fill();
       context.restore();
     }
-  }), [buckets, safeProgress]);
+  }), [buckets, safeProgress, colors]);
 
   return (
     <Bar
@@ -261,17 +256,18 @@ export function ReplayTimelineCanvas({ buckets, progress, onSeek }: ReplayTimeli
 }
 
 export function SparklineCanvas({ values = [], tone }: SparklineCanvasProps) {
+  const colors = useChartColors();
   const data = useMemo<ChartData<"line", number[], string>>(() => ({
     labels,
     datasets: [{
       data: normalizeSeries(values),
-      borderColor: tone === "blocked" ? blockedColor : accentColor,
+      borderColor: tone === "blocked" ? colors.blocked : colors.accent,
       borderWidth: 2.5,
       pointRadius: 0,
       tension: 0.35,
       fill: false
     }]
-  }), [tone, values]);
+  }), [tone, values, colors]);
 
   const options = useMemo<ChartOptions<"line">>(() => ({
     responsive: true,

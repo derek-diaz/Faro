@@ -70,7 +70,10 @@ func TestDashboardCountsAndRanksStableDevices(t *testing.T) {
 	if inventory.ActiveToday != report.Active || inventory.MostActiveName != report.Top[0].Label {
 		t.Fatalf("dashboard disagrees with Devices: %#v", inventory)
 	}
-	recent := recentQueries(context.Background(), h.store.DB)
+	recent, err := recentQueries(context.Background(), h.store.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(recent) == 0 || recent[0]["device_name"] != "Runner up" {
 		t.Fatalf("recent activity lost friendly name: %#v", recent)
 	}

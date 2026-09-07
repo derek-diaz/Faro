@@ -1,3 +1,6 @@
+import { Button } from "./ui/button";
+import { Textarea } from "./ui/textarea";
+import { Input } from "./ui/input";
 import { AlertTriangle, ArrowLeft, Check, CheckCircle2, Copy, LogOut, Network, RefreshCw, Server, ShieldCheck } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode, type SubmitEvent } from "react";
 import { api, type RedundancyPublicStatus } from "../api/client";
@@ -68,14 +71,14 @@ export function JoinExistingFaro({ onBack, onJoined, themeMode, onThemeModeChang
       <section className="redundancy-setup-main">
         <form className="redundancy-join-form" onSubmit={(event) => void join(event)}>
           <header><span>Additional DNS server</span><h2>Connect this Faro server</h2><p>Generate a pairing code from Settings → Redundancy on your existing Faro server.</p></header>
-          <label><span>Existing Faro address</span><input value={controllerURL} onChange={(event) => setControllerURL(event.target.value)} onBlur={normalizeControllerInput} inputMode="url" autoComplete="url" placeholder="192.168.1.10 or faro.local" required /><small>Enter an IP address or hostname. Faro adds port 1787 when you leave the port out.</small></label>
-          <label><span>Pairing code</span><textarea rows={3} value={pairingCode} onChange={(event) => setPairingCode(event.target.value)} placeholder="FARO1.…" required /><small>The one-time code expires after 10 minutes.</small></label>
+          <label><span>Existing Faro address</span><Input value={controllerURL} onChange={(event) => setControllerURL(event.target.value)} onBlur={normalizeControllerInput} inputMode="url" autoComplete="url" placeholder="192.168.1.10 or faro.local" required /><small>Enter an IP address or hostname. Faro adds port 1787 when you leave the port out.</small></label>
+          <label><span>Pairing code</span><Textarea rows={3} value={pairingCode} onChange={(event) => setPairingCode(event.target.value)} placeholder="FARO1.…" required /><small>The one-time code expires after 10 minutes.</small></label>
           <div className="redundancy-join-grid">
-            <label><span>Name this server</span><input value={nodeName} onChange={(event) => setNodeName(event.target.value)} maxLength={40} required placeholder="Upstairs Faro" /></label>
-            <label><span>This server's LAN address</span><input value={lanAddress} onChange={(event) => setLANAddress(event.target.value)} required placeholder="LAN IP address" /></label>
+            <label><span>Name this server</span><Input value={nodeName} onChange={(event) => setNodeName(event.target.value)} maxLength={40} required placeholder="Upstairs Faro" /></label>
+            <label><span>This server's LAN address</span><Input value={lanAddress} onChange={(event) => setLANAddress(event.target.value)} required placeholder="LAN IP address" /></label>
           </div>
           {error && <div className="auth-error" role="alert">{error}</div>}
-          <footer><button type="button" className="secondary" onClick={onBack} disabled={busy}><ArrowLeft size={16} />Back</button><button type="submit" disabled={busy}><Network size={16} />{busy ? "Pairing server…" : "Join Faro home"}</button></footer>
+          <footer><Button variant="outline" type="button" className="secondary" onClick={onBack} disabled={busy}><ArrowLeft size={16} />Back</Button><Button variant="default" type="submit" disabled={busy}><Network size={16} />{busy ? "Pairing server…" : "Join Faro home"}</Button></footer>
         </form>
       </section>
     </main>
@@ -186,7 +189,7 @@ function ReplicaStatusCard({ status, synchronized, statusMessage, copyState, onC
       {status.last_error && <div className="replica-error"><AlertTriangle size={17} /><span>{statusMessage}</span></div>}
       <footer className="replica-status-footer">
         <div><Server size={16} /><span>Changes are made on the primary Faro server. This backup keeps serving its last safe DNS settings during an outage.</span></div>
-        <button type="button" className="secondary replica-leave-button" onClick={onOpenLeave}><LogOut size={15} />Leave Faro home</button>
+        <Button variant="outline" type="button" className="secondary replica-leave-button" onClick={onOpenLeave}><LogOut size={15} />Leave Faro home</Button>
       </footer>
     </section>
   );
@@ -210,10 +213,10 @@ type ReplicaCopyButtonProps = Readonly<{
 
 function ReplicaCopyButton({ copyState, onCopy }: ReplicaCopyButtonProps) {
   return (
-    <button type="button" className={`replica-copy-button ${copyState}`} aria-label="Copy controller address" disabled={copyState === "copying"} onClick={onCopy}>
+    <Button variant="outline" type="button" className={`replica-copy-button ${copyState}`} aria-label="Copy controller address" disabled={copyState === "copying"} onClick={onCopy}>
       {replicaCopyIcon(copyState)}
       {replicaCopyLabel(copyState)}
-    </button>
+    </Button>
   );
 }
 
@@ -281,8 +284,8 @@ function ReplicaLeaveAuthentication({ adminName, adminPassword, onAdminNameChang
   return (
     <div className="replica-leave-auth">
       <p>Administrator confirmation</p>
-      <label><span>Username</span><input value={adminName} onChange={(event) => onAdminNameChange(event.target.value)} autoComplete="username" /></label>
-      <label><span>Password</span><input autoFocus type="password" value={adminPassword} onChange={(event) => onAdminPasswordChange(event.target.value)} autoComplete="current-password" /></label>
+      <label><span>Username</span><Input value={adminName} onChange={(event) => onAdminNameChange(event.target.value)} autoComplete="username" /></label>
+      <label><span>Password</span><Input autoFocus type="password" value={adminPassword} onChange={(event) => onAdminPasswordChange(event.target.value)} autoComplete="current-password" /></label>
     </div>
   );
 }

@@ -96,8 +96,8 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onDevice
   const showNetworkStatus = networkHealthStatus === "degraded" || networkHealthStatus === "critical";
   const activity = summary.sparklines?.activity ?? [];
   const blocked = summary.sparklines?.blocked ?? [];
-  const deviceHealth = summary.health_cards?.find((card) => card.label.toLowerCase().includes("device"));
-  const activeDevices = deviceHealth?.value.match(/[\d,]+/)?.[0] ?? String(summary.top_clients.length);
+
+  const activeDevices = formatNumber(summary.active_devices_today);
 
   return (
     <div className="observability-dashboard">
@@ -125,10 +125,10 @@ export function Dashboard({ summary, settings, loading, onDomainSelect, onDevice
       <div className="dashboard-rank-grid">
         <RankPanel title="Top domains" items={summary.top_queried_domains} empty="No DNS activity yet." showFavicons onSelect={onDomainSelect} />
         <RankPanel title="Blocked domains" items={summary.top_blocked_domains} empty="No domains blocked today." showFavicons tone="blocked" onSelect={onDomainSelect} />
-        <RankPanel title="Top devices" items={summary.top_clients} empty="No device activity yet." onViewAll={onViewDevices} />
+        <RankPanel title="Top devices" items={summary.top_clients} empty="No device activity yet." onViewAll={onViewDevices} onSelect={onDeviceSelect} />
       </div>
 
-      <DashboardRecentActivity summary={summary} onDomainSelect={onDomainSelect} onViewActivity={onViewActivity} />
+      <DashboardRecentActivity summary={summary} onDomainSelect={onDomainSelect} onDeviceSelect={onDeviceSelect} onViewActivity={onViewActivity} />
     </div>
   );
 }
@@ -234,7 +234,7 @@ function DashboardStandardRow({ address, probe, probing }: { readonly address: s
   return <div className="dashboard-upstream-row"><span className="dashboard-provider-logo">{match ? <ProviderLogo providerID={match.provider.id} providerName={match.provider.name} /> : <Server size={17} />}</span><div><strong>{match?.provider.name ?? "Custom resolver"}</strong><span>{match?.profile.name ?? "Custom DNS"}</span><code>{address}</code></div><DashboardProbeBadge probe={probe} loading={probing && !probe} /></div>;
 }
 
-function DashboardRecentActivity({ summary, onDomainSelect, onViewActivity }: { readonly summary: DashboardSummary; readonly onDomainSelect: (domain: string) => void; readonly onViewActivity: () => void }) {
+function DashboardRecentActivity({ summary, onDomainSelect, onDeviceSelect, onViewActivity }: { readonly summary: DashboardSummary; readonly onDomainSelect: (domain: string) => void; readonly onDeviceSelect: (ip: string) => void; readonly onViewActivity: () => void }) {
   const recentActivity = useMemo(() => summary.recent_activity.slice(0, 8), [summary.recent_activity]);
   const activityColumns = useMemo<ColumnDef<typeof dashboardActivityFeatures, DNSQuery>[]>(() => [
     {
@@ -255,7 +255,7 @@ function DashboardRecentActivity({ summary, onDomainSelect, onViewActivity }: { 
     {
       id: "device",
       header: "Device",
-      cell: ({ row }) => row.original.client_ip
+      cell: ({ row }) => <button className="device-link" type="button" title={row.original.client_ip} onClick={() => onDeviceSelect(row.original.client_ip)}>{row.original.device_name || row.original.client_ip}</button>
     },
     {
       id: "type",
@@ -267,7 +267,7 @@ function DashboardRecentActivity({ summary, onDomainSelect, onViewActivity }: { 
       header: "Source",
       cell: ({ row }) => <ResolutionSource source={row.original.source} upstream={row.original.upstream} />
     }
-  ], [onDomainSelect]);
+  ], [onDomainSelect, onDeviceSelect]);
   const activityTable = useTable({
     features: dashboardActivityFeatures,
     data: recentActivity,
@@ -308,7 +308,7 @@ function bestDashboardProbe(addresses: string[], probes: Record<string, Upstream
   return addresses.map((address) => probes[address]).filter((probe): probe is UpstreamProbe => probe?.status === "online" && probe.latency_ms !== null).sort((left, right) => (left.latency_ms ?? Infinity) - (right.latency_ms ?? Infinity))[0];
 }
 
-function RankPanel({ title, items, empty, showFavicons = false, tone = "default", onSelect, onViewAll }: { readonly title: string; readonly items: { readonly label: string; readonly count: number }[]; readonly empty: string; readonly showFavicons?: boolean; readonly tone?: "default" | "blocked"; readonly onSelect?: (label: string) => void; readonly onViewAll?: () => void }) {
+function RankPanel({ title, items, empty, showFavicons = false, tone = "default", onSelect, onViewAll }: { readonly title: string; readonly items: { readonly label: string; readonly count: number; readonly client_ip?: string }[]; readonly empty: string; readonly showFavicons?: boolean; readonly tone?: "default" | "blocked"; readonly onSelect?: (label: string) => void; readonly onViewAll?: () => void }) {
   const max = Math.max(...items.map((item) => item.count), 1);
   return (
     <section className={`panel compact-rank-panel ${tone}`}>
@@ -321,11 +321,11 @@ function RankPanel({ title, items, empty, showFavicons = false, tone = "default"
       ) : (
         <div className="compact-rank-list">
           {items.map((item, index) => (
-            <div className="compact-rank-row" key={item.label}>
+            <div className="compact-rank-row" key={item.client_ip || item.label}>
               <span className="rank-position">{index + 1}</span>
               {showFavicons && <DomainFavicon domain={item.label} />}
               {onSelect ? (
-                <button className="link-button" type="button" onClick={() => onSelect(item.label)}>{item.label}</button>
+                <button className="link-button" type="button" onClick={() => onSelect(item.client_ip || item.label)} title={item.client_ip}>{item.label}</button>
               ) : (
                 <strong>{item.label}</strong>
               )}

@@ -172,12 +172,14 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
   const [settings, setSettings] = useState<Setting[]>([]);
   const [notifications, setNotifications] = useState<NotificationsResponse>({ attention_count: 0, unread_count: 0, items: [] });
   const [loading, setLoading] = useState(true);
+  const [dashboardLoading, setDashboardLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDomain, setSelectedDomain] = useState<string | null>(initialRoute.domain);
   const [selectedClientIP, setSelectedClientIP] = useState<string | null>(initialRoute.clientIP);
   const [searchOpen, setSearchOpen] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const liveRefreshBusy = useRef(false);
+  const lastLoadedPage = useRef(page);
 
   let apiState: "checking" | "offline" | "online" = "online";
   if (loading) apiState = "checking";
@@ -185,30 +187,20 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
 
   async function loadAll() {
     setLoading(true);
+    setDashboardLoading(page === "dashboard");
     setError(null);
-    try {
-      const [nextSummary, nextDevices, nextRecords, nextBlocklists, nextProtections, nextSettings, nextNotifications] =
-        await Promise.all([
-        api.dashboard(),
-        api.devices(),
-        api.records(),
-        api.blocklists(),
-        api.protections(),
-        api.settings(),
-        api.notifications()
-      ]);
-      setSummary(nextSummary);
-      setDevices(nextDevices);
-      setRecords(nextRecords);
-      setBlocklists(nextBlocklists);
-      setProtections(nextProtections);
-      setSettings(nextSettings);
-      setNotifications(nextNotifications);
-    } catch (error_) {
-      setError(error_ instanceof Error ? error_.message : "Failed to reach Faro API");
-    } finally {
-      setLoading(false);
-    }
+    const results = await Promise.allSettled([
+      ...(page === "dashboard" ? [api.dashboard().then(setSummary).finally(() => setDashboardLoading(false))] : []),
+      ...(page === "protection" ? [api.devices().then(setDevices)] : []),
+      api.records().then(setRecords),
+      api.blocklists().then(setBlocklists),
+      api.protections().then(setProtections),
+      api.settings().then(setSettings),
+      api.notifications().then(setNotifications)
+    ]);
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") setError(failed.reason instanceof Error ? failed.reason.message : "Failed to reach Faro API");
+    setLoading(false);
   }
 
   useEffect(() => {
@@ -259,6 +251,27 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
   }, [page]);
 
   useEffect(() => {
+    if (lastLoadedPage.current === page) return;
+    lastLoadedPage.current = page;
+    if (page === "protection") void api.devices().then(setDevices).catch(() => undefined);
+    if (page === "dashboard") {
+      setDashboardLoading(true);
+      void api.dashboard().then(setSummary)
+        .catch((failure: unknown) => setError(failure instanceof Error ? failure.message : "Could not load dashboard."))
+        .finally(() => setDashboardLoading(false));
+    }
+  }, [page]);
+
+  useEffect(() => {
+    if (!summary?.cache.metrics_pending || page !== "dashboard") return;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void api.dashboard().then((next) => { if (active) setSummary(next); }).catch(() => undefined);
+    }, 2500);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [summary, page]);
+
+  useEffect(() => {
     document.title = `${pageLabels[page]} | Faro`;
   }, [page]);
 
@@ -291,7 +304,6 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
 
   async function refreshDevices() {
     setDevices(await api.devices());
-    setSummary(await api.dashboard());
   }
 
   async function signOut() {
@@ -391,7 +403,7 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
           <Dashboard
             summary={summary}
             settings={settings}
-            loading={loading}
+            loading={dashboardLoading && !summary}
             onDomainSelect={openDomain}
             onDeviceSelect={openDevice}
             onViewActivity={() => navigateToPage("queries")}

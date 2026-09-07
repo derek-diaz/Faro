@@ -41,6 +41,7 @@ import { rowSortingFeature, tableFeatures, useTable } from "@tanstack/react-tabl
 import type { Column, ColumnDef, SortingState } from "@tanstack/react-table";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject, type SubmitEvent } from "react";
 import { api, type DeviceInventoryPage, type DeviceReplay as DeviceReplayData, type DeviceSummary, type DNSQuery, type Protection, type ReplayBucket } from "../api/client";
+import { Troubleshooter } from "../components/Troubleshooter";
 import { DeviceReplay } from "../components/DeviceReplay";
 import { DomainFavicon } from "../components/DomainFavicon";
 import { EmptyState } from "../components/EmptyState";
@@ -57,7 +58,7 @@ type DevicesProps = {
   readonly onDomainSelect: (domain: string) => void;
 };
 
-type DeviceView = "overview" | "replay";
+type DeviceView = "overview" | "replay" | "troubleshoot";
 type DeviceEditForm = { name: string; location: string; notes: string; device_type: string };
 type DeviceSortKey = "device" | "requests" | "blocked" | "last_seen" | "protection";
 type SortDirection = "asc" | "desc";
@@ -86,6 +87,7 @@ const deviceTypeChoices = [
 
 export function Devices({ devices, protections, refresh, selectedClientIP, onSelectClient, onDomainSelect }: DevicesProps) {
   const [detail, setDetail] = useState<DeviceSummary | null>(null);
+  const detailCache = useRef(new Map<string, DeviceSummary>());
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const [form, setForm] = useState<DeviceEditForm>({ name: "", location: "", notes: "", device_type: "" });
@@ -229,16 +231,19 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
       return;
     }
     let cancelled = false;
-    setDetail(null);
+    const controller = new AbortController();
+    setDetail(detailCache.current.get(selectedClientIP) ?? null);
     setDetailLoading(true);
     setDetailError("");
     setEditing(false);
     setView("overview");
     setProtectionMenuOpen(false);
-    api.device(selectedClientIP)
+    api.device(selectedClientIP, controller.signal)
       .then((nextDetail) => {
         if (!cancelled) {
           setDetail(nextDetail);
+          if (detailCache.current.size >= 30) detailCache.current.delete(detailCache.current.keys().next().value!);
+          detailCache.current.set(selectedClientIP, nextDetail);
           setForm({ name: nextDetail.name || "", location: nextDetail.location ?? "", notes: nextDetail.notes ?? "", device_type: nextDetail.type_source === "manual" ? nextDetail.device_type : "" });
         }
       })
@@ -249,7 +254,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
         if (!cancelled) setDetailLoading(false);
       });
     return () => {
-      cancelled = true;
+      cancelled = true; controller.abort();
     };
   }, [selectedClientIP]);
 
@@ -258,7 +263,7 @@ export function Devices({ devices, protections, refresh, selectedClientIP, onSel
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || document.querySelector("dialog:modal")) return;
       if (protectionMenuOpen) setProtectionMenuOpen(false);
       else onSelectClient(null);
     }
@@ -459,7 +464,7 @@ function DeviceDrawer({ selectedClientIP, detail, detailLoading, detailError, vi
   readonly onDomainSelect: (domain: string) => void;
 }) {
   if (!selectedClientIP) return null;
-  return <dialog open className="drawer-backdrop device-drawer-backdrop" aria-label="Device details" onClick={(event) => { if (event.target === event.currentTarget) onSelectClient(null); }}><aside className="device-detail-drawer"><header className="device-drawer-header"><div><strong>Device details</strong><span>Inspect identity, traffic, and history without losing your place.</span></div><button className="icon-button" type="button" onClick={() => onSelectClient(null)} aria-label="Close device details"><X size={18} /></button></header><section className={`device-detail-panel ${view === "replay" ? "replay-active" : ""}`}>{detailLoading && <div className="device-detail-loading">Loading device details...</div>}{detailError && <div className="device-detail-error">{detailError}</div>}{!detailLoading && detail && <DeviceDrawerContent detail={detail} view={view} setView={setView} protections={protections} activeProtection={activeProtection} activeProtectionName={activeProtectionName} protectionBusy={protectionBusy} protectionMenuOpen={protectionMenuOpen} setProtectionMenuOpen={setProtectionMenuOpen} protectionMenuRef={protectionMenuRef} changeProtection={changeProtection} editing={editing} setEditing={setEditing} form={form} setForm={setForm} aliasSaving={aliasSaving} saveAlias={saveAlias} onDomainSelect={onDomainSelect} />}</section></aside></dialog>;
+  return <dialog open className="drawer-backdrop device-drawer-backdrop" aria-label="Device details" onClick={(event) => { if (event.target === event.currentTarget) onSelectClient(null); }}><aside className="device-detail-drawer"><header className="device-drawer-header"><div><strong>Device details</strong><span>Inspect identity, traffic, and history without losing your place.</span></div><button className="icon-button" type="button" onClick={() => onSelectClient(null)} aria-label="Close device details"><X size={18} /></button></header><section className={`device-detail-panel ${view === "replay" ? "replay-active" : ""}`}>{detailLoading && <div className="device-detail-loading">Loading device details...</div>}{detailError && <div className="device-detail-error">{detailError}</div>}{detail && <DeviceDrawerContent detail={detail} view={view} setView={setView} protections={protections} activeProtection={activeProtection} activeProtectionName={activeProtectionName} protectionBusy={protectionBusy} protectionMenuOpen={protectionMenuOpen} setProtectionMenuOpen={setProtectionMenuOpen} protectionMenuRef={protectionMenuRef} changeProtection={changeProtection} editing={editing} setEditing={setEditing} form={form} setForm={setForm} aliasSaving={aliasSaving} saveAlias={saveAlias} onDomainSelect={onDomainSelect} />}</section></aside></dialog>;
 }
 
 function DeviceDrawerContent({ detail, view, setView, protections, activeProtection, activeProtectionName, protectionBusy, protectionMenuOpen, setProtectionMenuOpen, protectionMenuRef, changeProtection, editing, setEditing, form, setForm, aliasSaving, saveAlias, onDomainSelect }: {
@@ -482,7 +487,7 @@ function DeviceDrawerContent({ detail, view, setView, protections, activeProtect
   readonly saveAlias: (event: SubmitEvent) => Promise<void>;
   readonly onDomainSelect: (domain: string) => void;
 }) {
-  return <><div className="device-detail-header"><div className="device-detail-identity"><span className="device-detail-icon">{deviceTypeIcon(detail.device_type)}</span><div><div className="device-detail-context"><DeviceProtectionPicker detail={detail} protections={protections} activeProtection={activeProtection} activeProtectionName={activeProtectionName} protectionBusy={protectionBusy} protectionMenuOpen={protectionMenuOpen} setProtectionMenuOpen={setProtectionMenuOpen} protectionMenuRef={protectionMenuRef} changeProtection={changeProtection} /><span>{detail.client_ip}</span></div><h2>{deviceDisplayName(detail)}</h2><p>{detail.device_type} · {detail.type_source === "manual" ? "Type chosen by you" : deviceIdentityDescription(detail)}</p></div></div>{view === "overview" && <button className="secondary device-edit-button" type="button" onClick={() => setEditing(!editing)}><Edit3 size={16} /><span>{editing ? "Cancel" : "Edit device"}</span></button>}</div><div className="device-view-tabs" role="tablist" aria-label="Device views"><button className={view === "overview" ? "active" : ""} type="button" role="tab" aria-selected={view === "overview"} onClick={() => setView("overview")}><LayoutDashboard size={16} /><span>Overview</span></button><button className={view === "replay" ? "active" : ""} type="button" role="tab" aria-selected={view === "replay"} onClick={() => { setEditing(false); setView("replay"); }}><History size={16} /><span>Activity replay</span></button></div>{view === "overview" ? <DeviceOverview detail={detail} form={form} setForm={setForm} editing={editing} saving={aliasSaving} saveAlias={saveAlias} onDomainSelect={onDomainSelect} onOpenReplay={() => setView("replay")} /> : <DeviceReplay clientIP={detail.client_ip} deviceName={deviceDisplayName(detail)} onDomainSelect={onDomainSelect} />}</>;
+  return <><div className="device-detail-header"><div className="device-detail-identity"><span className="device-detail-icon">{deviceTypeIcon(detail.device_type)}</span><div><div className="device-detail-context"><DeviceProtectionPicker detail={detail} protections={protections} activeProtection={activeProtection} activeProtectionName={activeProtectionName} protectionBusy={protectionBusy} protectionMenuOpen={protectionMenuOpen} setProtectionMenuOpen={setProtectionMenuOpen} protectionMenuRef={protectionMenuRef} changeProtection={changeProtection} /><span>{detail.client_ip}</span></div><h2>{deviceDisplayName(detail)}</h2><p>{detail.device_type} · {detail.type_source === "manual" ? "Type chosen by you" : deviceIdentityDescription(detail)}</p></div></div>{view === "overview" && <button className="secondary device-edit-button" type="button" onClick={() => setEditing(!editing)}><Edit3 size={16} /><span>{editing ? "Cancel" : "Edit device"}</span></button>}</div><div className="device-view-tabs" role="tablist" aria-label="Device views"><button className={view === "overview" ? "active" : ""} type="button" role="tab" aria-selected={view === "overview"} onClick={() => setView("overview")}><LayoutDashboard size={16} /><span>Overview</span></button><button className={view === "replay" ? "active" : ""} type="button" role="tab" aria-selected={view === "replay"} onClick={() => { setEditing(false); setView("replay"); }}><History size={16} /><span>Activity replay</span></button><button className={view === "troubleshoot" ? "active" : ""} type="button" role="tab" aria-selected={view === "troubleshoot"} onClick={() => { setEditing(false); setView("troubleshoot"); }}><ShieldCheck size={16} /><span>Fix a broken site</span></button></div>{view === "overview" ? <DeviceOverview detail={detail} form={form} setForm={setForm} editing={editing} saving={aliasSaving} saveAlias={saveAlias} onDomainSelect={onDomainSelect} onOpenReplay={() => setView("replay")} /> : view === "troubleshoot" ? <Troubleshooter key={detail.client_ip} clientIP={detail.client_ip} deviceName={deviceDisplayName(detail)} onDomainSelect={onDomainSelect} /> : <DeviceReplay clientIP={detail.client_ip} deviceName={deviceDisplayName(detail)} onDomainSelect={onDomainSelect} />}</>;
 }
 
 function DeviceProtectionPicker({ detail, protections, activeProtection, activeProtectionName, protectionBusy, protectionMenuOpen, setProtectionMenuOpen, protectionMenuRef, changeProtection }: {
@@ -555,15 +560,19 @@ function DeviceOverview({ detail, form, setForm, editing, saving, saveAlias, onD
   readonly onOpenReplay: () => void;
 }) {
   const [traffic, setTraffic] = useState<DeviceReplayData | null>(null);
+  const [trafficLoading, setTrafficLoading] = useState(true);
+  const [trafficError, setTrafficError] = useState("");
 
   useEffect(() => {
     let cancelled = false;
     setTraffic(null);
+    setTrafficLoading(true);
+    setTrafficError("");
     api.deviceReplay(detail.client_ip, "24h").then((nextTraffic) => {
       if (!cancelled) setTraffic(nextTraffic);
     }).catch(() => {
-      if (!cancelled) setTraffic(null);
-    });
+      if (!cancelled) setTrafficError("Could not load activity. Reopen this device to retry.");
+    }).finally(() => { if (!cancelled) setTrafficLoading(false); });
     return () => {
       cancelled = true;
     };
@@ -652,7 +661,7 @@ function DeviceOverview({ detail, form, setForm, editing, saving, saveAlias, onD
             <div><h3>Request volume</h3><p>Activity from this device over the last 24 hours</p></div>
             <div className="chart-legend" aria-label="Chart legend"><span><i className="total" />Queries</span><span><i className="blocked" />Blocked</span></div>
           </div>
-          <TrafficChart activity={chart.total} blocked={chart.blocked} />
+          {trafficLoading ? <p role="status">Loading device activity…</p> : trafficError ? <p role="alert">{trafficError}</p> : <TrafficChart activity={chart.total} blocked={chart.blocked} />}
         </section>
 
         <section className="device-traffic-profile">

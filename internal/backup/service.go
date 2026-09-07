@@ -66,6 +66,7 @@ var restoreTables = []string{
 }
 
 var deleteTables = []string{
+	"troubleshooting_exceptions",
 	"notification_states",
 	"auth_sessions",
 	"device_protection_memberships",
@@ -99,6 +100,7 @@ var rollbackDeleteTables = append([]string{
 }, deleteTables...)
 
 var rollbackRestoreTables = append(append([]string(nil), restoreTables...),
+	"troubleshooting_exceptions",
 	"device_names",
 	"unifi_client_snapshots",
 	"device_classifications",
@@ -172,7 +174,7 @@ func (service *Service) Create(ctx context.Context, passphrase string) (string, 
 		SchemaVersion:      db.CurrentSchemaVersion,
 		CreatedAt:          time.Now().UTC().Format(time.RFC3339),
 		DatabaseBytes:      info.Size(),
-		Excluded:           []string{"auth_sessions", "redundancy pairing secrets and node membership", "integration credentials and derived router observations", "favicon cache files", "raw query-log buffer"},
+		Excluded:           []string{"temporary troubleshooting exceptions", "auth_sessions", "redundancy pairing secrets and node membership", "integration credentials and derived router observations", "favicon cache files", "raw query-log buffer"},
 	}
 	archivePath := filepath.Join(tempDir, "payload.zip")
 	if err := writeArchive(archivePath, databasePath, manifest); err != nil {
@@ -362,7 +364,7 @@ func scrubSnapshot(path string) error {
 		return err
 	}
 	defer func() { _ = database.Close() }()
-	if _, err := database.Exec(`DELETE FROM auth_sessions WHERE 1 = 1`); err != nil {
+	if _, err := database.Exec(`DELETE FROM auth_sessions WHERE 1 = 1; DELETE FROM troubleshooting_exceptions WHERE 1 = 1`); err != nil {
 		return err
 	}
 	if _, err := database.Exec(`

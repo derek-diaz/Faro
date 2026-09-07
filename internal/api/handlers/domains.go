@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/derek/faro/internal/coredns"
 	"github.com/derek/faro/internal/db"
 )
 
@@ -44,14 +45,23 @@ func (handler *Handler) domainSummary(responseWriter http.ResponseWriter, reques
 		FROM dns_queries
 		WHERE domain = ?
 	`, start, start, domain).Scan(&total, &blocked, &firstSeen, &lastSeen, &allowedAll, &blockedAll)
-	status := "Allowed"
+	status := "Not seen"
+	if allowedAll > 0 {
+		status = "Allowed"
+	}
 	if allowedAll > 0 && blockedAll > 0 {
 		status = "Mixed"
 	} else if blockedAll > 0 {
 		status = "Blocked"
 	}
+	var related []map[string]any
+	if request.URL.Query().Get("include_events") != "false" {
+		related = localEvents(request.Context(), handler.store.DB, 12, domain)
+	}
 	writeJSON(responseWriter, http.StatusOK, map[string]any{
 		"domain":                domain,
+		"current_home_decision": coredns.ExplainDomainForClient(request.Context(), handler.store, domain, ""),
+		"home_allow_exception":  scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM protection_allow_entries a JOIN protection_profiles p ON p.id = a.protection_id WHERE p.is_default = 1 AND a.domain = ?`, domain) > 0,
 		"total_queries_today":   total,
 		"blocked_queries_today": blocked,
 		"first_seen":            nullableString(firstSeen),
@@ -60,6 +70,6 @@ func (handler *Handler) domainSummary(responseWriter http.ResponseWriter, reques
 		"query_types":           grouped(request.Context(), handler.store.DB, `SELECT query_type, COUNT(*) FROM dns_queries WHERE domain = ? GROUP BY query_type ORDER BY COUNT(*) DESC, query_type`, domain),
 		"status":                status,
 		"recent_queries":        recentQueriesFor(request.Context(), handler.store.DB, `domain = ?`, domain),
-		"recent_events":         localEvents(request.Context(), handler.store.DB, 12, domain),
+		"recent_events":         related,
 	})
 }

@@ -24,26 +24,31 @@ type CoreDNSManager interface {
 }
 
 type Handler struct {
-	store               *db.Store
-	reloader            CoreDNSManager
-	refresher           blocklists.Refresher
-	deviceNames         *deviceNameResolver
-	deviceCatalog       *devicecatalog.Manager
-	faviconDir          string
-	faviconLocks        [32]sync.Mutex
-	metricsURL          string
-	upstreams           *upstreamhealth.Monitor
-	backups             *farobackup.Service
-	unifi               *unifi.Manager
-	classifier          *devicecatalog.Classifier
-	redundancy          *redundancy.Manager
-	startedAt           time.Time
-	releaseChecker      *faroversion.Checker
-	configMu            sync.Mutex
-	activityCountsMu    sync.Mutex
-	activityCountsCache map[string]activityCountCacheEntry
-	dashboardMu         sync.Mutex
-	dashboardCache      dashboardCacheEntry
+	store                    *db.Store
+	reloader                 CoreDNSManager
+	refresher                blocklists.Refresher
+	deviceNames              *deviceNameResolver
+	deviceCatalog            *devicecatalog.Manager
+	faviconDir               string
+	faviconLocks             [32]sync.Mutex
+	metricsURL               string
+	upstreams                *upstreamhealth.Monitor
+	backups                  *farobackup.Service
+	unifi                    *unifi.Manager
+	classifier               *devicecatalog.Classifier
+	redundancy               *redundancy.Manager
+	startedAt                time.Time
+	releaseChecker           *faroversion.Checker
+	configMu                 sync.Mutex
+	activityCountsMu         sync.Mutex
+	activityCountsCache      map[string]activityCountCacheEntry
+	activityCountsGeneration uint64
+	cacheMetricsMu           sync.Mutex
+	cacheMetricsValue        cacheMetrics
+	cacheMetricsCheckedAt    time.Time
+	cacheMetricsRefreshing   bool
+	dashboardMu              sync.Mutex
+	dashboardCache           dashboardCacheEntry
 }
 
 func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Monitor, dependencies ...any) http.Handler {
@@ -113,6 +118,7 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 	mux.HandleFunc("/api/devices/", handler.device)
 	mux.HandleFunc("/api/device-catalog", handler.deviceCatalogInfo)
 	mux.HandleFunc("/api/domains/", handler.domainSummary)
+	mux.HandleFunc("/api/troubleshooting", handler.troubleshooting)
 	mux.HandleFunc("/api/search", handler.search)
 	mux.HandleFunc("/api/dashboard", handler.dashboard)
 	mux.HandleFunc("/api/favicons/", handler.favicon)

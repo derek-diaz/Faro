@@ -1,5 +1,5 @@
 import { Ban, CheckCircle2, Database, GitBranch, Route, Server, ShieldCheck, ShieldX, X } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, type DecisionRule, type DNSDecision, type DNSQuery, type DomainSummary } from "../api/client";
 import { DomainFavicon } from "./DomainFavicon";
 import { StatusBadge } from "./StatusBadge";
@@ -11,6 +11,17 @@ type DomainDrawerProps = {
 };
 
 export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const previousFocus = useRef<HTMLElement | null>(null);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  useEffect(() => {
+    if (!domain) return;
+    const dialog = dialogRef.current;
+    previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialog?.showModal();
+    return () => { dialog?.close(); previousFocus.current?.focus({ preventScroll: true }); };
+  }, [domain]);
   const [summary, setSummary] = useState<DomainSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState<"allow" | "block" | null>(null);
@@ -21,17 +32,22 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
       return;
     }
     let cancelled = false;
+    const controller = new AbortController();
+    setSummary(null);
+    setError("");
+    setNotice("");
     setLoading(true);
     api
-      .domainSummary(domain)
+      .domainSummary(domain, controller.signal)
       .then((nextSummary) => {
         if (!cancelled) setSummary(nextSummary);
       })
+      .catch((error_: unknown) => { if (!cancelled) setError(error_ instanceof Error ? error_.message : "Could not load this domain."); })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
     return () => {
-      cancelled = true;
+      cancelled = true; controller.abort();
     };
   }, [domain]);
 
@@ -41,11 +57,15 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
   async function addRule(action: "allow" | "block") {
     if (!domain) return;
     setBusy(action);
+    setError("");
     try {
       if (action === "allow") await api.addAllow(domain);
       else await api.addBlock(domain);
       setSummary(await api.domainSummary(domain));
       await onChanged();
+      setNotice(`Saved ${action} exception in Home. Historical results below describe earlier requests.`);
+    } catch (error_) {
+      setError(error_ instanceof Error ? error_.message : "Could not save the exception.");
     } finally {
       setBusy(null);
     }
@@ -56,7 +76,8 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
   return (
     <dialog
       className="drawer-backdrop"
-      open
+      ref={dialogRef}
+      onCancel={(event) => { event.preventDefault(); onClose(); }}
       aria-label={`${domain} details`}
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -68,7 +89,7 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
             <DomainFavicon domain={domain} />
             <div>
               <strong>{domain}</strong>
-              <span className={`domain-status ${summary?.status.toLowerCase() ?? "loading"}`}>{summary?.status ?? "Loading"}</span>
+              <span className={`domain-status ${summary?.status.toLowerCase() ?? "loading"}`}>{summary ? `Observed: ${summary.status}` : "Loading"}</span>
             </div>
           </div>
           <button className="icon-button" type="button" onClick={onClose} aria-label="Close domain details">
@@ -76,25 +97,28 @@ export function DomainDrawer({ domain, onClose, onChanged }: DomainDrawerProps) 
           </button>
         </header>
 
+        {error && <div className="error-banner" role="alert">{error}</div>}
+        {notice && <p role="status">{notice}</p>}
         {loading && <div className="drawer-loading">Loading domain activity...</div>}
 
         {!loading && summary && (
           <div className="domain-inspector-body">
             <div className="domain-action-bar">
-              {summary.status !== "Blocked" && (
-                <button type="button" onClick={() => void addRule("block")} disabled={busy !== null}>
+              {(
+                <button type="button" onClick={() => void addRule("block")} disabled={busy !== null || Boolean(summary.current_home_decision.allowlist) || Boolean(summary.current_home_decision.manual_block)}>
                   <Ban size={16} />
                   <span>Block in Home</span>
                 </button>
               )}
-              {summary.status !== "Allowed" && (
-                <button type="button" className="secondary" onClick={() => void addRule("allow")} disabled={busy !== null}>
+              {(
+                <button type="button" className="secondary" onClick={() => void addRule("allow")} disabled={busy !== null || summary.home_allow_exception}>
                   <ShieldCheck size={16} />
                   <span>Allow in Home</span>
                 </button>
               )}
             </div>
 
+            <p className="domain-action-context">Permanent changes above apply to Home. For a device's own protection, open its “Fix a broken site” tab.<br />Current Home policy: {summary.current_home_decision.reason || "No blocking rule matches."}{summary.current_home_decision.allowlist && <><br />An allow exception takes priority over blocks. Remove it in Protection or undo the temporary test before blocking.</>}</p>
             <section className="domain-overview" aria-label="Domain overview">
               <OverviewItem label="Queries today" value={summary.total_queries_today} />
               <OverviewItem label="Blocked today" value={summary.blocked_queries_today} />

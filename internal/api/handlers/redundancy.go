@@ -59,6 +59,17 @@ func (handler *Handler) redundancyPairing(responseWriter http.ResponseWriter, re
 		methodNotAllowed(responseWriter)
 		return
 	}
+	handler.configMu.Lock()
+	defer handler.configMu.Unlock()
+	var activeTrials int
+	if err := handler.store.DB.QueryRowContext(request.Context(), `SELECT COUNT(*) FROM troubleshooting_exceptions WHERE julianday(expires_at) > julianday('now')`).Scan(&activeTrials); err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	if activeTrials > 0 {
+		writeBadRequest(responseWriter, errors.New("finish or undo temporary troubleshooting tests before pairing DNS replicas"))
+		return
+	}
 	if handler.redundancy == nil {
 		writeError(responseWriter, errors.New("redundancy manager is unavailable"))
 		return

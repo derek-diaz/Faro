@@ -22,9 +22,12 @@ type cachedDeviceName struct {
 }
 
 type deviceNameResolver struct {
-	mu      sync.Mutex
-	entries map[string]cachedDeviceName
-	lookup  func(context.Context, string) ([]string, error)
+	mu         sync.Mutex
+	entries    map[string]cachedDeviceName
+	lookup     func(context.Context, string) ([]string, error)
+	pending    map[string]bool
+	slots      chan struct{}
+	generation uint64
 }
 
 // noinspection SpellCheckingInspection
@@ -33,13 +36,15 @@ const localDomainSuffix = ".localdomain"
 func newDeviceNameResolver() *deviceNameResolver {
 	return &deviceNameResolver{
 		entries: map[string]cachedDeviceName{},
+		pending: map[string]bool{},
+		slots:   make(chan struct{}, 8),
 		lookup:  net.DefaultResolver.LookupAddr,
 	}
 }
 
 // discoverDeviceNames prefers explicit Local DNS and UniFi names before bounded
-// reverse-DNS lookups. Concurrent lookups keep routers without PTR records from
-// adding one timeout per device to a large inventory load.
+// cached reverse-DNS names. Missing PTR records are resolved in the background
+// so a router timeout never delays a device panel.
 func (handler *Handler) discoverDeviceNames(ctx context.Context, clientIPs []string) map[string]deviceIdentity {
 	identities := make(map[string]deviceIdentity, len(clientIPs))
 	requested := uniqueDeviceAddresses(clientIPs)
@@ -105,45 +110,54 @@ func resolveReverseDeviceNames(ctx context.Context, clientIPs []string, identiti
 	if resolver == nil {
 		resolver = newDeviceNameResolver()
 	}
-	type result struct{ clientIP, name string }
-	results := make(chan result, len(clientIPs))
-	var wait sync.WaitGroup
-	for _, clientIP := range clientIPs {
+	for _, clientIP := range uniqueDeviceAddresses(clientIPs) {
 		if identities[clientIP].DisplayName != "" || net.ParseIP(clientIP) == nil {
 			continue
 		}
-		if cached, ok := resolver.cached(clientIP); ok {
-			if cached != "" {
-				identities[clientIP] = deviceIdentity{DisplayName: cached, NameSource: "reverse_dns"}
+		if name, ok := resolver.cached(clientIP); ok {
+			if name != "" {
+				identities[clientIP] = deviceIdentity{DisplayName: name, NameSource: "reverse_dns"}
 			}
 			continue
 		}
-		wait.Add(1)
-		go func(ip string) {
-			defer wait.Done()
-			lookupCtx, cancel := context.WithTimeout(ctx, 400*time.Millisecond)
-			defer cancel()
-			names, lookupErr := resolver.lookup(lookupCtx, ip)
-			name := ""
-			if lookupErr == nil && len(names) > 0 {
-				name = friendlyHostname(names[0])
-				if !usefulHostname(name, ip) {
-					name = ""
-				}
-			}
-			resolver.store(ip, name)
-			results <- result{clientIP: ip, name: name}
-		}(clientIP)
+		resolver.resolveInBackground(clientIP)
 	}
+}
+
+func (resolver *deviceNameResolver) resolveInBackground(ip string) {
+	resolver.mu.Lock()
+	if resolver.pending == nil {
+		resolver.pending = map[string]bool{}
+	}
+	if resolver.slots == nil {
+		resolver.slots = make(chan struct{}, 8)
+	}
+	if resolver.pending[ip] {
+		resolver.mu.Unlock()
+		return
+	}
+	select {
+	case resolver.slots <- struct{}{}:
+	default:
+		resolver.mu.Unlock()
+		return
+	}
+	resolver.pending[ip] = true
+	resolver.mu.Unlock()
 	go func() {
-		wait.Wait()
-		close(results)
-	}()
-	for resolved := range results {
-		if resolved.name != "" {
-			identities[resolved.clientIP] = deviceIdentity{DisplayName: resolved.name, NameSource: "reverse_dns"}
+		defer func() { resolver.mu.Lock(); delete(resolver.pending, ip); resolver.mu.Unlock(); <-resolver.slots }()
+		ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+		defer cancel()
+		names, err := resolver.lookup(ctx, ip)
+		name := ""
+		if err == nil && len(names) > 0 {
+			name = friendlyHostname(names[0])
+			if !usefulHostname(name, ip) {
+				name = ""
+			}
 		}
-	}
+		resolver.store(ip, name)
+	}()
 }
 
 func uniqueDeviceAddresses(values []string) []string {
@@ -188,6 +202,7 @@ func (resolver *deviceNameResolver) store(clientIP, name string) {
 	}
 	resolver.mu.Lock()
 	resolver.entries[clientIP] = cachedDeviceName{name: name, expiresAt: time.Now().Add(ttl)}
+	resolver.generation++
 	resolver.mu.Unlock()
 }
 

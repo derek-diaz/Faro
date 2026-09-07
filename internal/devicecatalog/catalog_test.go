@@ -170,13 +170,36 @@ func TestCatalogRecognizesEufySecurityDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, domain := range []string{"security-app.eufylife.com", "webrtc-signal-us.eufylife.com"} {
-		prediction := catalog.Predict("", "192.168.1.96", []string{domain})
+		prediction := catalog.Predict("Eufy camera", "192.168.1.96", []string{domain})
 		if prediction.DeviceType != "Eufy Security Device" || prediction.Confidence != "high" {
 			t.Fatalf("Eufy endpoint %q predicted %#v", domain, prediction)
 		}
-		if prediction.DefinitionID != "eufy-security-device" || len(prediction.Evidence) != 1 {
+		if prediction.DefinitionID != "eufy-security-device" || len(prediction.Evidence) != 2 {
 			t.Fatalf("Eufy evidence = %#v", prediction)
 		}
+	}
+}
+
+func TestServiceIntegrationsDoNotIdentifyHardware(t *testing.T) {
+	catalog, err := loadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range []struct {
+		name    string
+		domains []string
+	}{
+		{"Cortex", []string{"owner-api.teslamotors.com", "api.tesla.com", "livepatch.canonical.com"}},
+		{"homeassistant", []string{"security-app.eufylife.com", "webrtc-signal-us.eufylife.com"}},
+	} {
+		prediction := catalog.Predict(sample.name, "192.168.7.228", sample.domains)
+		if prediction.DeviceType != "Unknown" || prediction.Confidence != "unknown" || len(prediction.Evidence) == 0 {
+			t.Fatalf("integration host %s: %#v", sample.name, prediction)
+		}
+	}
+	prediction := catalog.Predict("Tesla vehicle", "192.168.7.40", []string{"api.tesla.com", "owner-api.teslamotors.com"})
+	if prediction.DeviceType != "Tesla" {
+		t.Fatalf("corroborated identity: %#v", prediction)
 	}
 }
 
@@ -493,7 +516,7 @@ func TestManagerLoadsVersionedExternalCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	updated := strings.Replace(string(data), `"catalog_version": "2026.07.17"`, `"catalog_version": "custom.1"`, 1)
+	updated := strings.Replace(string(data), `"catalog_version": "2026.09.05"`, `"catalog_version": "custom.1"`, 1)
 	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
 		t.Fatal(err)
 	}

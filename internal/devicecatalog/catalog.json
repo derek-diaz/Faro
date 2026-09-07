@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_version": "2026.07.17",
+  "catalog_version": "2026.09.05",
   "confidence": {
     "medium_score": 3,
     "high_score": 7
@@ -29,7 +29,7 @@
         { "suffix": "tesla.com", "weight": 4 },
         { "suffix": "teslamotors.com", "weight": 4 }
       ],
-      "requirements": { "minimum_score": 3 }
+      "requirements": { "require_name": true, "minimum_score": 3 }
     },
     {
       "id": "synology-nas",
@@ -193,7 +193,7 @@
         { "suffix": "security-app.eufylife.com", "weight": 7 },
         { "suffix": "webrtc-signal-us.eufylife.com", "weight": 7 }
       ],
-      "requirements": { "minimum_score": 7 }
+      "requirements": { "require_name": true, "minimum_score": 7 }
     },
     {
       "id": "aqara-smart-home-device",

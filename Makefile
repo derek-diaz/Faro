@@ -1,4 +1,4 @@
-.PHONY: up down logs dev dev-down dev-logs api-test frontend-build backend-build dns-reliability
+.PHONY: up down logs dev dev-down dev-logs api-test frontend-build backend-build dns-reliability dns-test
 
 up:
 	docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
@@ -23,6 +23,9 @@ api-test:
 
 dns-reliability:
 	bash tools/dns-reliability.sh
+
+dns-test:
+	go run ./cmd/faro-dns-test $(ARGS)
 
 backend-build:
 	go build ./cmd/faro-api

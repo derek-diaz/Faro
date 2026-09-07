@@ -98,7 +98,7 @@ func grouped(ctx context.Context, database *sql.DB, query string, args ...any) [
 }
 
 func recentQueries(ctx context.Context, database *sql.DB) []map[string]any {
-	rows, err := database.QueryContext(ctx, `SELECT timestamp, client_ip, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata FROM dns_queries ORDER BY timestamp DESC, id DESC LIMIT 8`)
+	rows, err := database.QueryContext(ctx, `SELECT q.timestamp, q.client_ip, q.domain, q.query_type, q.action, q.source, q.upstream, q.latency_ms, q.rcode, q.decision_reason, q.decision_metadata, `+queryDeviceNameField+` AS device_name FROM dns_queries q LEFT JOIN devices a ON a.id = q.device_id ORDER BY q.timestamp DESC, q.id DESC LIMIT 8`)
 	if err != nil {
 		return make([]map[string]any, 0)
 	}

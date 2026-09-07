@@ -5786,6 +5786,37 @@ dialog.protection-wizard-backdrop { width: auto; max-width: none; height: auto; 
   background: rgba(6, 17, 31, 0.35);
 }
 
+.troubleshooter { display: grid; gap: 20px; padding: 20px 0; }
+.troubleshooter h3 { margin: 0 0 8px; font-size: 16px; }
+.troubleshooter p { margin: 8px 0; line-height: 1.6; }
+.troubleshooter small { display: block; color: var(--text-muted); line-height: 1.5; }
+.troubleshooting-intro { display: flex; gap: 14px; color: var(--accent); align-items: flex-start; }
+.troubleshooting-intro p { color: var(--text-muted); margin: 0; }
+.troubleshooting-step { border: 1px solid var(--border); border-radius: 14px; padding: 20px; background: var(--surface); }
+.troubleshooting-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 14px 0 8px; }
+.troubleshooting-scope { padding: 12px 14px; background: var(--warn-soft); border-radius: 8px; }
+.troubleshooting-candidates { display: grid; gap: 1px; margin: 16px 0; }
+.troubleshooting-candidate { display: flex; align-items: flex-start; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+.troubleshooting-candidate input { width: 18px; height: 18px; flex: 0 0 18px; margin-top: 4px; }
+.troubleshooting-candidate span { min-width: 0; overflow-wrap: anywhere; }
+.troubleshooting-candidate .table-link { text-align: left; overflow-wrap: anywhere; }
+.troubleshooting-empty { color: var(--text-muted); padding: 10px 0; }
+.troubleshooting-trial { padding: 16px; margin-top: 14px; background: var(--surface-muted); border: 1px solid var(--border); border-radius: 10px; overflow-wrap: anywhere; }
+.troubleshooting-error { padding: 14px; background: var(--blocked-soft); border-radius: 8px; }
+.troubleshooting-notice { padding: 14px; background: var(--accent-soft); border-radius: 8px; }
+@media (max-width: 640px) { .troubleshooting-step { padding: 14px; } .device-view-tabs { flex-wrap: wrap; } }
+
+dialog.drawer-backdrop:modal {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  max-height: none;
+  color: inherit;
+}
+
 .domain-drawer {
   position: fixed;
   top: 0;
@@ -16716,3 +16747,7 @@ body .selected-server {
     justify-content: center;
   }
 }
+
+.domain-action-context { margin: 0; color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+
+.troubleshooting-candidate .table-link { padding: 0; background: transparent; color: var(--accent); border: 0; border-radius: 0; min-height: auto; box-shadow: none; }

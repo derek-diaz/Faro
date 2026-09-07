@@ -209,7 +209,13 @@ func (handler *Handler) deviceInventoryRevision(request *http.Request) (string, 
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%d:%s:%s:%s:%s:%s:%s:%s", maxQueryID, devicesUpdated, addressesUpdated,
+	var discoveryRevision uint64
+	if handler.deviceNames != nil {
+		handler.deviceNames.mu.Lock()
+		discoveryRevision = handler.deviceNames.generation
+		handler.deviceNames.mu.Unlock()
+	}
+	return fmt.Sprintf("%d:%d:%s:%s:%s:%s:%s:%s:%s", discoveryRevision, maxQueryID, devicesUpdated, addressesUpdated,
 		namesUpdated, classificationsUpdated, membershipsUpdated, profilesUpdated, recordsUpdated), nil
 }
 
@@ -528,6 +534,8 @@ func (handler *Handler) inventorySummary(request *http.Request, start string) (d
 			COALESCE((SELECT SUM(blocked) FROM day), 0),
 			COALESCE((
 				SELECT COALESCE(NULLIF(TRIM(d.name), ''), NULLIF(TRIM(n.name), ''), (
+ SELECT hostname FROM dns_records WHERE type IN ('A', 'AAAA') AND value = (SELECT address FROM device_addresses WHERE device_id = d.id ORDER BY last_seen_at DESC, id DESC LIMIT 1) ORDER BY updated_at DESC, id DESC LIMIT 1
+ ), (
 					SELECT address FROM device_addresses
 					WHERE device_id = d.id ORDER BY last_seen_at DESC, id DESC LIMIT 1
 				), 'None')

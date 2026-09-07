@@ -524,7 +524,8 @@ func (manager *Manager) localHosts(ctx context.Context) (string, error) {
 }
 
 func (manager *Manager) blockHostsForProtection(ctx context.Context, protectionID int64) (string, error) {
-	allowlist, err := domains(ctx, manager.Store, `SELECT domain FROM protection_allow_entries WHERE protection_id = ?`, protectionID)
+	allowlist, err := domains(ctx, manager.Store, `SELECT domain FROM protection_allow_entries WHERE protection_id = ?
+		UNION SELECT domain FROM troubleshooting_exceptions WHERE protection_id = ? AND julianday(expires_at) > julianday('now')`, protectionID, protectionID)
 	if err != nil {
 		return "", err
 	}
@@ -701,6 +702,24 @@ func (manager *Manager) currentTemporalSignature(ctx context.Context, now time.T
 		}
 	}
 	if err := pausedRows.Err(); err != nil {
+		return "", err
+	}
+	if err := pausedRows.Close(); err != nil {
+		return "", err
+	}
+	trialRows, err := manager.Store.DB.QueryContext(ctx, `SELECT id FROM troubleshooting_exceptions WHERE julianday(expires_at) > julianday(?) ORDER BY id`, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return "", err
+	}
+	defer trialRows.Close()
+	for trialRows.Next() {
+		var id int64
+		if err := trialRows.Scan(&id); err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&value, "t:%d;", id)
+	}
+	if err := trialRows.Err(); err != nil {
 		return "", err
 	}
 	return value.String(), nil
@@ -1302,6 +1321,10 @@ func ExplainDomainForClient(ctx context.Context, store *db.Store, domain, client
 		return decision
 	}
 	decision.Protection = &RuleMatch{Kind: "protection", ID: protectionID, Name: protectionName}
+	var trialID int64
+	if store.DB.QueryRowContext(ctx, `SELECT id FROM troubleshooting_exceptions WHERE protection_id = ? AND domain = ? AND julianday(expires_at) > julianday('now') LIMIT 1`, protectionID, normalized).Scan(&trialID) == nil {
+		decision.Allowlist = &RuleMatch{Kind: "allowlist", ID: trialID, Name: protectionName + " temporary troubleshooting exception"}
+	}
 	if localID != 0 {
 		decision.LocalRecord = &LocalRecordMatch{ID: localID, Type: localType, Value: localValue}
 	}

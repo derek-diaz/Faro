@@ -17,6 +17,50 @@ import (
 
 const testPassphrase = "correct horse backup staple"
 
+func TestPortableBackupDoesNotReactivateTemporaryTests(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB.Exec(`INSERT INTO devices(id,name) VALUES(1,'Trial device');
+		INSERT INTO troubleshooting_exceptions(token,client_ip,device_id,protection_id,domain,expires_at)
+		SELECT 'trial','192.0.2.10',1,id,'temporary.example',datetime('now','+10 minutes') FROM protection_profiles WHERE is_default=1`); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store)
+	path, _, cleanup, err := service.Create(context.Background(), testPassphrase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	input, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, transaction, err := service.BeginRestore(context.Background(), input, testPassphrase)
+	_ = input.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM troubleshooting_exceptions`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("portable restore reactivated a temporary exception")
+	}
+	if err := transaction.Rollback(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM troubleshooting_exceptions`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("failed restore did not recover the original test")
+	}
+}
+
 func TestEncryptedBackupRestoreLifecycle(t *testing.T) {
 	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
 	if err != nil {
@@ -573,6 +617,9 @@ func TestRestoreTransactionRollbackRecoversPreviousDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if _, err := store.DB.Exec(`INSERT INTO troubleshooting_exceptions(token,client_ip,device_id,protection_id,domain,expires_at) SELECT 'rollback-test','192.0.2.10',?,id,'temporary.example',datetime('now','+10 minutes') FROM protection_profiles WHERE is_default=1`, deviceID); err != nil {
+		t.Fatal(err)
+	}
 	input, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -601,10 +648,11 @@ func TestRestoreTransactionRollbackRecoversPreviousDatabase(t *testing.T) {
 		t.Fatalf("rolled back upstream = %q, want current value", currentUpstream)
 	}
 	for table, want := range map[string]int{
-		"auth_sessions":          1,
-		"device_names":           1,
-		"unifi_client_snapshots": 1,
-		"device_classifications": 1,
+		"troubleshooting_exceptions": 1,
+		"auth_sessions":              1,
+		"device_names":               1,
+		"unifi_client_snapshots":     1,
+		"device_classifications":     1,
 	} {
 		var count int
 		if err := store.DB.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&count); err != nil {

@@ -21,10 +21,11 @@ const (
 )
 
 type activityWindow struct {
-	enabled       bool
-	from          time.Time
-	to            time.Time
-	bucketSeconds int
+	enabled          bool
+	from             time.Time
+	to               time.Time
+	bucketSeconds    int
+	relativeDuration time.Duration
 }
 
 type activityTimelineBucket struct {
@@ -102,14 +103,28 @@ func (handler *Handler) events(responseWriter http.ResponseWriter, request *http
 		writeBadRequest(responseWriter, err)
 		return
 	}
+	detail := request.URL.Query().Get("detail")
+	if detail == "rows" {
+		items := pagedActivityEventsWithMore(request.Context(), handler.store.DB, page, pageSize, search, scope, window)
+		hasMore := len(items) > pageSize
+		if hasMore {
+			items = items[:pageSize]
+		}
+		writeJSON(responseWriter, http.StatusOK, map[string]any{"items": items, "page": page, "page_size": pageSize, "has_more": hasMore})
+		return
+	}
 	counts := handler.cachedActivityCounts(request.Context(), search, window)
 	total := counts[scope]
 	totalPages := 0
 	if total > 0 {
 		totalPages = (total + pageSize - 1) / pageSize
 	}
+	var items []map[string]any
+	if detail != "summary" {
+		items = pagedActivityEvents(request.Context(), handler.store.DB, page, pageSize, search, scope, window)
+	}
 	writeJSON(responseWriter, http.StatusOK, map[string]any{
-		"items":       pagedActivityEvents(request.Context(), handler.store.DB, page, pageSize, search, scope, window),
+		"items":       items,
 		"page":        page,
 		"page_size":   pageSize,
 		"total":       total,
@@ -151,7 +166,9 @@ func parseActivityWindow(values url.Values) (activityWindow, error) {
 	if !ok {
 		return activityWindow{}, fmt.Errorf("unsupported activity range %q", preset)
 	}
-	return newActivityWindow(now.Add(-duration), now)
+	window, err := newActivityWindow(now.Add(-duration), now)
+	window.relativeDuration = duration
+	return window, err
 }
 
 func parseActivityTime(raw string) (time.Time, error) {
@@ -204,6 +221,9 @@ func activityBucketSeconds(span time.Duration) int {
 func (window activityWindow) cacheKey() string {
 	if !window.enabled {
 		return "all"
+	}
+	if window.relativeDuration > 0 {
+		return "recent:" + window.relativeDuration.String()
 	}
 	return window.from.Format(time.RFC3339Nano) + "|" + window.to.Format(time.RFC3339Nano)
 }
@@ -449,6 +469,10 @@ func localEvents(ctx context.Context, database *sql.DB, limit int, search string
 	return activityEvents(ctx, database, limit, search, "all")
 }
 
+func pagedActivityEventsWithMore(ctx context.Context, database *sql.DB, page, pageSize int, search, scope string, window activityWindow) []map[string]any {
+	return activityRecordsToMaps(activityRecords(ctx, database, pageSize+1, (page-1)*pageSize, search, scope, window))
+}
+
 func pagedActivityEvents(ctx context.Context, database *sql.DB, page, pageSize int, search, scope string, window activityWindow) []map[string]any {
 	offset := (page - 1) * pageSize
 	return activityRecordsToMaps(activityRecords(ctx, database, pageSize, offset, search, scope, window))
@@ -505,14 +529,14 @@ const (
 	queryActionField         = "q.action"
 	querySourceField         = "q.source"
 	queryTimestampField      = "q.timestamp"
-	queryDeviceNameField     = "a.name"
+	queryDeviceNameField     = "COALESCE(NULLIF(TRIM(a.name), ''), (SELECT NULLIF(TRIM(n.name), '') FROM device_names n WHERE n.device_id = a.id AND n.source = 'unifi'), (SELECT hostname FROM dns_records WHERE value = q.client_ip ORDER BY updated_at DESC, id DESC LIMIT 1), q.client_ip)"
 	deviceNameAggregate      = "COALESCE(MAX(a.name), '')"
 	deviceLocationAggregate  = "COALESCE(MAX(a.location), '')"
 	deviceTimestampAggregate = "MIN(q.timestamp)"
 )
 
 func activityRecords(ctx context.Context, database *sql.DB, limit, offset int, search, scope string, window activityWindow) []activityRecord {
-	query, args := activityRecordsQuery(search, scope, window)
+	query, args := activityRecordsQuery(search, scope, window, limit+offset)
 	args = append(args, limit, offset)
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -536,7 +560,7 @@ func activityRecords(ctx context.Context, database *sql.DB, limit, offset int, s
 	return items
 }
 
-func activityRecordsQuery(search, scope string, window activityWindow) (string, []any) {
+func activityRecordsQuery(search, scope string, window activityWindow, maximum ...int) (string, []any) {
 	parts := make([]string, 0, 3)
 	args := make([]any, 0, 6)
 
@@ -556,6 +580,11 @@ func activityRecordsQuery(search, scope string, window activityWindow) (string, 
 		args = append(args, queryArgs...)
 	}
 
+	if len(maximum) > 0 && maximum[0] > 0 {
+		for i, part := range parts {
+			parts[i] = fmt.Sprintf("SELECT * FROM (%s ORDER BY timestamp DESC, record_id DESC, record_key DESC LIMIT %d)", part, maximum[0])
+		}
+	}
 	query := activityRecordsUnionQuery(parts)
 	return query, args
 }
@@ -596,6 +625,7 @@ func activityDeviceRecordsPart(search string, window activityWindow) (string, []
 		       COALESCE(MAX(a.name), '') AS device_name, COALESCE(MAX(a.location), '') AS location
 		FROM dns_queries q
 		LEFT JOIN devices a ON a.id = q.device_id
+ WHERE q.client_ip IN (SELECT client_ip FROM dns_queries EXCEPT SELECT address FROM device_addresses)
 		GROUP BY q.client_ip`
 	legacyClauses, legacyArgs := activityFilterClauses(search, []string{queryClientIPField, deviceNameAggregate, deviceLocationAggregate}, deviceTimestampAggregate, window)
 	legacyClauses = append(legacyClauses, `NOT EXISTS (SELECT 1 FROM device_addresses known WHERE known.address = q.client_ip)`)
@@ -613,7 +643,7 @@ func activityQueryRecordsPart(search, scope string, window activityWindow) (stri
 		       q.query_type AS query_type, q.action AS action, q.upstream AS upstream, q.rcode AS rcode,
 		       q.latency_ms AS latency_ms, q.decision_reason AS decision_reason,
 		       q.decision_metadata AS decision_metadata,
-		       COALESCE(a.name, '') AS device_name, '' AS location
+		       ` + queryDeviceNameField + ` AS device_name, '' AS location
 		FROM dns_queries q
 		LEFT JOIN devices a ON a.id = q.device_id`
 	clauses, args := activityFilterClauses(search, []string{queryDomainField, queryClientIPField, queryTypeField, queryActionField, querySourceField, queryDeviceNameField}, queryTimestampField, window)
@@ -753,6 +783,7 @@ func activityTimelineDevicePart(search string, window activityWindow, from strin
 		SELECT faro_activity_bucket AS bucket_index, 1 AS total, 0 AS blocked
 		FROM dns_queries q
 		LEFT JOIN devices a ON a.id = q.device_id
+ WHERE q.client_ip IN (SELECT client_ip FROM dns_queries EXCEPT SELECT address FROM device_addresses)
 		GROUP BY q.client_ip`
 	legacyQuery = strings.Replace(legacyQuery, "faro_activity_bucket", activityTimelineBucketExpression(deviceTimestampAggregate), 1)
 	legacyArgs := []any{from, bucketSeconds}
@@ -855,6 +886,7 @@ func deviceRecordMap(record activityRecord) map[string]any {
 	}
 	return map[string]any{
 		"id":          "device-first-seen-" + record.clientIP,
+		"device_name": deviceName,
 		"timestamp":   record.timestamp,
 		"type":        "device.first_seen",
 		"severity":    "info",
@@ -891,6 +923,7 @@ func queryRecordMap(record activityRecord) map[string]any {
 	}
 	return map[string]any{
 		"id":          fmt.Sprintf("query-%d", record.recordID),
+		"device_name": deviceName,
 		"timestamp":   record.timestamp,
 		"type":        eventType,
 		"severity":    severity,
@@ -962,6 +995,7 @@ func activityDeviceCountPart(search string, window activityWindow) (string, []an
 		SELECT 'device' AS kind, '' AS source, '' AS action
 		FROM dns_queries q
 		LEFT JOIN devices a ON a.id = q.device_id
+ WHERE q.client_ip IN (SELECT client_ip FROM dns_queries EXCEPT SELECT address FROM device_addresses)
 		GROUP BY q.client_ip`
 	legacyClauses, legacyArgs := activityFilterClauses(search, []string{queryClientIPField, deviceNameAggregate, deviceLocationAggregate}, deviceTimestampAggregate, window)
 	legacyClauses = append(legacyClauses, `NOT EXISTS (SELECT 1 FROM device_addresses known WHERE known.address = q.client_ip)`)
@@ -991,7 +1025,14 @@ func (handler *Handler) cachedActivityCounts(ctx context.Context, search string,
 		handler.activityCountsMu.Unlock()
 		return counts
 	}
+	generation := handler.activityCountsGeneration
+	handler.activityCountsMu.Unlock()
 	counts := activityCounts(ctx, handler.store.DB, search, window)
+	handler.activityCountsMu.Lock()
+	if generation != handler.activityCountsGeneration {
+		handler.activityCountsMu.Unlock()
+		return counts
+	}
 	if handler.activityCountsCache == nil {
 		handler.activityCountsCache = map[string]activityCountCacheEntry{}
 	}
@@ -1009,6 +1050,7 @@ func (handler *Handler) cachedActivityCounts(ctx context.Context, search string,
 func (handler *Handler) invalidateActivityCounts() {
 	handler.activityCountsMu.Lock()
 	handler.activityCountsCache = nil
+	handler.activityCountsGeneration++
 	handler.activityCountsMu.Unlock()
 }
 

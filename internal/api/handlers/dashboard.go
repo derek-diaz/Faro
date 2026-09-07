@@ -52,9 +52,17 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 	settings := dashboardSettingsSummary(request.Context(), handler.store.DB)
 	total := traffic.total
 	blocked := traffic.blocked
-	topClients := grouped(request.Context(), handler.store.DB, `SELECT client_ip, COUNT(*) FROM dns_queries WHERE timestamp >= ? GROUP BY client_ip ORDER BY COUNT(*) DESC LIMIT 5`, start)
+	devices, _, inventory, err := handler.loadDeviceInventory(request, deviceInventoryOptions{page: 1, pageSize: 5, sort: "requests", direction: "desc", activeToday: true, paged: true})
+	if err != nil {
+		writeError(responseWriter, err)
+		return
+	}
+	topClients := make([]map[string]any, 0, len(devices))
+	for _, device := range devices {
+		topClients = append(topClients, map[string]any{"label": device["display_name"], "count": device["total_queries_today"], "client_ip": device["client_ip"], "device_id": device["device_id"]})
+	}
 	topBlocked := grouped(request.Context(), handler.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? AND action = 'blocked' GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start)
-	liveCache := handler.coreDNSCacheMetrics(request.Context())
+	liveCache, metricsPending := handler.cachedCoreDNSCacheMetrics()
 	upstreamSnapshot := upstreamhealth.Snapshot{Status: "unknown", Summary: "Upstream health has not been checked yet.", Items: make([]upstreamhealth.Probe, 0)}
 	if handler.upstreams != nil {
 		upstreamSnapshot = handler.upstreams.Snapshot()
@@ -62,6 +70,8 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 
 	payload := map[string]any{
 		"total_queries_today":   total,
+		"active_devices_today":  inventory.ActiveToday,
+		"observed_devices":      inventory.Observed,
 		"blocked_queries_today": blocked,
 		"block_percentage":      percentage(blocked, total),
 		"enabled_blocklists":    counts.enabledBlocklists,
@@ -69,6 +79,7 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 		"cache": map[string]any{
 			"enabled":                     settings.cacheEnabled != "false",
 			"metrics_available":           liveCache.available,
+			"metrics_pending":             metricsPending,
 			"entries":                     liveCache.entries,
 			"hits_since_restart":          liveCache.hits,
 			"requests_since_restart":      liveCache.requests,
@@ -81,7 +92,7 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 		},
 		"network_summary": networkSummary(request.Context(), handler.store.DB, networkSummaryInput{
 			start: start, blocked: blocked, newDevices: counts.newDevices, newDevicesKnown: true, topClients: topClients, topBlocked: topBlocked,
-			upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available,
+			upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available, dnsMetricsPending: metricsPending,
 		}),
 		"health_cards": healthCards(request.Context(), handler.store.DB, healthCardsInput{
 			total: total, blocked: blocked, enabledBlocklists: counts.enabledBlocklists, blockEntries: counts.blockEntries,
@@ -89,11 +100,11 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 			cacheAnswers: traffic.cacheHits, forwardedAnswers: traffic.upstreamQueries,
 			trafficCountsKnown:  true,
 			upstreams:           upstreamSnapshot,
-			dnsMetricsAvailable: liveCache.available,
+			dnsMetricsAvailable: liveCache.available, dnsMetricsPending: metricsPending,
 		}),
 		"stories": dashboardStories(request.Context(), handler.store.DB, dashboardStoriesInput{
 			start: start, blocked: blocked, newDevices: counts.newDevices, newDevicesKnown: true, topClients: topClients, topBlocked: topBlocked,
-			reloadFailures: counts.reloadFailures, upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available,
+			reloadFailures: counts.reloadFailures, upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available, dnsMetricsPending: metricsPending,
 		}),
 		"whats_new":                whatsNew(request.Context(), handler.store.DB, start),
 		"sparklines":               dashboardSparklines(request.Context(), handler.store.DB),
@@ -182,6 +193,30 @@ type cacheMetrics struct {
 	requests  float64
 }
 
+// Health probes must not delay traffic views when the resolver is unavailable.
+func (handler *Handler) cachedCoreDNSCacheMetrics() (cacheMetrics, bool) {
+	if strings.TrimSpace(handler.metricsURL) == "" {
+		return cacheMetrics{}, false
+	}
+	handler.cacheMetricsMu.Lock()
+	defer handler.cacheMetricsMu.Unlock()
+	if !handler.cacheMetricsRefreshing && (handler.cacheMetricsCheckedAt.IsZero() || time.Since(handler.cacheMetricsCheckedAt) > 15*time.Second) {
+		handler.cacheMetricsRefreshing = true
+		go func() {
+			result := handler.coreDNSCacheMetrics(context.Background())
+			handler.cacheMetricsMu.Lock()
+			handler.cacheMetricsValue = result
+			handler.cacheMetricsCheckedAt = time.Now()
+			handler.cacheMetricsRefreshing = false
+			handler.cacheMetricsMu.Unlock()
+			handler.dashboardMu.Lock()
+			handler.dashboardCache = dashboardCacheEntry{}
+			handler.dashboardMu.Unlock()
+		}()
+	}
+	return handler.cacheMetricsValue, handler.cacheMetricsCheckedAt.IsZero()
+}
+
 func (handler *Handler) coreDNSCacheMetrics(ctx context.Context) cacheMetrics {
 	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -242,10 +277,11 @@ type networkSummaryInput struct {
 	topBlocked          []map[string]any
 	upstreams           upstreamhealth.Snapshot
 	dnsMetricsAvailable bool
+	dnsMetricsPending   bool
 }
 
 func networkSummary(ctx context.Context, database *sql.DB, input networkSummaryInput) map[string]any {
-	headline, messages := networkHeadline(input.blocked, input.upstreams, input.dnsMetricsAvailable)
+	headline, messages := networkHeadline(input.blocked, input.upstreams, input.dnsMetricsAvailable, input.dnsMetricsPending)
 	messages = appendNetworkHighlights(messages, input.topClients, input.topBlocked)
 	newDevices := input.newDevices
 	if !input.newDevicesKnown {
@@ -268,10 +304,12 @@ func networkSummary(ctx context.Context, database *sql.DB, input networkSummaryI
 	return map[string]any{"headline": headline, "messages": messages}
 }
 
-func networkHeadline(blocked int, upstreams upstreamhealth.Snapshot, dnsMetricsAvailable bool) (string, []string) {
+func networkHeadline(blocked int, upstreams upstreamhealth.Snapshot, dnsMetricsAvailable bool, pending ...bool) (string, []string) {
 	headline := "Everything looks normal."
 	messages := make([]string, 0, 4)
 	switch {
+	case len(pending) > 0 && pending[0]:
+		return "Checking network health", []string{"Traffic is ready while Faro checks the DNS engine."}
 	case !dnsMetricsAvailable:
 		headline = "The DNS engine health check is unavailable."
 		messages = append(messages, "Faro could not reach the CoreDNS metrics endpoint.")
@@ -321,11 +359,14 @@ type dashboardStoriesInput struct {
 	reloadFailures      int
 	upstreams           upstreamhealth.Snapshot
 	dnsMetricsAvailable bool
+	dnsMetricsPending   bool
 }
 
 func dashboardStories(ctx context.Context, database *sql.DB, input dashboardStoriesInput) []map[string]any {
 	stories := make([]map[string]any, 0, 4)
-	if !input.dnsMetricsAvailable {
+	if input.dnsMetricsPending {
+		stories = append(stories, story("Checking DNS engine health.", "Traffic is ready; the engine health check is still running.", "info"))
+	} else if !input.dnsMetricsAvailable {
 		stories = append(stories, story("DNS engine health is unavailable.", "Faro could not reach CoreDNS metrics.", "critical"))
 	} else if input.upstreams.Status == "critical" {
 		stories = append(stories, story("Upstream DNS is unavailable.", input.upstreams.Summary, "critical"))
@@ -344,7 +385,7 @@ func dashboardStories(ctx context.Context, database *sql.DB, input dashboardStor
 		stories = append(stories, story(countedStory(newDevices, "new device joined today.", "new devices joined today."), "New clients are now visible in Devices.", "info"))
 	}
 	if input.blocked > 0 {
-		stories = append(stories, story("Filtering blocked "+countedStory(input.blocked, "request today.", "requests today."), firstLabelSentence("Most blocked domain", input.topBlocked), "warning"))
+		stories = append(stories, story("Filtering blocked "+countedStory(input.blocked, "request today.", "requests today."), firstLabelSentence("Most blocked domain", input.topBlocked), "success"))
 	}
 	if len(input.topClients) > 0 {
 		stories = append(stories, story("Busiest device today.", firstLabelSentence("Top active device", input.topClients), "info"))
@@ -387,6 +428,7 @@ type healthCardsInput struct {
 	trafficCountsKnown  bool
 	upstreams           upstreamhealth.Snapshot
 	dnsMetricsAvailable bool
+	dnsMetricsPending   bool
 }
 
 func healthCards(ctx context.Context, database *sql.DB, input healthCardsInput) []map[string]any {
@@ -396,7 +438,7 @@ func healthCards(ctx context.Context, database *sql.DB, input healthCardsInput) 
 		forwardedAnswers = scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'upstream'`)
 	}
 	return []map[string]any{
-		dnsHealthCard(input.dnsMetricsAvailable, input.reloadFailures),
+		dnsHealthCard(input.dnsMetricsAvailable, input.reloadFailures, input.dnsMetricsPending),
 		upstreamHealthCard(input.upstreams),
 		{"label": "Devices", "value": fmt.Sprintf("%d observed", input.deviceCount), "detail": "From local query data", "status": "healthy"},
 		{"label": "Filtering", "value": fmt.Sprintf("%d domains", input.blockEntries), "detail": fmt.Sprintf("%d enabled lists", input.enabledBlocklists), "status": ternary(input.blockEntries > 0, "healthy", "warning")},
@@ -405,7 +447,10 @@ func healthCards(ctx context.Context, database *sql.DB, input healthCardsInput) 
 	}
 }
 
-func dnsHealthCard(metricsAvailable bool, reloadFailures int) map[string]any {
+func dnsHealthCard(metricsAvailable bool, reloadFailures int, pending ...bool) map[string]any {
+	if len(pending) > 0 && pending[0] {
+		return map[string]any{"label": "DNS", "value": "Checking", "detail": "Engine health check in progress", "status": "info"}
+	}
 	if !metricsAvailable {
 		return map[string]any{"label": "DNS", "value": "Unavailable", "detail": "CoreDNS metrics could not be reached", "status": "critical"}
 	}

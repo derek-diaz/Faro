@@ -71,8 +71,9 @@ type AddressSignal struct {
 }
 
 type Requirements struct {
-	MinimumScore            int `json:"minimum_score"`
-	MinimumDomainSignatures int `json:"minimum_domain_signatures,omitempty"`
+	RequireName             bool `json:"require_name,omitempty"`
+	MinimumScore            int  `json:"minimum_score"`
+	MinimumDomainSignatures int  `json:"minimum_domain_signatures,omitempty"`
 }
 
 type Evidence struct {
@@ -296,7 +297,17 @@ func (catalog Catalog) Predict(name, address string, domains []string) Predictio
 	now := time.Now().UTC().Format(time.RFC3339)
 	inputHash := signalHash(catalog.CatalogVersion, name, normalizedAddress, normalizedDomains)
 	if len(candidates) == 0 {
-		return unknownPrediction(catalog.CatalogVersion, inputHash, now, nil)
+		var evidence []Evidence
+		for _, definition := range catalog.Definitions {
+			candidate := scoreDefinition(definition, nameTokens, normalizedAddress, normalizedDomains)
+			if definition.Requirements.RequireName && !candidate.nameMatch && candidate.domains > 0 {
+				for _, item := range candidate.evidence {
+					item.Description += "; service traffic alone does not identify this device"
+					evidence = append(evidence, item)
+				}
+			}
+		}
+		return unknownPrediction(catalog.CatalogVersion, inputHash, now, evidence)
 	}
 	sort.SliceStable(candidates, func(leftIndex, rightIndex int) bool {
 		if candidates[leftIndex].score == candidates[rightIndex].score {
@@ -337,6 +348,9 @@ func collectCandidates(definitions []Definition, nameTokens map[string]bool, add
 	candidates := make([]predictionCandidate, 0, len(definitions))
 	for _, definition := range definitions {
 		current := scoreDefinition(definition, nameTokens, address, domains)
+		if definition.Requirements.RequireName && !current.nameMatch {
+			continue
+		}
 		if !current.nameMatch && current.domains < definition.Requirements.MinimumDomainSignatures {
 			continue
 		}

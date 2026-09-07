@@ -84,6 +84,7 @@ export type ProtectionInput = {
 };
 
 export type DNSQuery = {
+  device_name?: string;
   id?: number;
   timestamp: string;
   client_ip: string;
@@ -235,7 +236,9 @@ export type DomainSummary = {
   last_seen?: string | null;
   clients: CountItem[];
   query_types: CountItem[];
-  status: "Allowed" | "Blocked" | "Mixed";
+  status: "Allowed" | "Blocked" | "Mixed" | "Not seen";
+  current_home_decision: DNSDecision;
+  home_allow_exception: boolean;
   recent_queries: DNSQuery[];
   recent_events: FaroEvent[];
 };
@@ -246,6 +249,7 @@ export type NetworkSummary = {
 };
 
 export type FaroEvent = {
+  device_name?: string;
   id: string;
   timestamp: string;
   type: OpenString<
@@ -291,7 +295,11 @@ export type ActivityTimeline = {
   buckets: ActivityTimelineBucket[];
 };
 
+export type ActivityRows = Pick<ActivityPage, "items" | "page" | "page_size" | "has_more">;
+export type ActivitySummary = Pick<ActivityPage, "total" | "total_pages" | "counts" | "timeline">;
+
 export type ActivityPage = {
+  has_more?: boolean;
   items: FaroEvent[];
   page: number;
   page_size: number;
@@ -327,6 +335,8 @@ export type WhatsNew = {
 };
 
 export type DashboardSummary = {
+  active_devices_today: number;
+  observed_devices: number;
   total_queries_today: number;
   blocked_queries_today: number;
   block_percentage: number;
@@ -352,6 +362,7 @@ export type DashboardSummary = {
 export type CacheSummary = {
   enabled: boolean;
   metrics_available: boolean;
+  metrics_pending?: boolean;
   entries: number;
   hits_since_restart: number;
   requests_since_restart: number;
@@ -364,6 +375,8 @@ export type CacheSummary = {
 };
 
 export type CountItem = {
+  client_ip?: string;
+  device_id?: number;
   label: string;
   count: number;
 };
@@ -644,7 +657,18 @@ async function backupRequest(path: string, init: RequestInit): Promise<Response>
   return response;
 }
 
+export type TroubleshootingTrial = {
+  id: number; token: string; device_id: number; client_ip: string; protection_id: number; protection_name: string; domain: string; expires_at: string;
+};
+export type TroubleshootingReport = {
+  client_ip: string; device_id: number; protection_id: number; protection_name: string; since: string;
+  items: { domain: string; requests: number; blocked: number; failed: number; last_seen: string; decision: DNSDecision & { action: string; reason: string } }[];
+  trials: TroubleshootingTrial[]; truncated: boolean; temporary_tests_available: boolean;
+};
+
 export const api = {
+  troubleshooting: (clientIP: string, since: string) => request<TroubleshootingReport>(`/api/troubleshooting?client_ip=${encodeURIComponent(clientIP)}&since=${encodeURIComponent(since)}`),
+  changeTroubleshooting: (input: { action: "test" | "keep" | "undo"; client_ip: string; device_id: number; protection_id: number; domains: string[]; token?: string }) => request<{ token?: string; expires_at?: string; ok?: boolean }>("/api/troubleshooting", { method: "POST", body: JSON.stringify(input) }),
 	version: () => request<AppVersion>("/api/version"),
 	versionCheck: () => request<VersionCheck>("/api/version/check"),
 	authStatus: () => request<AuthStatus>("/api/auth/status"),
@@ -665,12 +689,13 @@ export const api = {
     request<{ ok: boolean }>(`/api/redundancy/nodes/${encodeURIComponent(nodeID)}`, { method: "DELETE" }),
   dashboard: () => request<DashboardSummary>("/api/dashboard"),
   queries: (search = "") => request<DNSQuery[]>(`/api/queries?search=${encodeURIComponent(search)}`),
-  events: (search = "", scope = "all", page = 1, pageSize = 50, range = "all", from = "", to = "") => {
+  events: <T = ActivityPage>(search = "", scope = "all", page = 1, pageSize = 50, range = "all", from = "", to = "", signal?: AbortSignal, detail?: "rows" | "summary") => {
     const params = new URLSearchParams({ search, scope, page: String(page), page_size: String(pageSize) });
+    if (detail) params.set("detail", detail);
     if (range && range !== "all") params.set("range", range);
     if (from) params.set("from", from);
     if (to) params.set("to", to);
-    return request<ActivityPage>(`/api/events?${params.toString()}`);
+    return request<T>(`/api/events?${params.toString()}`, { signal });
   },
   notifications: () => request<NotificationsResponse>("/api/notifications"),
   markNotificationRead: (id: string) => request<{ ok: boolean }>(`/api/notifications/${encodeURIComponent(id)}/read`, { method: "PUT" }),
@@ -681,11 +706,11 @@ export const api = {
     request<UpstreamProbeResponse>("/api/upstreams/probe", { method: "POST", body: JSON.stringify({ addresses, transport }) }),
   devices: () => request<DeviceSummary[]>("/api/devices"),
   deviceInventory: deviceInventoryRequest,
-  device: (clientIP: string) => request<DeviceSummary>(`/api/devices/${encodeURIComponent(clientIP)}`),
+  device: (clientIP: string, signal?: AbortSignal) => request<DeviceSummary>(`/api/devices/${encodeURIComponent(clientIP)}`, { signal }),
   deviceReplay: (clientIP: string, range = "7d") => request<DeviceReplay>(`/api/devices/${encodeURIComponent(clientIP)}/replay?range=${encodeURIComponent(range)}`),
   updateDeviceAlias: (clientIP: string, alias: { name: string; location?: string; notes?: string; device_type?: string }) =>
     request<{ ok: boolean }>(`/api/devices/${encodeURIComponent(clientIP)}/alias`, { method: "PUT", body: JSON.stringify(alias) }),
-  domainSummary: (domain: string) => request<DomainSummary>(`/api/domains/${encodeURIComponent(domain)}/summary`),
+  domainSummary: (domain: string, signal?: AbortSignal) => request<DomainSummary>(`/api/domains/${encodeURIComponent(domain)}/summary?include_events=false`, { signal }),
   search: (q: string) => request<SearchResults>(`/api/search?q=${encodeURIComponent(q)}`),
   records: () => request<DNSRecord[]>("/api/dns-records"),
   createRecord: (record: Omit<DNSRecord, "id">) =>

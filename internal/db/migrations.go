@@ -21,7 +21,7 @@ const (
 	// CurrentSchemaVersion is the highest SQLite schema version understood by
 	// this Faro release. It is deliberately independent of the application
 	// version so a future release can make multiple schema changes safely.
-	CurrentSchemaVersion = 12
+	CurrentSchemaVersion = 13
 
 	upgradeStateFilename = "faro-upgrade.json"
 	migrationBackupDir   = "migrations"
@@ -188,6 +188,22 @@ var migrationDefinitions = []migrationDefinition{
 	}},
 	{version: 12, name: "blocklist-source-mirror", apply: func(ctx context.Context, store *Store) error {
 		return store.migrateBlocklistSources(ctx)
+	}},
+	{version: 13, name: "temporary-troubleshooting-exceptions", apply: func(ctx context.Context, store *Store) error {
+		_, err := store.DB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS troubleshooting_exceptions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			token TEXT NOT NULL,
+			client_ip TEXT NOT NULL,
+			device_id INTEGER NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+			protection_id INTEGER NOT NULL REFERENCES protection_profiles(id) ON DELETE CASCADE,
+			domain TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			UNIQUE(token, domain)
+		);
+		CREATE INDEX IF NOT EXISTS idx_troubleshooting_active ON troubleshooting_exceptions(protection_id, domain, expires_at);
+		CREATE INDEX IF NOT EXISTS idx_troubleshooting_client ON troubleshooting_exceptions(device_id);
+		UPDATE settings SET value = ? WHERE key = 'database_schema_version';`, strconv.Itoa(CurrentSchemaVersion))
+		return err
 	}},
 }
 

@@ -2,7 +2,7 @@ import { Activity, Ban, CheckCircle2, ChevronLeft, ChevronRight, Filter, Globe2,
 import { tableFeatures, useTable } from "@tanstack/react-table";
 import type { ColumnDef } from "@tanstack/react-table";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { api, type ActivityPage, type FaroEvent } from "../api/client";
+import { api, type ActivityPage, type ActivityRows, type ActivitySummary, type FaroEvent } from "../api/client";
 import { ActivityTimePicker, activityTimeRangeLabel, type ActivityTimeRange } from "../components/ActivityTimePicker";
 import { ActivityTableLoading, ActivityTimelineLoading } from "../components/ActivityLoading";
 import { DomainFavicon } from "../components/DomainFavicon";
@@ -43,34 +43,74 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
   const [activity, setActivity] = useState<ActivityPage>(emptyActivity);
   const [loading, setLoading] = useState(true);
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [summaryLoading, setSummaryLoading] = useState(true);
+  const [summaryError, setSummaryError] = useState("");
+  const [hasMore, setHasMore] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [timeRange, setTimeRange] = useState<ActivityTimeRange>({ preset: "24h" });
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
-    let active = true;
+    const controller = new AbortController();
+    let inFlight = false;
     setLoading(true);
     setLoadError("");
-    api.events(search, filter, page, PAGE_SIZE, timeRange.preset, timeRange.from, timeRange.to)
-      .then((result) => { if (active) { setActivity(result); setHasLoaded(true); } })
-      .catch((error_) => { if (active) { setLoadError(error_ instanceof Error ? error_.message : "Activity could not be loaded."); setHasLoaded(true); } })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
+    const loadRows = async () => {
+      if (inFlight || controller.signal.aborted) return;
+      inFlight = true;
+      try {
+        const result = await api.events<ActivityRows>(search, filter, page, PAGE_SIZE, timeRange.preset, timeRange.from, timeRange.to, controller.signal, "rows");
+        if (!controller.signal.aborted) {
+          setActivity((current) => ({ ...current, items: result.items, page: result.page, page_size: result.page_size }));
+          setHasMore(Boolean(result.has_more));
+          setHasLoaded(true);
+          setLoadError("");
+        }
+      } catch (failure) {
+        if (!controller.signal.aborted) { setLoadError(failure instanceof Error ? failure.message : "Activity could not be loaded."); setHasLoaded(true); }
+      } finally {
+        inFlight = false;
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    };
+    void loadRows();
+    const timer = window.setInterval(() => { if (page === 1 && document.visibilityState === "visible") void loadRows(); }, 5000);
+    return () => { controller.abort(); window.clearInterval(timer); };
   }, [search, filter, page, refreshVersion, timeRange]);
 
   useEffect(() => {
-    if (page !== 1) return undefined;
-    const timer = window.setInterval(() => {
-      void api.events(search, filter, 1, PAGE_SIZE, timeRange.preset, timeRange.from, timeRange.to).then(setActivity).catch(() => undefined);
-    }, 5000);
-    return () => window.clearInterval(timer);
-  }, [search, filter, page, timeRange]);
+    const controller = new AbortController();
+    let inFlight = false;
+    setSummaryLoading(true);
+    setSummaryError("");
+    const loadSummary = async () => {
+      if (inFlight || controller.signal.aborted) return;
+      inFlight = true;
+      try {
+        const result = await api.events<ActivitySummary>(search, filter, 1, PAGE_SIZE, timeRange.preset, timeRange.from, timeRange.to, controller.signal, "summary");
+        if (!controller.signal.aborted) {
+          setActivity((current) => ({ ...current, counts: result.counts, timeline: result.timeline, total: result.total, total_pages: result.total_pages }));
+          setSummaryError("");
+        }
+      } catch (failure) {
+        if (!controller.signal.aborted) setSummaryError(failure instanceof Error ? failure.message : "Activity totals are unavailable.");
+      } finally {
+        inFlight = false;
+        if (!controller.signal.aborted) setSummaryLoading(false);
+      }
+    };
+    void loadSummary();
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void loadSummary(); }, 30000);
+    return () => { controller.abort(); window.clearInterval(timer); };
+  }, [search, filter, refreshVersion, timeRange]);
 
   const counts = activity.counts;
   const visibleEvents = activity.items;
-  const firstResult = activity.total === 0 ? 0 : (activity.page - 1) * activity.page_size + 1;
-  const lastResult = Math.min(activity.page * activity.page_size, activity.total);
+  const firstResult = activity.items.length === 0 ? 0 : (activity.page - 1) * activity.page_size + 1;
+  const lastResult = firstResult ? firstResult + activity.items.length - 1 : 0;
+  const totalsReady = !summaryLoading && !summaryError;
+  const resultTotal = totalsReady ? ` of ${Math.max(activity.total, lastResult).toLocaleString()}` : "";
   const initialLoading = loading && !hasLoaded && !loadError;
   const loadingRows = loading && !loadError && visibleEvents.length === 0;
 
@@ -132,7 +172,7 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
       id: "device",
       header: "Device",
       cell: ({ row }) => row.original.client_ip
-        ? <button className="device-link" type="button" onClick={() => onDeviceSelect(row.original.client_ip!)}>{row.original.client_ip}</button>
+        ? <button className="device-link" type="button" onClick={() => onDeviceSelect(row.original.client_ip!)} title={row.original.client_ip}>{row.original.device_name || row.original.client_ip}</button>
         : <span className="empty-cell">—</span>
     },
     {
@@ -191,7 +231,7 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
         </form>
       </section>
 
-      <section className="panel activity-timeline-panel" aria-label="Activity timeline" aria-busy={loading}>
+      <section className="panel activity-timeline-panel" aria-label="Activity timeline" aria-busy={summaryLoading}>
         <div className="activity-timeline-header">
           <div>
             <span className="activity-timeline-kicker">Activity timeline</span>
@@ -201,12 +241,12 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
           <ActivityTimePicker value={timeRange} onChange={(nextRange) => { setTimeRange(nextRange); setPage(1); }} />
         </div>
         <Suspense fallback={<ActivityTimelineLoading />}>
-          <ActivityTimeline timeline={activity.timeline} rangeLabel={rangeLabel} loading={loading} />
+          <ActivityTimeline timeline={summaryError ? null : activity.timeline} rangeLabel={rangeLabel} loading={summaryLoading} />
         </Suspense>
       </section>
 
-      <section className="activity-summary" aria-label="Activity summary" aria-busy={initialLoading}>
-        <ActivityStat icon={<Activity size={16} />} label="All events" value={counts.all} tone="all" loading={initialLoading} />
+      <section className="activity-summary" aria-label="Activity summary" aria-busy={summaryLoading}>
+        <ActivityStat icon={<Activity size={16} />} label="All events" value={counts.all} tone="all" loading={!totalsReady} />
         <ActivityStat icon={<Globe2 size={16} />} label="DNS requests" value={counts.dns} tone="dns" loading={initialLoading} />
         <ActivityStat icon={<ShieldX size={16} />} label="Blocked" value={counts.blocked} tone="blocked" loading={initialLoading} />
         <ActivityStat icon={<Settings2 size={16} />} label="System changes" value={counts.system} tone="system" loading={initialLoading} />
@@ -224,9 +264,10 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
             <FilterButton active={filter === "blocked"} label="Blocked" count={counts.blocked} loading={initialLoading} onClick={() => selectFilter("blocked")} />
             <FilterButton active={filter === "system"} label="System" count={counts.system} loading={initialLoading} onClick={() => selectFilter("system")} />
           </fieldset>
-          <span className="results-count" role={loading ? "status" : undefined}>{loading ? (initialLoading ? "Preparing activity…" : "Updating activity…") : `Showing ${firstResult}–${lastResult} of ${activity.total}`}</span>
+          <span className="results-count" role={loading ? "status" : undefined}>{loading ? (initialLoading ? "Preparing activity…" : "Updating activity…") : `Showing ${firstResult}–${lastResult}${resultTotal}`}</span>
         </div>
 
+        {summaryError && <p role="alert">Totals unavailable: {summaryError} <button className="secondary" type="button" onClick={() => setRefreshVersion((value) => value + 1)}>Retry</button></p>}
         {loadError && <EmptyState title="Activity unavailable" body={loadError} />}
         {!loadError && loadingRows && <ActivityTableLoading />}
         {!loadError && !loading && visibleEvents.length === 0 && <EmptyState title="No matching activity" body="Try another filter or point a device at Faro to begin collecting DNS activity." />}
@@ -258,13 +299,13 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
             </table>
           </div>
         )}
-        {activity.total > 0 && (
+        {activity.items.length > 0 && (
           <div className="activity-pagination" aria-label="Activity pages">
-            <span>{firstResult}–{lastResult} of {activity.total.toLocaleString()} events</span>
+            <span>{firstResult}–{lastResult}{resultTotal} events</span>
             <div>
               <button type="button" disabled={loading || page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={16} /> Newer</button>
-              <strong>Page {activity.page} of {Math.max(activity.total_pages, 1)}</strong>
-              <button type="button" disabled={loading || page >= activity.total_pages} onClick={() => setPage((current) => current + 1)}>Older <ChevronRight size={16} /></button>
+              <strong>Page {activity.page}{totalsReady ? ` of ${Math.max(activity.total_pages, activity.page)}` : ""}</strong>
+              <button type="button" disabled={loading || !hasMore} onClick={() => setPage((current) => current + 1)}>Older <ChevronRight size={16} /></button>
             </div>
           </div>
         )}

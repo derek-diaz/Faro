@@ -2,6 +2,8 @@
 
 This guide contains the operational and development details intentionally omitted from the [main README](../README.md).
 
+See [Investigating a broken site](troubleshooting.md) for the guided device troubleshooting flow and responsiveness notes.
+
 ## Configuration
 
 Faro reads optional deployment settings from a `.env` file beside `docker-compose.yml`. Start with the provided example when using a repository checkout, or create the file manually for a standalone deployment.
@@ -407,6 +409,19 @@ docker compose -f docker-compose.dev.yml up --build
 Development also runs as one container, matching the production and Unraid process topology. Open `http://localhost:1787`. Vite applies frontend edits with hot module replacement, while Air rebuilds and restarts the Go API after Go source changes. CoreDNS, the standalone encrypted gateway, and the bounded query logger run alongside them under the same supervisor. Both source watchers use polling for reliable Windows and macOS bind-mount detection through Docker Desktop. Stop the stack with `Ctrl-C`, or run `make dev-down` from another terminal.
 
 Development DNS is published on host port `5354` by default to avoid privileged/system DNS listeners. Test it with `dig @127.0.0.1 -p 5354 example.com`, or set `FARO_DEV_DNS_PORT` to another available port. You can also use `make dev` as a shortcut for the command above.
+
+A broader read-only DNS request matrix is available without installing `dig`:
+
+```sh
+make dns-test
+```
+
+The tester covers common record types, reverse lookups, local and negative answers, EDNS/DNSSEC, edge-case queries, and both UDP and TCP. Use `-transport udp` when the local listener is intentionally UDP-only, `-port 53` for a host-networked instance, `-query NAME:TYPE` for additional cases, `-repeat N -parallel N` for repetition, and `-malformed` to include deliberately malformed packets. For example:
+
+```sh
+go run ./cmd/faro-dns-test -transport udp -query router.home:A -query ads.example:A -repeat 5 -parallel 4
+go run ./cmd/faro-dns-test -port 53 -malformed
+```
 
 To run the disposable production-container DNS smoke test (requires Docker and either `dig` or Node.js):
 

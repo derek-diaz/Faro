@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/derek/faro/internal/coredns"
 	"github.com/derek/faro/internal/db"
@@ -29,6 +30,86 @@ func TestParseObservableLogLine(t *testing.T) {
 	}
 	if entry.rcode != "NOERROR" {
 		t.Fatalf("expected response code, got %q", entry.rcode)
+	}
+}
+
+func TestBatchLocalDecisionsRespectQuestionType(t *testing.T) {
+	tailer, store := logFixture(t, "")
+	if _, err := store.DB.Exec(`INSERT INTO dns_records(hostname, type, value) VALUES
+		('printer.home', 'A', '192.0.2.20'), ('printer.home', 'AAAA', '2001:db8::20')`); err != nil {
+		t.Fatal(err)
+	}
+	var entries []logEntry
+	for _, queryType := range []string{"A", "AAAA", "A", "AAAA", "TXT"} {
+		entries = append(entries, logEntry{clientIP: "192.0.2.1", domain: "printer.home", queryType: queryType, rcode: "NOERROR", observed: true})
+	}
+	if err := tailer.insertBatch(context.Background(), entries); err != nil {
+		t.Fatal(err)
+	}
+	assertQueryCount(t, store, len(entries))
+	rows, err := store.DB.Query(`SELECT query_type, decision_metadata FROM dns_queries ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var queryType, metadata string
+		if err := rows.Scan(&queryType, &metadata); err != nil {
+			t.Fatal(err)
+		}
+		var decision coredns.DomainDecision
+		if err := json.Unmarshal([]byte(metadata), &decision); err != nil {
+			t.Fatal(err)
+		}
+		if queryType == "TXT" {
+			if decision.LocalRecord != nil {
+				t.Fatalf("TXT question matched address record: %+v", decision.LocalRecord)
+			}
+			continue
+		}
+		want := map[string]string{"A": "192.0.2.20", "AAAA": "2001:db8::20"}[queryType]
+		if decision.LocalRecord == nil || decision.LocalRecord.Type != queryType || decision.LocalRecord.Value != want {
+			t.Fatalf("%s question matched wrong local record: %+v", queryType, decision.LocalRecord)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBufferedForwardedQueryKeepsObservedOutcomeAndTime(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB.Exec(`INSERT INTO protection_block_entries(protection_id, domain) VALUES(1, 'previously-allowed.example')`); err != nil {
+		t.Fatal(err)
+	}
+	const recordedAt = "2026-01-02T03:04:05.123456789Z"
+	tailer := NewTailer(store, "")
+	tailer.insert(context.Background(), recordedAt+` [INFO] FARO|192.0.2.20|A|previously-allowed.example.|NOERROR|1ms|9.9.9.9:53`)
+	var action, source, timestamp, metadata string
+	if err := store.DB.QueryRow(`SELECT action, source, timestamp, decision_metadata FROM dns_queries`).Scan(&action, &source, &timestamp, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if action != "allowed" || source != "upstream" {
+		t.Fatalf("observed forwarded query reclassified: %s / %s", action, source)
+	}
+	when, err := time.Parse(time.RFC3339Nano, timestamp)
+	want, _ := time.Parse(time.RFC3339Nano, recordedAt)
+	if err != nil || !when.Equal(want.Truncate(time.Second)) {
+		t.Fatalf("timestamp = %s (%v), want original %s", timestamp, err, recordedAt)
+	}
+	var snapshot coredns.DomainDecision
+	if err := json.Unmarshal([]byte(metadata), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ManualBlock != nil || len(snapshot.Blocklists) != 0 || snapshot.Confidence != "observed" {
+		t.Fatalf("current rules leaked into historical outcome: %+v", snapshot)
+	}
+	if snapshot.CapturedAt != recordedAt {
+		t.Fatalf("captured_at = %q, want %q", snapshot.CapturedAt, recordedAt)
 	}
 }
 
@@ -237,5 +318,49 @@ func TestPersistedCursorIngestsOnlyQueriesWrittenDuringRestart(t *testing.T) {
 	var count int
 	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM dns_queries`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("ingested count = %d, err = %v", count, err)
+	}
+}
+
+func TestRotationWithRepeatedFirstQueryPreservesAllRows(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	path := filepath.Join(t.TempDir(), "query.log")
+	line := "[INFO] FARO|192.0.2.20|A|repeat.example.|NOERROR|1ms|9.9.9.9:53\n"
+	if err := os.WriteFile(path, []byte("# FARO-LOG first\n"+line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tailer := NewTailer(store, path)
+	cursor, err := tailer.readAvailable(context.Background(), logCursor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(line); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, path+".1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("# FARO-LOG second\n"+line+line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tailer.readAvailable(context.Background(), cursor); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM dns_queries`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 4 {
+		t.Fatalf("rows after rotation = %d, want 4", count)
 	}
 }

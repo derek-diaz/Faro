@@ -60,6 +60,32 @@ func TestFailedBatchRetriesWithoutSkippingOrReplayingCommittedRows(t *testing.T)
 	assertQueryCount(t, store, 300)
 }
 
+func TestExpiredCheckpointRecoversRetainedLogsOnceInOrder(t *testing.T) {
+	line := func(name string) string { return "FARO|192.0.2.1|A|" + name + ".example.|NOERROR|1ms|-\n" }
+	tailer, store := logFixture(t, line("expired"))
+	ctx := context.Background()
+	if _, err := tailer.readAvailable(ctx, logCursor{}); err != nil {
+		t.Fatal(err)
+	}
+	for path, name := range map[string]string{".2": "oldest", ".1": "newer", "": "active"} {
+		if err := os.WriteFile(tailer.Path+path, []byte(line(name)), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		if _, err := tailer.readAvailable(ctx, logCursor{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var domains string
+	if err := store.DB.QueryRow(`SELECT group_concat(domain, ',') FROM (SELECT domain FROM dns_queries ORDER BY id)`).Scan(&domains); err != nil {
+		t.Fatal(err)
+	}
+	if domains != "expired.example,oldest.example,newer.example,active.example" {
+		t.Fatalf("recovered history = %s", domains)
+	}
+}
+
 func TestCheckpointFailureRollsBackQueries(t *testing.T) {
 	tailer, store := logFixture(t, "FARO|192.0.2.1|A|example.com.|NOERROR|1ms|-\n")
 	if _, err := store.DB.Exec(`CREATE TRIGGER fail_checkpoint BEFORE INSERT ON query_log_progress BEGIN SELECT RAISE(ABORT, 'checkpoint failure'); END`); err != nil {
@@ -70,6 +96,10 @@ func TestCheckpointFailureRollsBackQueries(t *testing.T) {
 		t.Fatalf("checkpoint failure acknowledged: %+v, %v", next, err)
 	}
 	assertQueryCount(t, store, 0)
+	var devices int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM devices`).Scan(&devices); err != nil || devices != 0 {
+		t.Fatalf("devices after failed batch = %d, err = %v", devices, err)
+	}
 }
 
 func TestPartialLineWaitsForCompletion(t *testing.T) {
@@ -121,6 +151,87 @@ func TestIdentityObservationIsCoalescedPerBatch(t *testing.T) {
 		t.Fatalf("device updated %d times in one batch", count)
 	}
 	assertQueryCount(t, store, 256)
+}
+
+func TestBatchAttributesEarlierAddressToMergedDevice(t *testing.T) {
+	tailer, store := logFixture(t, "")
+	_, err := store.DB.Exec(`
+		INSERT INTO devices(id) VALUES(11),(22);
+		INSERT INTO device_addresses(device_id, address, family)
+			VALUES(22, '192.0.2.1', 'ipv4'), (22, '192.0.2.2', 'ipv4');
+		INSERT INTO device_identifiers(device_id, kind, value, source, confidence)
+			VALUES(11, 'local_dns', 'printer.home', 'local_dns', 'strong');
+		INSERT INTO dns_records(hostname, type, value) VALUES('printer.home', 'A', '192.0.2.2');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := []logEntry{
+		{clientIP: "192.0.2.1", domain: "one.example", queryType: "A"},
+		{clientIP: "192.0.2.2", domain: "two.example", queryType: "A"},
+	}
+	if err := tailer.insertBatch(context.Background(), entries); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM dns_queries WHERE device_id = 11`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("queries linked to merged device = %d, err = %v", count, err)
+	}
+}
+
+func TestBatchDecisionsStaySeparateAndRefreshBetweenBatches(t *testing.T) {
+	tailer, store := logFixture(t, "")
+	if _, err := store.DB.Exec(`
+		INSERT INTO protection_profiles(id, name, icon) VALUES(2, 'Children', 'baby');
+		INSERT INTO device_protection_assignments(client_ip, protection_id) VALUES('192.0.2.2', 2);
+		INSERT INTO protection_block_entries(protection_id, domain) VALUES(2, 'games.example');`); err != nil {
+		t.Fatal(err)
+	}
+	entries := []logEntry{
+		{clientIP: "192.0.2.1", domain: "games.example", queryType: "A", rcode: "NOERROR", observed: true},
+		{clientIP: "192.0.2.2", domain: "games.example", queryType: "A", rcode: "NOERROR", observed: true},
+		{clientIP: "192.0.2.2", domain: "other.example", queryType: "A", rcode: "NOERROR", observed: true},
+		{clientIP: "192.0.2.2", domain: "games.example", queryType: "AAAA", rcode: "SERVFAIL", upstream: "9.9.9.9", observed: true},
+		{clientIP: "192.0.2.2", domain: "games.example", queryType: "A", rcode: "NOERROR", observed: true, latencyMS: 2},
+	}
+	if err := tailer.insertBatch(context.Background(), entries); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`DELETE FROM protection_block_entries WHERE protection_id = 2`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tailer.insertBatch(context.Background(), entries[1:2]); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := store.DB.Query(`SELECT action, rcode, upstream, latency_ms FROM dns_queries ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for index, want := range []string{"allowed", "blocked", "allowed", "allowed", "blocked", "allowed"} {
+		if !rows.Next() {
+			t.Fatalf("missing query %d", index)
+		}
+		var action, rcode, upstream string
+		var latency float64
+		if err := rows.Scan(&action, &rcode, &upstream, &latency); err != nil {
+			t.Fatal(err)
+		}
+		if action != want {
+			t.Fatalf("query %d action = %s, want %s", index, action, want)
+		}
+		if index == 3 && (rcode != "SERVFAIL" || upstream != "9.9.9.9") {
+			t.Fatal("observed response was overwritten by shared policy")
+		}
+		if index == 4 && (rcode != "NOERROR" || upstream != "" || latency != 2) {
+			t.Fatal("query-specific fields leaked between entries")
+		}
+	}
+	if rows.Next() {
+		t.Fatal("unexpected extra query")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertQueryCount(t *testing.T, store *db.Store, want int) {

@@ -7,7 +7,7 @@ For example, `media.home` can point to a server at `192.168.1.22`.
 ## Add a record
 
 1. Reserve the server's IP in your router so it stays the same.
-2. Open **Local DNS → Add local record**.
+2. Open **Settings → Local names → Add local record**.
 3. Enter a **Hostname**. Entering `media` adds your configured suffix; check the field's hint.
 4. Choose **A** for IPv4 or **AAAA** for IPv6.
 5. Enter the address in **Value**, without `http://` or a port.

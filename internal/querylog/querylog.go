@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,7 @@ type logEntry struct {
 	latencyMS float64
 	upstream  string
 	observed  bool
+	timestamp time.Time
 }
 
 type Tailer struct {
@@ -81,7 +83,6 @@ func (tailer *Tailer) Run(ctx context.Context) {
 				}
 				continue
 			}
-			cursor = next
 			if err := saveCursor(tailer.Path+cursorSuffix, cursor); err != nil {
 				log.Printf("query log cursor save failed: %v", err)
 			}
@@ -126,58 +127,70 @@ func (tailer *Tailer) readAvailable(ctx context.Context, cursor logCursor) (next
 		}
 	}()
 
-	currentInfo, err := file.Stat()
-	if err != nil {
-		return cursor, err
-	}
-
 	currentIdentity := fileIdentity(file)
 	if cursor.Identity == "" || cursor.Identity == currentIdentity {
-		offset := cursor.Offset
-		if currentInfo.Size() < offset {
-			offset = 0
-		}
-		position, err := tailer.readOpenFile(ctx, file, offset)
+		position, err := tailer.readOpenFile(ctx, file, cursor.Offset)
 		return logCursor{Identity: currentIdentity, Offset: position}, err
 	}
 
-	rotatedIndex := findRotatedIndex(tailer.Path, cursor.Identity)
-	if rotatedIndex > 0 {
-		position, err := tailer.readPath(ctx, rotatedPath(tailer.Path, rotatedIndex), cursor.Offset)
-		next = logCursor{Identity: cursor.Identity, Offset: position}
+	// Pin the whole unread sequence before ingesting. Rotation can reuse the
+	// same numbered filenames while a slow database write is in progress.
+	rotations, err := rotatedIndexes(tailer.Path)
+	if err != nil {
+		return cursor, err
+	}
+	files := []*os.File{file}
+	var offset int64
+	found := false
+	for _, index := range rotations {
+		backup, err := os.Open(tailer.Path + "." + strconv.Itoa(index))
+		if err != nil {
+			return cursor, err
+		}
+		defer backup.Close()
+		files = append(files, backup)
+		if fileIdentity(backup) == cursor.Identity {
+			found = true
+			offset = cursor.Offset
+			break
+		}
+	}
+	// If the writer rotated while opening the files, retry with a coherent set.
+	for _, pinned := range files {
+		opened, err := pinned.Stat()
+		if err != nil {
+			return cursor, err
+		}
+		atPath, err := os.Stat(pinned.Name())
+		if err != nil || !os.SameFile(opened, atPath) {
+			return cursor, err
+		}
+	}
+	if !found {
+		if cursor.Offset == 0 {
+			files = files[:1] // An initially empty log has no committed history.
+		} else {
+			log.Printf("query log checkpoint expired; resuming at oldest retained log")
+		}
+	}
+	for _, pending := range slices.Backward(files) {
+		position, err := tailer.readOpenFile(ctx, pending, offset)
+		next = logCursor{Identity: fileIdentity(pending), Offset: position}
 		if err != nil {
 			return next, err
 		}
-		for index := rotatedIndex - 1; index >= 1; index-- {
-			if _, err := tailer.readPath(ctx, rotatedPath(tailer.Path, index), 0); err != nil {
-				return next, err
-			}
-		}
-	} else if cursor.Offset > 0 {
-		log.Printf("query log rotated beyond retained backups; some raw entries may have been skipped")
+		offset = 0
 	}
-
-	position, err := tailer.readOpenFile(ctx, file, 0)
-	return logCursor{Identity: currentIdentity, Offset: position}, err
-}
-
-func (tailer *Tailer) readPath(ctx context.Context, path string, offset int64) (position int64, err error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return offset, err
-	}
-	defer func() {
-		if closeErr := file.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-	return tailer.readOpenFile(ctx, file, offset)
+	return next, nil
 }
 
 func (tailer *Tailer) readOpenFile(ctx context.Context, file *os.File, offset int64) (int64, error) {
 	stat, err := file.Stat()
 	if err != nil {
 		return offset, err
+	}
+	if offset > stat.Size() {
+		offset = 0
 	}
 	// Read a finite snapshot, leave partial final lines for the next poll,
 	// and cap memory even when a malformed line has no newline.
@@ -234,26 +247,20 @@ func (tailer *Tailer) readOpenFile(ctx context.Context, file *os.File, offset in
 	}
 }
 
-func findRotatedIndex(path, identity string) int {
+func rotatedIndexes(path string) ([]int, error) {
 	matches, err := filepath.Glob(path + ".*")
 	if err != nil {
-		return 0
+		return nil, err
 	}
+	var indexes []int
 	for _, match := range matches {
 		index, err := strconv.Atoi(strings.TrimPrefix(match, path+"."))
-		if err != nil || index < 1 {
-			continue
-		}
-		candidate, err := os.Open(match)
-		if err == nil && fileIdentity(candidate) == identity {
-			_ = candidate.Close()
-			return index
-		}
-		if candidate != nil {
-			_ = candidate.Close()
+		if err == nil && index > 0 && match == path+"."+strconv.Itoa(index) {
+			indexes = append(indexes, index)
 		}
 	}
-	return 0
+	slices.Sort(indexes)
+	return indexes, nil
 }
 
 func fileIdentity(file *os.File) string {
@@ -320,10 +327,6 @@ func saveCursor(path string, cursor logCursor) (err error) {
 	return os.Rename(tempName, path)
 }
 
-func rotatedPath(path string, index int) string {
-	return path + "." + strconv.Itoa(index)
-}
-
 func (tailer *Tailer) insert(ctx context.Context, line string) {
 	entry, ok := parseLine(line)
 	if !ok {
@@ -332,21 +335,10 @@ func (tailer *Tailer) insert(ctx context.Context, line string) {
 	tailer.insertBatch(ctx, []logEntry{entry})
 }
 
-func (tailer *Tailer) insertParsed(ctx context.Context, entry logEntry) {
-	tailer.insertBatch(ctx, []logEntry{entry})
-}
-
 type pendingQuery struct {
 	timestamp        string
-	clientIP         string
-	deviceID         int64
-	domain           string
-	queryType        string
 	action           string
 	source           string
-	upstream         string
-	latencyMS        float64
-	rcode            string
 	decisionReason   string
 	decisionMetadata string
 }
@@ -363,38 +355,52 @@ func (tailer *Tailer) insertBatch(ctx context.Context, entries []logEntry, check
 			tailer.Store.ReportActivityWriteFailure(err)
 		}
 	}()
-	// Scope identity reuse to one batch so address reassignment and device
-	// merges are observed on the next poll without a long-lived stale cache.
-	identities := make(map[string]int64)
-	queries := make([]pendingQuery, 0, len(entries))
-	for _, entry := range entries {
-		deviceID, known := identities[entry.clientIP]
-		if !known {
-			deviceID, err = deviceidentity.ResolveAddress(ctx, tailer.Store, entry.clientIP, "dns")
-			if err != nil {
-				return fmt.Errorf("resolve DNS client identity: %w", err)
-			}
-			identities[entry.clientIP] = deviceID
-		}
-		queries = append(queries, tailer.prepareEntry(ctx, entry, deviceID))
-	}
 	tx, err := tailer.Store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// Resolve every client first: observing a second address can merge devices.
+	addresses := make(map[string]string)
+	for _, entry := range entries {
+		if _, known := addresses[entry.clientIP]; known {
+			continue
+		}
+		address := net.ParseIP(entry.clientIP).String()
+		if _, err := deviceidentity.ObserveAddressTx(ctx, tx, address, "dns", nil); err != nil {
+			return fmt.Errorf("resolve DNS client identity: %w", err)
+		}
+		addresses[entry.clientIP] = address
+	}
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO dns_queries(timestamp, client_ip, device_id, domain, query_type, action, source, upstream, latency_ms, rcode, decision_reason, decision_metadata)
-		VALUES(?, ?, NULLIF(?, 0), ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES(?, ?, (SELECT device_id FROM device_addresses WHERE address = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
-	for _, query := range queries {
+
+	type decisionKey struct{ address, domain, queryType string }
+	decisions := make(map[decisionKey]coredns.DomainDecision)
+	for _, entry := range entries {
+		address := addresses[entry.clientIP]
+		decision := coredns.DomainDecision{Action: "allowed"}
+		// Only infer local policy when CoreDNS did not report a forward.
+		if entry.upstream == "" {
+			key := decisionKey{address: address, domain: entry.domain, queryType: entry.queryType}
+			var cached bool
+			decision, cached = decisions[key]
+			if !cached {
+				decision = coredns.ExplainQueryForClient(ctx, tx, entry.domain, address, entry.queryType)
+				decisions[key] = decision
+			}
+		}
+		query := prepareEntry(entry, decision)
 		if _, err := stmt.ExecContext(ctx,
-			query.timestamp, query.clientIP, query.deviceID, query.domain, query.queryType,
-			query.action, query.source, query.upstream, query.latencyMS, query.rcode,
+			query.timestamp, entry.clientIP, address, entry.domain, entry.queryType,
+			query.action, query.source, entry.upstream, entry.latencyMS, entry.rcode,
 			query.decisionReason, query.decisionMetadata,
 		); err != nil {
 			return err
@@ -417,13 +423,16 @@ func (tailer *Tailer) insertBatch(ctx context.Context, entries []logEntry, check
 	return nil
 }
 
-func (tailer *Tailer) prepareEntry(ctx context.Context, entry logEntry, deviceID int64) pendingQuery {
-	decision := coredns.ExplainDomainForClient(ctx, tailer.Store, entry.domain, entry.clientIP)
-	action := decision.Action
-	source := sourceForEntry(ctx, tailer.Store, entry, decision)
+func prepareEntry(entry logEntry, decision coredns.DomainDecision) pendingQuery {
+	when := entry.timestamp
+	if when.IsZero() {
+		// shortcut: legacy raw logs have no event time; retain this fallback until legacy log support is removed.
+		when = time.Now().UTC()
+	}
+	source := sourceForEntry(entry, decision)
 	decision.Upstream = entry.upstream
 	decision.ResponseCode = entry.rcode
-	decision.CapturedAt = time.Now().UTC().Format(time.RFC3339)
+	decision.CapturedAt = when.UTC().Format(time.RFC3339Nano)
 	decision.Confidence = decisionConfidence(source, entry.upstream)
 	decision.Reason = decisionReason(decision, source, entry.upstream)
 	metadata, err := json.Marshal(decision)
@@ -431,22 +440,15 @@ func (tailer *Tailer) prepareEntry(ctx context.Context, entry logEntry, deviceID
 		metadata = []byte("{}")
 	}
 	return pendingQuery{
-		timestamp:        time.Now().UTC().Format(time.RFC3339),
-		clientIP:         entry.clientIP,
-		deviceID:         deviceID,
-		domain:           entry.domain,
-		queryType:        entry.queryType,
-		action:           action,
+		timestamp:        when.UTC().Format(time.RFC3339),
+		action:           decision.Action,
 		source:           source,
-		upstream:         entry.upstream,
-		latencyMS:        entry.latencyMS,
-		rcode:            entry.rcode,
 		decisionReason:   decision.Reason,
 		decisionMetadata: string(metadata),
 	}
 }
 
-func sourceForEntry(_ context.Context, _ *db.Store, entry logEntry, decision coredns.DomainDecision) string {
+func sourceForEntry(entry logEntry, decision coredns.DomainDecision) string {
 	if decision.Action == "blocked" {
 		if decision.ManualBlock != nil {
 			return "manual"
@@ -494,6 +496,8 @@ func decisionReason(decision coredns.DomainDecision, source, upstream string) st
 }
 
 func parseLine(line string) (logEntry, bool) {
+	first, _, _ := strings.Cut(strings.TrimSpace(line), " ")
+	timestamp, _ := time.Parse(time.RFC3339Nano, first)
 	if marker := strings.Index(line, "FARO|"); marker >= 0 {
 		parts := strings.Split(strings.TrimSpace(line[marker:]), "|")
 		if len(parts) < 7 {
@@ -504,6 +508,7 @@ func parseLine(line string) (logEntry, bool) {
 			return logEntry{}, false
 		}
 		return logEntry{
+			timestamp: timestamp,
 			clientIP:  strings.Trim(parts[1], "[]"),
 			queryType: strings.ToUpper(strings.TrimSpace(parts[2])),
 			domain:    strings.TrimSuffix(strings.ToLower(strings.TrimSpace(parts[3])), "."),
@@ -523,6 +528,7 @@ func parseLine(line string) (logEntry, bool) {
 		return logEntry{}, false
 	}
 	return logEntry{
+		timestamp: timestamp,
 		clientIP:  strings.Trim(match[1], "[]"),
 		queryType: match[2],
 		domain:    strings.TrimSuffix(strings.ToLower(match[3]), "."),

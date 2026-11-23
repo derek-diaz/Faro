@@ -606,6 +606,9 @@ func TestRestoreTransactionRollbackRecoversPreviousDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	deviceID, _ := deviceResult.LastInsertId()
+	if _, err := store.DB.Exec(`INSERT INTO device_dns_pauses(device_id, paused_until) VALUES(?, '2099-01-01T00:00:00Z')`, deviceID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.DB.Exec(`
 		INSERT INTO device_names(device_id, source, name) VALUES(?, 'unifi', 'Current camera');
 		INSERT INTO unifi_client_snapshots(client_id, site_id, device_id, name) VALUES('client-1', 'default', ?, 'Current camera');
@@ -649,6 +652,7 @@ func TestRestoreTransactionRollbackRecoversPreviousDatabase(t *testing.T) {
 	}
 	for table, want := range map[string]int{
 		"troubleshooting_exceptions": 1,
+		"device_dns_pauses":          1,
 		"auth_sessions":              1,
 		"device_names":               1,
 		"unifi_client_snapshots":     1,

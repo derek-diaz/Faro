@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -43,6 +45,9 @@ func run(input io.Reader, output io.Writer, path string, maxBytes int64, backups
 	for {
 		line, readErr := reader.ReadBytes('\n')
 		if len(line) > 0 {
+			if bytes.Contains(line, []byte("FARO|")) {
+				line = append([]byte(time.Now().UTC().Format(time.RFC3339Nano)+" "), line...)
+			}
 			if _, err := destination.Write(line); err != nil {
 				return err
 			}
@@ -57,12 +62,13 @@ func run(input io.Reader, output io.Writer, path string, maxBytes int64, backups
 }
 
 type rotatingWriter struct {
-	path     string
-	maxBytes int64
-	backups  int
-	file     *os.File
-	size     int64
-	retryAt  time.Time
+	path        string
+	maxBytes    int64
+	backups     int
+	file        *os.File
+	size        int64
+	headerBytes int64
+	retryAt     time.Time
 }
 
 func newRotatingWriter(path string, maxBytes int64, backups int) (*rotatingWriter, error) {
@@ -80,6 +86,10 @@ func newRotatingWriter(path string, maxBytes int64, backups int) (*rotatingWrite
 		return nil, err
 	}
 	if err := writer.open(); err != nil {
+		if errors.Is(err, syscall.ENOSPC) {
+			writer.pauseForFullStorage(err)
+			return writer, nil
+		}
 		return nil, err
 	}
 	return writer, nil
@@ -105,18 +115,18 @@ func (writer *rotatingWriter) prepareForWrite(dataLength int) (handled bool, err
 			return true, nil
 		}
 		if err := writer.emergencyReset(); err != nil {
-			return writer.handleStorageError(dataLength, err)
+			return writer.handleStorageError(err)
 		}
 	}
-	if writer.size > 0 && writer.size+int64(dataLength) > writer.maxBytes {
+	if writer.size > writer.headerBytes && writer.size+int64(dataLength) > writer.maxBytes {
 		if err := writer.rotate(); err != nil {
-			return writer.handleStorageError(dataLength, err)
+			return writer.handleStorageError(err)
 		}
 	}
 	return false, nil
 }
 
-func (writer *rotatingWriter) handleStorageError(dataLength int, err error) (bool, error) {
+func (writer *rotatingWriter) handleStorageError(err error) (bool, error) {
 	if !errors.Is(err, syscall.ENOSPC) {
 		return false, err
 	}
@@ -135,7 +145,7 @@ func (writer *rotatingWriter) writeData(data []byte) (int, error) {
 
 func (writer *rotatingWriter) retryAfterStorageFull(data []byte, initialWritten int, initialErr error) (int, error) {
 	if resetErr := writer.emergencyReset(); resetErr != nil {
-		handled, storageErr := writer.handleStorageError(len(data), resetErr)
+		handled, storageErr := writer.handleStorageError(resetErr)
 		if handled {
 			return len(data), nil
 		}
@@ -143,12 +153,12 @@ func (writer *rotatingWriter) retryAfterStorageFull(data []byte, initialWritten 
 	}
 
 	retry, retryErr := writer.file.Write(data)
-	writer.size = int64(retry)
+	writer.size += int64(retry)
 	if retryErr == nil {
 		log.Printf("query log storage filled; older raw log buffers were discarded so logging could continue")
 		return retry, nil
 	}
-	handled, storageErr := writer.handleStorageError(len(data), retryErr)
+	handled, storageErr := writer.handleStorageError(retryErr)
 	if handled {
 		return len(data), nil
 	}
@@ -176,6 +186,21 @@ func (writer *rotatingWriter) open() error {
 	}
 	writer.file = file
 	writer.size = stat.Size()
+	writer.headerBytes = 0
+	if writer.size == 0 {
+		var identity [16]byte
+		if _, err := rand.Read(identity[:]); err != nil {
+			_ = writer.Close()
+			return err
+		}
+		// A unique first line survives renames and prevents identical DNS lines sharing a cursor.
+		n, err := fmt.Fprintf(file, "# FARO-LOG %x\n", identity)
+		writer.size, writer.headerBytes = int64(n), int64(n)
+		if err != nil {
+			_ = writer.Close()
+			return err
+		}
+	}
 	return nil
 }
 

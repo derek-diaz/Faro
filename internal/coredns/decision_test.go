@@ -158,13 +158,31 @@ func TestRenderPlacesActiveDevicePauseBeforeProtectionViews(t *testing.T) {
 	if _, err := store.DB.Exec(`INSERT INTO device_dns_pauses(device_id, paused_until) VALUES(?, ?)`, deviceID, until); err != nil {
 		t.Fatal(err)
 	}
-	rendered, err := NewManager(store, t.TempDir()).render(context.Background())
+	manager := NewManager(store, t.TempDir())
+	before, err := manager.currentTemporalSignature(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`INSERT INTO device_addresses(device_id, address, family, source, confidence) VALUES(?, '2001:db8::44', 'ipv6', 'dns', 'observed')`, deviceID); err != nil {
+		t.Fatal(err)
+	}
+	after, err := manager.currentTemporalSignature(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("new address of a paused device did not schedule a DNS reload")
+	}
+	rendered, err := manager.render(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	pauseView := "view device_pause_" + fmt.Sprint(deviceID)
 	if !strings.Contains(rendered.Corefile, pauseView) || !strings.Contains(rendered.Corefile, "template ANY ANY") || !strings.Contains(rendered.Corefile, "rcode REFUSED") {
 		t.Fatalf("device pause view missing from Corefile:\n%s", rendered.Corefile)
+	}
+	if !strings.Contains(rendered.Corefile, "2001:db8::44/128") {
+		t.Fatal("pause does not cover the newly discovered address")
 	}
 	if strings.Index(rendered.Corefile, pauseView) > strings.Index(rendered.Corefile, "view protection_") && strings.Contains(rendered.Corefile, "view protection_") {
 		t.Fatal("device pause view must precede protection views")
@@ -226,12 +244,31 @@ func TestProtectionFollowsCorrelatedAddress(t *testing.T) {
 	if _, err := store.DB.Exec(`INSERT INTO protection_block_entries(protection_id, domain) VALUES(?, 'games.example'); INSERT INTO device_protection_memberships(device_id, protection_id) VALUES(?, ?)`, protectionID, deviceID, protectionID); err != nil {
 		t.Fatal(err)
 	}
+	manager := NewManager(store, t.TempDir())
+	before, err := manager.currentTemporalSignature(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
 	correlatedID, err := deviceidentity.ResolveAddress(context.Background(), store, "2001:db8::30", "dns")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if correlatedID != deviceID {
 		t.Fatalf("correlated address belongs to device %d, want %d", correlatedID, deviceID)
+	}
+	after, err := manager.currentTemporalSignature(context.Background(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before == after {
+		t.Fatal("new protected address did not schedule a DNS reload")
+	}
+	if _, err := deviceidentity.ResolveAddress(context.Background(), store, "2001:db8::30", "dns"); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := manager.currentTemporalSignature(context.Background(), time.Now())
+	if err != nil || unchanged != after {
+		t.Fatalf("ordinary observation should not reload DNS: %v", err)
 	}
 	decision := ExplainDomainForClient(context.Background(), store, "games.example", "2001:db8::30")
 	if decision.Action != "blocked" || decision.Protection == nil || decision.Protection.ID != protectionID {

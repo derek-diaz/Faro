@@ -22,7 +22,7 @@ The code expires after ten minutes and can be used once. Create another if it ex
 ## 2. Join the new server
 
 1. Open the new Faro server's web interface.
-2. Choose **Join an existing Faro home** on its setup, sign-in, or initial configuration screen.
+2. Choose **Join an existing Faro home** on its setup, sign-in, or initial configuration screen. If this server already has an administrator, sign in to that account when prompted; Faro then continues to the pairing form.
 3. Enter the primary's private URL, such as `http://192.168.1.10:1787`.
 4. Enter the code, a recognizable server name, and the new server's LAN IP.
 5. Complete pairing and wait for synchronization.

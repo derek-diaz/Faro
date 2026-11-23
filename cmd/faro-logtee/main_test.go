@@ -1,11 +1,43 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestLogFilesHaveUniqueIdentityAndCaptureTime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "query.log")
+	line := "[INFO] FARO|192.0.2.20|A|repeat.example.|NOERROR|1ms|9.9.9.9:53\n"
+	var stdout bytes.Buffer
+	before := time.Now().UTC()
+	if err := run(strings.NewReader(line+line), &stdout, path, 100, 2); err != nil {
+		t.Fatal(err)
+	}
+	current, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous, err := os.ReadFile(path + ".1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentID, _, _ := strings.Cut(string(current), "\n")
+	previousID, _, _ := strings.Cut(string(previous), "\n")
+	if !strings.HasPrefix(currentID, "# FARO-LOG ") || currentID == previousID {
+		t.Fatal("rotation reused the file identity")
+	}
+	for _, output := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		stamp, _, _ := strings.Cut(output, " ")
+		when, err := time.Parse(time.RFC3339Nano, stamp)
+		if err != nil || when.Before(before) || when.After(time.Now()) {
+			t.Fatalf("missing capture timestamp: %q (%v)", output, err)
+		}
+	}
+}
 
 func TestRotatingWriterBoundsFilesAndRetainsBackups(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "query.log")
@@ -81,6 +113,10 @@ func assertFileContents(t *testing.T, path, expected string) {
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.HasPrefix(string(contents), "# FARO-LOG ") {
+		_, payload, _ := strings.Cut(string(contents), "\n")
+		contents = []byte(payload)
 	}
 	if string(contents) != expected {
 		t.Fatalf("%s contents = %q, want %q", path, contents, expected)

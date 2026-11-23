@@ -65,6 +65,14 @@ wait_for_start() {
 compose_run up -d --build
 wait_for_start
 
+docker run --rm --network none --cpus 0.5 --entrypoint bash "$(compose_run images -q faro)" -eu -c '
+  source /usr/local/lib/faro/go-cpu-limit.sh
+  [[ $GOMAXPROCS == 1 ]]
+  export GOMAXPROCS=3
+  source /usr/local/lib/faro/go-cpu-limit.sh
+  [[ $GOMAXPROCS == 3 ]]
+'
+
 compose_run restart faro
 wait_for_start
 

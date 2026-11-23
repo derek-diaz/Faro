@@ -2,11 +2,11 @@
 
 [All guides](README.md) · Related: [Devices](devices.md) · [Fix a broken site](fix-a-site.md)
 
-Use **Dashboard** for an overview and **Activity** to investigate requests.
+Use **Overview** to check Faro and **Activity** to investigate requests.
 
 ## Check your network
 
-1. Open **Dashboard**.
+1. Open **Overview**.
 2. Review today's requests, blocks, active devices, and cache hit rate.
 3. Check upstream resolver status and response times.
 4. Select a domain or device to inspect it.
@@ -36,6 +36,8 @@ Use **Dashboard** for an overview and **Activity** to investigate requests.
 | System | A Faro event rather than an ordinary DNS request. |
 
 Historical requests describe what happened at the time. The inspector's current decision describes the rules now. They may differ after protection changes.
+
+Observed upstream requests keep their original result even when rules change before history is saved. New raw logs record when each response reaches Faro's logger, so a delayed history import preserves that time. Older logs without timestamps use their import time. Local and cache classifications still depend on inferred rule provenance; the raw DNS log does not include the full response.
 
 DNS activity shows name lookups, not page contents, full browsing URLs, or proof that a device connected to a service. Only requests sent through Faro appear. Totals and the timeline can briefly lag the newest rows while refreshing.
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 
@@ -39,20 +40,6 @@ func ResolveAddress(ctx context.Context, store *db.Store, address, source string
 // by a trusted local integration. Explicit identifiers are combined with
 // Faro's passive evidence and pass through the same conflict-safe merge rules.
 func ObserveAddress(ctx context.Context, store *db.Store, address, source string, explicit []Identifier) (deviceID int64, err error) {
-	address = normalizeAddress(address)
-	if address == "" {
-		return 0, ErrInvalidAddress
-	}
-	if strings.TrimSpace(source) == "" {
-		source = "dns"
-	}
-	identifiers, err := passiveIdentifiers(ctx, store.DB, address)
-	if err != nil {
-		return 0, err
-	}
-	identifiers = append(identifiers, explicit...)
-	identifiers = normalizedIdentifiers(identifiers)
-
 	tx, err := store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -62,12 +49,44 @@ func ObserveAddress(ctx context.Context, store *db.Store, address, source string
 			err = errors.Join(err, rollbackErr)
 		}
 	}()
+	deviceID, err = ObserveAddressTx(ctx, tx, address, source, explicit)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return deviceID, nil
+}
+
+// ObserveAddressTx lets history commit its device observations and DNS rows together.
+func ObserveAddressTx(ctx context.Context, tx *sql.Tx, address, source string, explicit []Identifier) (int64, error) {
+	address = normalizeAddress(address)
+	if address == "" {
+		return 0, ErrInvalidAddress
+	}
+	if strings.TrimSpace(source) == "" {
+		source = "dns"
+	}
+	identifiers, err := passiveIdentifiers(ctx, tx, address)
+	if err != nil {
+		return 0, err
+	}
+	// A controller's current MAC observation takes precedence over a stale ARP entry.
+	for _, identifier := range explicit {
+		if strings.EqualFold(identifier.Kind, "mac") && strings.TrimSpace(identifier.Value) != "" {
+			identifiers = slices.DeleteFunc(identifiers, func(passive Identifier) bool { return passive.Kind == "mac" })
+			break
+		}
+	}
+	identifiers = append(identifiers, explicit...)
+	identifiers = normalizedIdentifiers(identifiers)
 
 	matchedDeviceID, conflictingIdentifiers, err := deviceForIdentifiers(ctx, tx, identifiers)
 	if err != nil {
 		return 0, err
 	}
-	deviceID, err = deviceForAddress(ctx, tx, address, source, matchedDeviceID)
+	deviceID, err := deviceForAddress(ctx, tx, address, source, matchedDeviceID, identifiers)
 	if err != nil {
 		return 0, err
 	}
@@ -81,20 +100,35 @@ func ObserveAddress(ctx context.Context, store *db.Store, address, source string
 	if err = touchObservation(ctx, tx, address, deviceID); err != nil {
 		return 0, err
 	}
-	if err = tx.Commit(); err != nil {
-		return 0, err
-	}
 	return deviceID, nil
 }
 
-func deviceForAddress(ctx context.Context, tx *sql.Tx, address, source string, matchedDeviceID int64) (int64, error) {
+func deviceForAddress(ctx context.Context, tx *sql.Tx, address, source string, matchedDeviceID int64, identifiers []Identifier) (int64, error) {
 	var deviceID int64
 	err := tx.QueryRowContext(ctx, `SELECT device_id FROM device_addresses WHERE address = ?`, address).Scan(&deviceID)
 	if err == nil {
-		return deviceID, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+		conflict, err := hardwareConflict(ctx, tx, deviceID, identifiers)
+		if err != nil {
+			return 0, err
+		}
+		if !conflict {
+			return deviceID, nil
+		}
+		// Reassign only the current address; the previous owner's history and policy stay put.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM device_protection_assignments WHERE client_ip = ?`, address); err != nil {
+			return 0, err
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
+	}
+	if matchedDeviceID != 0 {
+		conflict, err := hardwareConflict(ctx, tx, matchedDeviceID, identifiers)
+		if err != nil {
+			return 0, err
+		}
+		if conflict {
+			matchedDeviceID = 0
+		}
 	}
 	deviceID = matchedDeviceID
 	if deviceID == 0 {
@@ -113,10 +147,28 @@ func deviceForAddress(ctx context.Context, tx *sql.Tx, address, source string, m
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO device_addresses(device_id, address, family, source, confidence, first_seen_at, last_seen_at)
-		VALUES(?, ?, ?, ?, 'observed', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))`, deviceID, address, family, source); err != nil {
+		VALUES(?, ?, ?, ?, 'observed', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+		ON CONFLICT(address) DO UPDATE SET device_id = excluded.device_id, source = excluded.source,
+		first_seen_at = excluded.first_seen_at, last_seen_at = excluded.last_seen_at`, deviceID, address, family, source); err != nil {
 		return 0, err
 	}
 	return deviceID, nil
+}
+
+func hardwareConflict(ctx context.Context, tx *sql.Tx, deviceID int64, identifiers []Identifier) (bool, error) {
+	for _, identifier := range identifiers {
+		if identifier.Kind != "mac" && identifier.Kind != "unifi_client" {
+			continue
+		}
+		var known, matching int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(value = ?), 0) FROM device_identifiers WHERE device_id = ? AND kind = ?`, identifier.Value, deviceID, identifier.Kind).Scan(&known, &matching); err != nil {
+			return false, err
+		}
+		if known > 0 && matching == 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func observeIdentifiers(ctx context.Context, tx *sql.Tx, deviceID int64, identifiers []Identifier) (int64, error) {
@@ -147,6 +199,9 @@ func normalizedIdentifiers(input []Identifier) []Identifier {
 		if identifier.Kind == "" || identifier.Value == "" {
 			continue
 		}
+		if identifier.Confidence == "" {
+			identifier.Confidence = "observed"
+		}
 		key := identifier.Kind + "\x00" + identifier.Value
 		if seen[key] {
 			continue
@@ -157,6 +212,13 @@ func normalizedIdentifiers(input []Identifier) []Identifier {
 	sort.Slice(result, func(leftIndex, rightIndex int) bool {
 		if result[leftIndex].Kind == result[rightIndex].Kind {
 			return result[leftIndex].Value < result[rightIndex].Value
+		}
+		// Record hardware evidence before considering a hostname shared with an old owner.
+		if result[leftIndex].Kind == "local_dns" {
+			return false
+		}
+		if result[rightIndex].Kind == "local_dns" {
+			return true
 		}
 		return result[leftIndex].Kind < result[rightIndex].Kind
 	})
@@ -196,7 +258,7 @@ func Addresses(ctx context.Context, store *db.Store, deviceID int64) (result []s
 	return result, rows.Err()
 }
 
-func passiveIdentifiers(ctx context.Context, database *sql.DB, address string) ([]Identifier, error) {
+func passiveIdentifiers(ctx context.Context, database *sql.Tx, address string) ([]Identifier, error) {
 	var identifiers []Identifier
 	rows, err := database.QueryContext(ctx, `
 		SELECT DISTINCT LOWER(TRIM(hostname))
@@ -222,9 +284,6 @@ func passiveIdentifiers(ctx context.Context, database *sql.DB, address string) (
 	if mac := arpMAC(address); mac != "" {
 		identifiers = append(identifiers, Identifier{Kind: "mac", Value: mac, Source: "neighbor_table", Confidence: "strong"})
 	}
-	sort.Slice(identifiers, func(leftIndex, rightIndex int) bool {
-		return identifiers[leftIndex].Kind < identifiers[rightIndex].Kind
-	})
 	return identifiers, nil
 }
 
@@ -239,6 +298,15 @@ func deviceForIdentifiers(ctx context.Context, tx *sql.Tx, identifiers []Identif
 		if err != nil {
 			return 0, false, err
 		}
+		if identifier.Kind == "local_dns" {
+			conflict, err := hardwareConflict(ctx, tx, candidate, identifiers)
+			if err != nil {
+				return 0, false, err
+			}
+			if conflict {
+				continue
+			}
+		}
 		if found != 0 && found != candidate {
 			// Conflicting strong signals should never trigger an automatic merge.
 			return 0, true, nil
@@ -249,11 +317,6 @@ func deviceForIdentifiers(ctx context.Context, tx *sql.Tx, identifiers []Identif
 }
 
 func observeIdentifier(ctx context.Context, tx *sql.Tx, deviceID int64, identifier Identifier) (int64, error) {
-	identifier.Kind = strings.ToLower(strings.TrimSpace(identifier.Kind))
-	identifier.Value = strings.ToLower(strings.TrimSpace(identifier.Value))
-	if identifier.Kind == "" || identifier.Value == "" {
-		return deviceID, nil
-	}
 	var existingID int64
 	err := tx.QueryRowContext(ctx, `SELECT device_id FROM device_identifiers WHERE kind = ? AND value = ?`, identifier.Kind, identifier.Value).Scan(&existingID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -269,9 +332,6 @@ func observeIdentifier(ctx context.Context, tx *sql.Tx, deviceID int64, identifi
 		}
 		deviceID = existingID
 	}
-	if identifier.Confidence == "" {
-		identifier.Confidence = "observed"
-	}
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO device_identifiers(device_id, kind, value, source, confidence)
 		VALUES(?, ?, ?, ?, ?)
@@ -283,6 +343,16 @@ func observeIdentifier(ctx context.Context, tx *sql.Tx, deviceID int64, identifi
 func safeMerge(ctx context.Context, tx *sql.Tx, targetID, sourceID int64) (bool, error) {
 	if targetID == sourceID {
 		return true, nil
+	}
+	var conflict bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+		SELECT 1 FROM device_identifiers a JOIN device_identifiers b ON a.kind = b.kind
+		WHERE a.device_id = ? AND b.device_id = ? AND a.kind IN ('mac', 'unifi_client') AND a.value <> b.value
+	)`, targetID, sourceID).Scan(&conflict); err != nil {
+		return false, err
+	}
+	if conflict {
+		return false, nil
 	}
 	target, err := readDeviceFields(ctx, tx, targetID)
 	if err != nil {

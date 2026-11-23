@@ -2,7 +2,7 @@
 
 [All guides](README.md) · Related: [Docker configuration](configuration.md) · [Storage](storage.md)
 
-Most changes happen in **Settings**. Provider selection has its own **Upstreams** page.
+Open **Settings** for **Preferences**, **DNS providers**, and **Local names**. Preferences contains DNS behavior, redundancy, integrations, data, and account controls.
 
 ## Change DNS behavior
 

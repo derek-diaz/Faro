@@ -545,22 +545,19 @@ type activityCountCacheEntry struct {
 const activityCountCacheTTL = 10 * time.Second
 
 const (
-	queryClientIPField       = "q.client_ip"
-	eventTitleField          = "e.title"
-	eventDescriptionField    = "e.description"
-	eventTypeField           = "e.type"
-	eventDomainField         = "e.domain"
-	eventClientIPField       = "e.client_ip"
-	eventTimestampField      = "e.timestamp"
-	queryDomainField         = "q.domain"
-	queryTypeField           = "q.query_type"
-	queryActionField         = "q.action"
-	querySourceField         = "q.source"
-	queryTimestampField      = "q.timestamp"
-	queryDeviceNameField     = "COALESCE(NULLIF(TRIM(a.name), ''), (SELECT NULLIF(TRIM(n.name), '') FROM device_names n WHERE n.device_id = a.id AND n.source = 'unifi'), (SELECT hostname FROM dns_records WHERE value = q.client_ip ORDER BY updated_at DESC, id DESC LIMIT 1), q.client_ip)"
-	deviceNameAggregate      = "COALESCE(MAX(a.name), '')"
-	deviceLocationAggregate  = "COALESCE(MAX(a.location), '')"
-	deviceTimestampAggregate = "MIN(q.timestamp)"
+	queryClientIPField    = "q.client_ip"
+	eventTitleField       = "e.title"
+	eventDescriptionField = "e.description"
+	eventTypeField        = "e.type"
+	eventDomainField      = "e.domain"
+	eventClientIPField    = "e.client_ip"
+	eventTimestampField   = "e.timestamp"
+	queryDomainField      = "q.domain"
+	queryTypeField        = "q.query_type"
+	queryActionField      = "q.action"
+	querySourceField      = "q.source"
+	queryTimestampField   = "q.timestamp"
+	queryDeviceNameField  = "COALESCE(NULLIF(TRIM(a.name), ''), (SELECT NULLIF(TRIM(n.name), '') FROM device_names n WHERE n.device_id = a.id AND n.source = 'unifi'), (SELECT hostname FROM dns_records WHERE value = q.client_ip ORDER BY updated_at DESC, id DESC LIMIT 1), q.client_ip)"
 )
 
 func activityRecords(ctx context.Context, database *sql.DB, limit, offset int, search, scope string, window activityWindow) ([]activityRecord, error) {
@@ -630,36 +627,33 @@ func activityEventRecordsPart(search string, window activityWindow) (string, []a
 	return activityWithClauses(query, "WHERE", clauses), args
 }
 
+// Older query history can contain addresses without a device_addresses row.
+const firstSeenDevices = `
+	SELECT da.address AS client_ip, da.first_seen_at AS timestamp,
+	       COALESCE(a.name, '') AS device_name, COALESCE(a.location, '') AS location
+	FROM device_addresses da
+	LEFT JOIN devices a ON a.id = da.device_id
+	WHERE EXISTS (SELECT 1 FROM dns_queries observed WHERE observed.client_ip = da.address)
+	UNION ALL
+	SELECT q.client_ip, MIN(q.timestamp), COALESCE(MAX(a.name), ''), COALESCE(MAX(a.location), '')
+	FROM dns_queries q
+	LEFT JOIN devices a ON a.id = q.device_id
+	WHERE q.client_ip IN (SELECT client_ip FROM dns_queries EXCEPT SELECT address FROM device_addresses)
+	GROUP BY q.client_ip`
+
+func firstSeenActivityQuery(columns, search string, window activityWindow) (string, []any) {
+	query := "SELECT " + columns + " FROM (" + firstSeenDevices + ") first_seen"
+	clauses, args := activityFilterClauses(search, []string{"client_ip", "device_name", "location"}, "timestamp", window)
+	return activityWithClauses(query, "WHERE", clauses), args
+}
+
 func activityDeviceRecordsPart(search string, window activityWindow) (string, []any) {
-	stableQuery := `
-		SELECT 'device' AS kind, 0 AS record_id, da.address AS record_key, da.first_seen_at AS timestamp,
-		       'device.first_seen' AS event_type, 'info' AS severity, '' AS title, '' AS description,
-		       da.address AS client_ip, '' AS domain, '' AS metadata, 'devices' AS source,
-		       '' AS query_type, '' AS action, '' AS upstream, '' AS rcode, NULL AS latency_ms,
-		       '' AS decision_reason, '' AS decision_metadata,
-		       COALESCE(a.name, '') AS device_name, COALESCE(a.location, '') AS location
-		FROM device_addresses da
-		LEFT JOIN devices a ON a.id = da.device_id`
-	stableClauses, stableArgs := activityFilterClauses(search, []string{"da.address", "a.name", "a.location"}, "da.first_seen_at", window)
-	stableClauses = append(stableClauses, `EXISTS (SELECT 1 FROM dns_queries observed WHERE observed.client_ip = da.address)`)
-	stableQuery = activityWithClauses(stableQuery, "WHERE", stableClauses)
-
-	legacyQuery := `
-		SELECT 'device' AS kind, 0 AS record_id, q.client_ip AS record_key, MIN(q.timestamp) AS timestamp,
-		       'device.first_seen' AS event_type, 'info' AS severity, '' AS title, '' AS description,
-		       q.client_ip AS client_ip, '' AS domain, '' AS metadata, 'devices' AS source,
-		       '' AS query_type, '' AS action, '' AS upstream, '' AS rcode, NULL AS latency_ms,
-		       '' AS decision_reason, '' AS decision_metadata,
-		       COALESCE(MAX(a.name), '') AS device_name, COALESCE(MAX(a.location), '') AS location
-		FROM dns_queries q
-		LEFT JOIN devices a ON a.id = q.device_id
- WHERE q.client_ip IN (SELECT client_ip FROM dns_queries EXCEPT SELECT address FROM device_addresses)
-		GROUP BY q.client_ip`
-	legacyClauses, legacyArgs := activityFilterClauses(search, []string{queryClientIPField, deviceNameAggregate, deviceLocationAggregate}, deviceTimestampAggregate, window)
-	legacyClauses = append(legacyClauses, `NOT EXISTS (SELECT 1 FROM device_addresses known WHERE known.address = q.client_ip)`)
-	legacyQuery = activityWithClauses(legacyQuery, "HAVING", legacyClauses)
-
-	return stableQuery + ` UNION ALL ` + legacyQuery, append(stableArgs, legacyArgs...)
+	return firstSeenActivityQuery(`
+		'device' AS kind, 0 AS record_id, client_ip AS record_key, timestamp,
+		'device.first_seen' AS event_type, 'info' AS severity, '' AS title, '' AS description,
+		client_ip, '' AS domain, '' AS metadata, 'devices' AS source,
+		'' AS query_type, '' AS action, '' AS upstream, '' AS rcode, NULL AS latency_ms,
+		'' AS decision_reason, '' AS decision_metadata, device_name, location`, search, window)
 }
 
 func activityQueryRecordsPart(search, scope string, window activityWindow) (string, []any) {
@@ -796,30 +790,9 @@ func activityTimelineEventPart(search string, window activityWindow, from string
 }
 
 func activityTimelineDevicePart(search string, window activityWindow, from string, bucketSeconds int) (string, []any) {
-	stableQuery := `
-		SELECT faro_activity_bucket AS bucket_index, 1 AS total, 0 AS blocked
-		FROM device_addresses da
-		LEFT JOIN devices a ON a.id = da.device_id`
-	stableQuery = strings.Replace(stableQuery, "faro_activity_bucket", activityTimelineBucketExpression("da.first_seen_at"), 1)
-	stableArgs := []any{from, bucketSeconds}
-	stableClauses, stableClauseArgs := activityFilterClauses(search, []string{"da.address", "a.name", "a.location"}, "da.first_seen_at", window)
-	stableClauses = append(stableClauses, `EXISTS (SELECT 1 FROM dns_queries observed WHERE observed.client_ip = da.address)`)
-	stableArgs = append(stableArgs, stableClauseArgs...)
-	stableQuery = activityWithClauses(stableQuery, "WHERE", stableClauses)
-
-	legacyQuery := `
-		SELECT faro_activity_bucket AS bucket_index, 1 AS total, 0 AS blocked
-		FROM dns_queries q
-		LEFT JOIN devices a ON a.id = q.device_id
- WHERE q.client_ip IN (SELECT client_ip FROM dns_queries EXCEPT SELECT address FROM device_addresses)
-		GROUP BY q.client_ip`
-	legacyQuery = strings.Replace(legacyQuery, "faro_activity_bucket", activityTimelineBucketExpression(deviceTimestampAggregate), 1)
-	legacyArgs := []any{from, bucketSeconds}
-	legacyClauses, legacyClauseArgs := activityFilterClauses(search, []string{queryClientIPField, deviceNameAggregate, deviceLocationAggregate}, deviceTimestampAggregate, window)
-	legacyClauses = append(legacyClauses, `NOT EXISTS (SELECT 1 FROM device_addresses known WHERE known.address = q.client_ip)`)
-	legacyArgs = append(legacyArgs, legacyClauseArgs...)
-	legacyQuery = activityWithClauses(legacyQuery, "HAVING", legacyClauses)
-	return stableQuery + ` UNION ALL ` + legacyQuery, append(stableArgs, legacyArgs...)
+	columns := activityTimelineBucketExpression("timestamp") + " AS bucket_index, 1 AS total, 0 AS blocked"
+	query, args := firstSeenActivityQuery(columns, search, window)
+	return query, append([]any{from, bucketSeconds}, args...)
 }
 
 func activityTimelineQueryPart(search, scope string, window activityWindow, from string, bucketSeconds int) (string, []any) {
@@ -857,7 +830,8 @@ func activityTimelineUnionQuery(parts []string) string {
 }
 
 func activityTimelineBucketExpression(field string) string {
-	return fmt.Sprintf("CAST(((julianday(%s) - julianday(?)) * 86400.0) / ? AS INTEGER)", field)
+	// Round to SQLite's millisecond precision before assigning exact bucket boundaries.
+	return fmt.Sprintf("CAST(ROUND((julianday(%s) - julianday(?)) * 86400000) AS INTEGER) / (? * 1000)", field)
 }
 
 func activityLikeClause(search string, fields ...string) (string, []any) {
@@ -871,7 +845,7 @@ func activityLikeClause(search string, fields ...string) (string, []any) {
 		clauses = append(clauses, field+` LIKE ?`)
 		args = append(args, like)
 	}
-	return strings.Join(clauses, ` OR `), args
+	return "(" + strings.Join(clauses, ` OR `) + ")", args
 }
 
 func activityRecordsToMaps(records []activityRecord) []map[string]any {
@@ -1022,24 +996,7 @@ func activityCounts(ctx context.Context, database *sql.DB, search string, window
 }
 
 func activityDeviceCountPart(search string, window activityWindow) (string, []any) {
-	stableQuery := `
-		SELECT 'device' AS kind, '' AS source, '' AS action
-		FROM device_addresses da
-		LEFT JOIN devices a ON a.id = da.device_id`
-	stableClauses, stableArgs := activityFilterClauses(search, []string{"da.address", "a.name", "a.location"}, "da.first_seen_at", window)
-	stableClauses = append(stableClauses, `EXISTS (SELECT 1 FROM dns_queries observed WHERE observed.client_ip = da.address)`)
-	stableQuery = activityWithClauses(stableQuery, "WHERE", stableClauses)
-
-	legacyQuery := `
-		SELECT 'device' AS kind, '' AS source, '' AS action
-		FROM dns_queries q
-		LEFT JOIN devices a ON a.id = q.device_id
- WHERE q.client_ip IN (SELECT client_ip FROM dns_queries EXCEPT SELECT address FROM device_addresses)
-		GROUP BY q.client_ip`
-	legacyClauses, legacyArgs := activityFilterClauses(search, []string{queryClientIPField, deviceNameAggregate, deviceLocationAggregate}, deviceTimestampAggregate, window)
-	legacyClauses = append(legacyClauses, `NOT EXISTS (SELECT 1 FROM device_addresses known WHERE known.address = q.client_ip)`)
-	legacyQuery = activityWithClauses(legacyQuery, "HAVING", legacyClauses)
-	return stableQuery + ` UNION ALL ` + legacyQuery, append(stableArgs, legacyArgs...)
+	return firstSeenActivityQuery("'device' AS kind, '' AS source, '' AS action", search, window)
 }
 
 func activityCountsQuery(parts []string) string {

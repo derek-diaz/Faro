@@ -65,10 +65,17 @@ func (classifier *Classifier) ClassifyPending(ctx context.Context, limit int) (p
 	}
 	info := classifier.catalog.Info()
 	rows, err := classifier.store.DB.QueryContext(ctx, `
-		WITH activity AS (
+		WITH eligible AS (
+			SELECT d.id, d.name, c.classified_query_id,
+			       CASE WHEN c.device_id IS NULL THEN 0 WHEN c.catalog_version <> ? THEN 1 ELSE 2 END AS priority
+			FROM devices d
+			LEFT JOIN device_classifications c ON c.device_id = d.id
+			WHERE c.device_id IS NULL OR c.catalog_version <> ?
+			   OR julianday(c.evaluated_at) < julianday('now', ?)
+		), activity AS (
 			SELECT device_id, MAX(id) AS query_id
 			FROM dns_queries
-			WHERE device_id IS NOT NULL
+			WHERE device_id IN (SELECT id FROM eligible)
 			GROUP BY device_id
 		)
 		SELECT
@@ -85,21 +92,15 @@ func (classifier *Classifier) ClassifyPending(ctx context.Context, limit int) (p
 				LIMIT 1
 			), ''),
 			COALESCE(activity.query_id, 0)
-		FROM devices d
+		FROM eligible d
 		LEFT JOIN activity ON activity.device_id = d.id
-		LEFT JOIN device_classifications c ON c.device_id = d.id
-		WHERE c.device_id IS NULL
-		   OR c.catalog_version <> ?
-		   OR (
-				c.classified_query_id < COALESCE(activity.query_id, 0)
-				AND julianday(c.evaluated_at) < julianday('now', ?)
-		   )
+		WHERE d.priority < 2 OR d.classified_query_id < COALESCE(activity.query_id, 0)
 		ORDER BY
-			CASE WHEN c.device_id IS NULL THEN 0 WHEN c.catalog_version <> ? THEN 1 ELSE 2 END,
+			d.priority,
 			COALESCE(activity.query_id, 0) DESC,
 			d.id
 		LIMIT ?
-	`, info.CatalogVersion, fmt.Sprintf("-%d seconds", int(classificationCooldown.Seconds())), info.CatalogVersion, limit)
+	`, info.CatalogVersion, info.CatalogVersion, fmt.Sprintf("-%d seconds", int(classificationCooldown.Seconds())), limit)
 	if err != nil {
 		return 0, err
 	}

@@ -64,7 +64,7 @@ Frontend, from the repository root:
 cd frontend
 npm ci
 npm run build
-node --test tests/favicons.test.mjs
+node --test tests/*.test.mjs
 ```
 
 Return to the repository root with `cd ..` before running Go or Docker commands. For a frontend-only server, `npm run dev` uses the API target in `VITE_API_PROXY_TARGET` or defaults to `http://localhost:8080`; it does not start a DNS server.
@@ -74,6 +74,9 @@ Choose checks that exercise your change. For DNS availability changes, the dispo
 ```sh
 bash tools/dns-reliability.sh
 ```
+
+For sustained mixed DNS traffic, concurrent API reads, log rotation and reloads,
+use the isolated [DNS load test](dns-load-testing.md).
 
 For history-query performance changes, run:
 

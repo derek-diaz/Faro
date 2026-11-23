@@ -6,11 +6,11 @@ Upstream providers answer lookups Faro cannot answer locally.
 
 ## Choose and save providers
 
-1. Open **Upstreams**.
+1. Open **Settings → DNS providers**.
 2. Under **Connection to DNS providers**, choose **Encrypted** or **Standard DNS**.
 3. Select the provider profiles you want.
 4. Review **Current selection** and any compatibility or mixed-filtering messages.
-5. Choose **Save upstreams** and wait for confirmation.
+5. Choose **Save providers** and wait for confirmation.
 6. Choose **Refresh** under live latency to check providers.
 7. Make a DNS lookup from a device and check that it succeeds.
 
@@ -28,7 +28,7 @@ If an encrypted provider fails, Faro can try another selected encrypted provider
 1. Choose **Standard DNS**.
 2. Enter server addresses under **Custom resolvers**.
 3. Choose **Add servers**.
-4. Review the selection and choose **Save upstreams**.
+4. Review the selection and choose **Save providers**.
 
 Custom IP resolvers without a supported HTTPS endpoint cannot be used in encrypted mode. Faro explains incompatible selections before saving.
 

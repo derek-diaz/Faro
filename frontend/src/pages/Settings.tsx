@@ -255,7 +255,7 @@ function GeneralSettings({ form, setForm, upstreams, onManageUpstreams, reloadDN
           <Button variant="outline" type="button" onClick={reloadDNS} disabled={actionState === "working"}><RotateCw size={16} />Reload DNS</Button>
         </div>
         <form className="settings-rows" onSubmit={(event) => void saveGeneral(event)}>
-          <SettingRow icon={<Server size={19} />} title="Upstream providers" description={`${upstreams.length} selected: ${upstreams.join(", ") || "none"}`}>
+          <SettingRow icon={<Server size={19} />} title="DNS providers" description={`${upstreams.length} selected: ${upstreams.join(", ") || "none"}`}>
             <Button variant="outline" type="button" onClick={onManageUpstreams}>Manage</Button>
           </SettingRow>
           <SettingRow icon={<Globe2 size={19} />} title="Local domain suffix" description="Default suffix suggested for local records.">
@@ -293,7 +293,7 @@ function GeneralSettings({ form, setForm, upstreams, onManageUpstreams, reloadDN
         <section className="panel settings-summary">
           <div className="panel-title"><div><h2>Configuration preview</h2><p>Reflects your changes before saving.</p></div></div>
           <div className="settings-summary-list">
-            <SummaryRow label="Upstreams" value={upstreams.join(", ") || "Not configured"} />
+            <SummaryRow label="DNS providers" value={upstreams.join(", ") || "Not configured"} />
             <SummaryRow label="Local suffix" value={form.local_domain_suffix || "home"} />
             <SummaryRow label="LAN address" value={form.faro_lan_ip || "Not configured"} />
             <SummaryRow label="Cache" value={cacheSummary(form)} />

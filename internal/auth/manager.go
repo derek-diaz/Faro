@@ -284,7 +284,6 @@ func (manager *Manager) ChangePassword(responseWriter http.ResponseWriter, reque
 func (manager *Manager) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		publicRedundancy := request.URL.Path == "/api/redundancy/public" ||
-			request.URL.Path == "/api/redundancy/join" ||
 			request.URL.Path == "/api/redundancy/pair" ||
 			request.URL.Path == "/api/redundancy/replica/snapshot" ||
 			request.URL.Path == "/api/redundancy/replica/ack"
@@ -292,7 +291,8 @@ func (manager *Manager) Require(next http.Handler) http.Handler {
 			next.ServeHTTP(responseWriter, request)
 			return
 		}
-		if request.Method == http.MethodDelete && request.URL.Path == "/api/redundancy" {
+		if (request.Method == http.MethodDelete && request.URL.Path == "/api/redundancy") ||
+			(request.Method == http.MethodPost && request.URL.Path == "/api/redundancy/join") {
 			configured, err := manager.configured(request.Context())
 			if err != nil {
 				writeError(responseWriter, http.StatusInternalServerError, "could not verify Faro authentication")

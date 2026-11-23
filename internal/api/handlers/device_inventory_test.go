@@ -78,6 +78,26 @@ func TestDeviceInventoryIsPaginatedAndConditionallyCached(t *testing.T) {
 	if notModified.Code != http.StatusNotModified || notModified.Body.Len() != 0 {
 		t.Fatalf("conditional inventory status = %d body=%q", notModified.Code, notModified.Body.String())
 	}
+
+	// A client's day boundary affects the totals even without a database write.
+	conditional.Header.Set("X-Faro-Timezone", "America/La_Paz")
+	changedDay := httptest.NewRecorder()
+	handler.devices(changedDay, conditional)
+	if changedDay.Code != http.StatusOK {
+		t.Fatalf("different day boundary returned %d, want a fresh page", changedDay.Code)
+	}
+
+	for page, wantItems := range map[int]int{1: 1, 2: 0} {
+		filtered := httptest.NewRecorder()
+		path := fmt.Sprintf("/api/devices?page=%d&page_size=10&search=Device+118", page)
+		handler.devices(filtered, httptest.NewRequest(http.MethodGet, path, nil))
+		if err := json.Unmarshal(filtered.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Total != 1 || len(payload.Items) != wantItems {
+			t.Fatalf("filtered page %d: total=%d items=%d", page, payload.Total, len(payload.Items))
+		}
+	}
 }
 
 func TestDeviceInventoryReadDoesNotClassifyDevices(t *testing.T) {

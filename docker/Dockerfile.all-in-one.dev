@@ -40,6 +40,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY docker/faro-dev-entrypoint.sh /usr/local/bin/faro-dev-entrypoint
+COPY docker/go-cpu-limit.sh /usr/local/lib/faro/go-cpu-limit.sh
 COPY docker/faro-dev-healthcheck.sh /usr/local/bin/faro-dev-healthcheck
 RUN chmod 0755 /usr/local/bin/faro-dev-entrypoint /usr/local/bin/faro-dev-healthcheck
 

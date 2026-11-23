@@ -45,11 +45,11 @@ const pagePaths: Record<Page, string> = {
 };
 
 const pageLabels: Record<Page, string> = {
-  dashboard: "Dashboard",
+  dashboard: "Overview",
   queries: "Activity",
   devices: "Devices",
-  records: "Local DNS",
-  upstreams: "Upstreams",
+  records: "Local names",
+  upstreams: "DNS providers",
   protection: "Protection",
   blocklists: "Blocklists",
   settings: "Settings"
@@ -118,14 +118,27 @@ export function App() {
   async function authenticate(username: string, password: string) {
     setAuthError("");
     try {
-      auth?.configured ? await api.login(username, password) : await api.setupAuth(username, password);
+      if (auth?.configured) {
+        await api.login(username, password);
+      } else {
+        await api.setupAuth(username, password);
+      }
       setAuth(await api.authStatus());
     } catch (error_) {
       setAuthError(error_ instanceof Error ? error_.message : "Authentication failed.");
     }
   }
 
-  if (!auth || !redundancy) return authError ? <AuthScreen mode="login" onSubmit={authenticate} error={authError} themeMode={themeMode} onThemeModeChange={setThemeMode} /> : <AuthLoading themeMode={themeMode} onThemeModeChange={setThemeMode} />;
+  const appearanceProps = { themeMode, onThemeModeChange: setThemeMode };
+  const authProps = { onSubmit: authenticate, error: authError, ...appearanceProps };
+  const startJoining = () => setJoiningExisting(true);
+  const cancelJoining = () => setJoiningExisting(false);
+
+  if (!auth || !redundancy) {
+    return authError
+      ? <AuthScreen mode="login" {...authProps} />
+      : <AuthLoading {...appearanceProps} />;
+  }
   if (redundancy.role === "replica") {
     return (
       <ReplicaNodeScreen
@@ -133,8 +146,7 @@ export function App() {
         configured={auth.configured}
         authenticated={auth.authenticated}
         username={auth.username}
-        themeMode={themeMode}
-        onThemeModeChange={setThemeMode}
+        {...appearanceProps}
         onLeft={(next) => {
           void api.authStatus()
             .then((nextAuth) => {
@@ -146,12 +158,32 @@ export function App() {
       />
     );
   }
-  if (joiningExisting) return <JoinExistingFaro onBack={() => setJoiningExisting(false)} onJoined={setRedundancy} themeMode={themeMode} onThemeModeChange={setThemeMode} />;
-  if (!auth.configured) return <AuthScreen mode="setup" onSubmit={authenticate} error={authError} onJoinExisting={() => setJoiningExisting(true)} themeMode={themeMode} onThemeModeChange={setThemeMode} />;
-  if (!auth.authenticated) return <AuthScreen mode="login" onSubmit={authenticate} error={authError} onJoinExisting={() => setJoiningExisting(true)} themeMode={themeMode} onThemeModeChange={setThemeMode} />;
-  if (!auth.onboarding_complete) return <Onboarding username={auth.username || "admin"} onComplete={() => setAuth({ ...auth, onboarding_complete: true })} onJoinExisting={() => setJoiningExisting(true)} themeMode={themeMode} onThemeModeChange={setThemeMode} />;
-
-  return <AuthenticatedApp username={auth.username || "admin"} onSignedOut={() => setAuth({ configured: true, authenticated: false, onboarding_complete: true })} themeMode={themeMode} onThemeModeChange={setThemeMode} />;
+  if (joiningExisting) {
+    if (auth.configured && !auth.authenticated) {
+      return <AuthScreen mode="login" onCancelJoin={cancelJoining} {...authProps} />;
+    }
+    return <JoinExistingFaro onBack={cancelJoining} onJoined={setRedundancy} {...appearanceProps} />;
+  }
+  if (!auth.configured || !auth.authenticated) {
+    return <AuthScreen mode={auth.configured ? "login" : "setup"} onJoinExisting={startJoining} {...authProps} />;
+  }
+  if (!auth.onboarding_complete) {
+    return (
+      <Onboarding
+        username={auth.username || "admin"}
+        onComplete={() => setAuth({ ...auth, onboarding_complete: true })}
+        onJoinExisting={startJoining}
+        {...appearanceProps}
+      />
+    );
+  }
+  return (
+    <AuthenticatedApp
+      username={auth.username || "admin"}
+      onSignedOut={() => setAuth({ configured: true, authenticated: false, onboarding_complete: true })}
+      {...appearanceProps}
+    />
+  );
 }
 
 type AuthenticatedAppProps = Readonly<{
@@ -308,6 +340,15 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
     setDevices(await api.devices());
   }
 
+  async function refreshProtectionData() {
+    const [nextProtections, nextBlocklists, nextDevices] = await Promise.all([
+      api.protections(), api.blocklists(), api.devices()
+    ]);
+    setProtections(nextProtections);
+    setBlocklists(nextBlocklists);
+    setDevices(nextDevices);
+  }
+
   async function signOut() {
     try {
       await api.logout();
@@ -438,7 +479,7 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
       case "upstreams":
         return <Upstreams settings={settings} refresh={loadAll} />;
       case "protection":
-        return <ProtectionPage protections={protections} blocklists={blocklists} devices={devices} refresh={loadAll} onManageBlocklists={() => navigateToPage("blocklists")} />;
+        return <ProtectionPage protections={protections} blocklists={blocklists} devices={devices} refresh={refreshProtectionData} onManageBlocklists={() => navigateToPage("blocklists")} />;
       case "blocklists":
         return <Blocklists blocklists={blocklists} refresh={loadAll} />;
       case "settings":

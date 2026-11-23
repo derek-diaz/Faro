@@ -31,15 +31,19 @@ import { AppearanceMenu } from "./AppearanceMenu";
 import type { ThemeMode } from "../theme";
 
 const navItems: { id: Page; label: string; description: string; href: string; icon: LucideIcon }[] = [
-  { id: "dashboard", label: "Dashboard", description: "Live network health and DNS traffic at a glance.", href: "/", icon: BarChart3 },
-  { id: "queries", label: "Activity", description: "Explore DNS requests, blocks, and system changes.", href: "/activity", icon: Activity },
+  { id: "dashboard", label: "Overview", description: "See how Faro is working and what needs your attention.", href: "/", icon: BarChart3 },
   { id: "devices", label: "Devices", description: "See which devices are active on your network.", href: "/devices", icon: MonitorSmartphone },
-  { id: "records", label: "Local DNS", description: "Manage friendly names for services on your network.", href: "/local-dns", icon: Router },
-  { id: "upstreams", label: "Upstreams", description: "Choose the DNS providers Faro uses for public lookups.", href: "/upstreams", icon: Network },
   { id: "protection", label: "Protection", description: "Home covers every device by default. Add a setup only when some devices need different blocking or exceptions.", href: "/protection", icon: ShieldCheck },
+  { id: "queries", label: "Activity", description: "Explore DNS requests, blocks, and system changes.", href: "/activity", icon: Activity },
+  { id: "settings", label: "Settings", description: "Configure DNS behavior and Faro preferences.", href: "/settings", icon: Settings },
   { id: "blocklists", label: "Blocklists", description: "Install, update, pause, and remove filtering sources.", href: "/blocklists", icon: Database },
-  { id: "settings", label: "Settings", description: "Configure DNS behavior and Faro preferences.", href: "/settings", icon: Settings }
+  { id: "upstreams", label: "DNS providers", description: "Choose the providers Faro asks for public domain addresses.", href: "/upstreams", icon: Network },
+  { id: "records", label: "Local names", description: "Give services on your network easy-to-remember names with local DNS records.", href: "/local-dns", icon: Router }
 ];
+
+const primaryPages: Page[] = ["dashboard", "devices", "protection", "queries", "settings"];
+const protectionPages: Page[] = ["protection", "blocklists"];
+const settingsPages: Page[] = ["settings", "upstreams", "records"];
 
 type LayoutProps = {
   readonly page: Page;
@@ -63,6 +67,8 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const currentPage = navItems.find((item) => item.id === page) ?? navItems[0];
+  const sectionPages = protectionPages.includes(page) ? protectionPages : settingsPages.includes(page) ? settingsPages : [];
+  const primaryPage = sectionPages[0] ?? page;
   const apiStatusTitle = getApiStatusTitle(apiState);
   const apiStatusLabel = getApiStatusLabel(apiState);
   return (
@@ -78,15 +84,16 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
         </div>
 
         <nav id="primary-navigation" aria-label="Primary navigation">
-          {navItems.map((item) => {
+          {navItems.filter((item) => primaryPages.includes(item.id)).map((item) => {
             const Icon = item.icon;
             return (
               <a
                 key={item.id}
-                className={page === item.id ? "nav-item active" : "nav-item"}
+                className={primaryPage === item.id ? "nav-item active" : "nav-item"}
                 href={item.href}
                 aria-current={page === item.id ? "page" : undefined}
                 onClick={(event) => {
+                  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                   event.preventDefault();
                   setPage(item.id);
                   setMobileNavOpen(false);
@@ -165,7 +172,21 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
             </div>
           </aside>
         )}
-        <div className="main-content">{children}</div>
+        <div className="main-content">
+          {sectionPages.length > 0 && <nav className="section-navigation" aria-label={primaryPage === "protection" ? "Protection pages" : "Settings pages"}>
+            {sectionPages.map((id) => {
+              const item = navItems.find((entry) => entry.id === id)!;
+              const Icon = item.icon;
+              const label = id === "protection" ? "Protection setups" : id === "settings" ? "Preferences" : item.label;
+              return <a key={id} href={item.href} aria-current={page === id ? "page" : undefined} onClick={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                event.preventDefault();
+                setPage(id);
+              }}><Icon size={16} /><span>{label}</span></a>;
+            })}
+          </nav>}
+          {children}
+        </div>
       </main>
       <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} appVersion={appVersion} releaseUpdate={releaseUpdate} />
     </div>

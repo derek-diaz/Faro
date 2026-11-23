@@ -1,5 +1,6 @@
 #!/bin/bash
 set -Eeuo pipefail
+source /usr/local/lib/faro/go-cpu-limit.sh
 
 air_pid=""
 doh_pid=""

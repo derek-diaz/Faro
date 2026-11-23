@@ -1,6 +1,8 @@
 package db
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +12,84 @@ import (
 
 	"github.com/mattn/go-sqlite3"
 )
+
+func TestReadThenWriteTransactionKeepsSnapshot(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	writer, err := store.DB.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.ExecContext(ctx, `PRAGMA busy_timeout = 25`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	var value string
+	if err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'dns_cache_ttl'`).Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	// Readers must remain available, but another writer cannot invalidate this snapshot.
+	var readValue string
+	if err := writer.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'dns_cache_ttl'`).Scan(&readValue); err != nil || readValue != value {
+		t.Fatalf("concurrent read = %q, %v; want %q", readValue, err, value)
+	}
+	_, err = writer.ExecContext(ctx, `UPDATE settings SET value = '301' WHERE key = 'dns_cache_ttl'`)
+	var busy sqlite3.Error
+	if !errors.As(err, &busy) || busy.Code != sqlite3.ErrBusy {
+		t.Fatalf("concurrent writer invalidated the transaction's snapshot: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE settings SET value = '302' WHERE key = 'dns_cache_ttl'`); err != nil {
+		t.Fatalf("read-then-write transaction failed: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.ExecContext(ctx, `UPDATE settings SET value = '303' WHERE key = 'dns_cache_ttl'`); err != nil {
+		t.Fatalf("writer remained blocked after commit: %v", err)
+	}
+}
+
+func TestTrafficSummariesUseCoveringIndexes(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, query := range []string{
+		`SELECT device_id, COUNT(*), SUM(action = 'blocked'), MAX(timestamp) FROM dns_queries WHERE timestamp >= '2026-01-01' AND device_id IS NOT NULL GROUP BY device_id`,
+		`SELECT COUNT(*), SUM(action = 'blocked'), SUM(source = 'cache'), AVG(latency_ms) FROM dns_queries WHERE timestamp >= '2026-01-01'`,
+	} {
+		rows, err := store.DB.Query("EXPLAIN QUERY PLAN " + query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan strings.Builder
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan.WriteString(detail)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+		if !strings.Contains(plan.String(), "COVERING INDEX") {
+			t.Errorf("traffic summary reads full history rows instead of its index: %s", plan.String())
+		}
+	}
+}
 
 func TestSQLiteDurabilityPragmasAndForeignKeys(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "faro.db"))

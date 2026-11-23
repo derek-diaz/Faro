@@ -103,7 +103,7 @@ Using Unraid? Follow the [Unraid installation notes](docs/unraid.md).
 
 Open **`http://YOUR-FARO-IP:1787`** in your browser, replacing `YOUR-FARO-IP` with the machine's local IP address. For example: `http://192.168.1.10:1787`.
 
-Create your administrator account and follow the guided setup to choose upstream DNS providers and protection. Account creation closes automatically after the first administrator is created.
+Create your administrator account, then use the recommended DNS and protection settings or choose **Customize settings**. Faro applies the configuration and helps you connect a first device and check for its DNS activity. You can also finish setup and connect devices later. Account creation closes automatically after the first administrator is created.
 
 ### 3. Point your devices to Faro
 

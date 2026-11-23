@@ -3,10 +3,8 @@ import { BrandLogo } from "./BrandLogo";
 
 export const setupStages = [
   { label: "Administrator", detail: "Protect access to Faro" },
-  { label: "Local network", detail: "Names and caching" },
-  { label: "Upstreams", detail: "Public DNS providers" },
-  { label: "Protection", detail: "Optional filtering" },
-  { label: "Connect", detail: "Review and finish" }
+  { label: "DNS setup", detail: "Recommended or custom settings" },
+  { label: "Connect & check", detail: "Observe your first DNS requests" }
 ];
 
 export function SetupRail({ currentStep, username }: { readonly currentStep: number; readonly username?: string }) {

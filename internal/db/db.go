@@ -28,7 +28,9 @@ func Open(path string) (*Store, error) {
 	if err := recoverInterruptedMigration(path); err != nil {
 		return nil, err
 	}
-	database, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000&_cache_size=-20000")
+	// Transactions on the writable store reserve the writer before reading, so
+	// concurrent history ingestion cannot invalidate a settings/identity snapshot.
+	database, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_foreign_keys=on&_busy_timeout=5000&_cache_size=-20000&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}

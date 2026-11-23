@@ -149,7 +149,7 @@ function DashboardDigest({ summary, onDomainSelect, onDeviceSelect, onViewBlockl
     { id: "devices", label: "Devices", icon: <MonitorSmartphone size={15} />, items: summary.whats_new?.devices ?? [], onSelect: onDeviceSelect },
     { id: "domains", label: "Domains", icon: <Globe2 size={15} />, items: summary.whats_new?.domains ?? [], onSelect: onDomainSelect },
     { id: "blocklists", label: "Blocklists", icon: <ListFilter size={15} />, items: summary.whats_new?.blocklists ?? [], onSelect: () => onViewBlocklists() },
-    { id: "local-records", label: "Local DNS", icon: <Database size={15} />, items: summary.whats_new?.local_records ?? [], onSelect: () => onViewLocalDns() }
+    { id: "local-records", label: "Local names", icon: <Database size={15} />, items: summary.whats_new?.local_records ?? [], onSelect: () => onViewLocalDns() }
   ].filter((group) => group.items.length > 0);
   const changeCount = groups.reduce((total, group) => total + group.items.length, 0);
   const stories = (summary.stories ?? []).slice(0, 4);

@@ -1,6 +1,10 @@
 .cache/
 .git/
 .idea/
+.tmp/
+.playwright-cli/
+.env
+.env.local
 frontend/dist/
 frontend/node_modules/
 frontend/*.tsbuildinfo

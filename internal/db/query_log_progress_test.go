@@ -13,7 +13,7 @@ func TestQueryLogProgressUpgradePreservesExistingHistory(t *testing.T) {
 	}
 	if _, err := store.DB.Exec(`INSERT INTO dns_queries(timestamp,client_ip,domain,query_type,action,source) VALUES('2026-09-07T00:00:00Z','192.0.2.1','existing.example','A','allowed','upstream');
  DROP TABLE query_log_progress;
- DELETE FROM faro_schema_migrations WHERE version=14;
+ DELETE FROM faro_schema_migrations WHERE version>=14;
  PRAGMA user_version=13;
  UPDATE settings SET value='13' WHERE key='database_schema_version'`); err != nil {
 		store.Close()

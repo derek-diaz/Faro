@@ -94,12 +94,14 @@ var deleteTables = []string{
 // A failed restore must also recover tables that are intentionally excluded
 // from portable backups but are deleted indirectly by foreign-key cascades.
 var rollbackDeleteTables = append([]string{
+	"device_dns_pauses",
 	"device_classifications",
 	"unifi_client_snapshots",
 	"device_names",
 }, deleteTables...)
 
 var rollbackRestoreTables = append(append([]string(nil), restoreTables...),
+	"device_dns_pauses",
 	"troubleshooting_exceptions",
 	"device_names",
 	"unifi_client_snapshots",

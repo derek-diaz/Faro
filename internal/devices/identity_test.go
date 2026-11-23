@@ -33,6 +33,60 @@ func TestResolveAddressIsStable(t *testing.T) {
 	}
 }
 
+func TestReassignedAddressDoesNotMergeDevicesOrMoveHistory(t *testing.T) {
+	for _, known := range []bool{false, true} {
+		t.Run(map[bool]string{false: "new device", true: "known device"}[known], func(t *testing.T) {
+			store := newTestStore(t)
+			ctx := context.Background()
+			observe := func(address, mac string) int64 {
+				t.Helper()
+				id, err := ObserveAddress(ctx, store, address, "unifi", []Identifier{{Kind: "mac", Value: mac}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return id
+			}
+			oldID := observe("192.0.2.20", "02:11:22:33:44:55")
+			var newID int64
+			if known {
+				newID = observe("192.0.2.21", "02:aa:bb:cc:dd:ee")
+			}
+			// An old DNS name must not outweigh the new owner's hardware identity.
+			if _, err := store.DB.Exec(`INSERT INTO dns_records(hostname, type, value) VALUES('old-device.home', 'A', '192.0.2.20');
+				INSERT INTO device_identifiers(device_id, kind, value, source, confidence) VALUES(?, 'local_dns', 'old-device.home', 'local_dns', 'strong')`, oldID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.DB.Exec(`
+				INSERT INTO device_protection_memberships(device_id, protection_id) VALUES(?, 1);
+				INSERT INTO device_protection_assignments(client_ip, protection_id) VALUES('192.0.2.20', 1);
+				INSERT INTO dns_queries(timestamp, client_ip, device_id, domain, query_type, action, source) VALUES(CURRENT_TIMESTAMP, '192.0.2.20', ?, 'old.example', 'A', 'allowed', 'upstream')`, oldID, oldID); err != nil {
+				t.Fatal(err)
+			}
+			got := observe("192.0.2.20", "02:aa:bb:cc:dd:ee")
+			if got == oldID || (known && got != newID) {
+				t.Fatalf("reassigned address resolved to %d (old %d, known %d)", got, oldID, newID)
+			}
+			var historyID, membershipID int64
+			if err := store.DB.QueryRow(`SELECT device_id FROM dns_queries`).Scan(&historyID); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.DB.QueryRow(`SELECT device_id FROM device_protection_memberships`).Scan(&membershipID); err != nil {
+				t.Fatal(err)
+			}
+			if historyID != oldID || membershipID != oldID {
+				t.Fatal("reassignment moved old history or protection")
+			}
+			var legacy int
+			if err := store.DB.QueryRow(`SELECT COUNT(*) FROM device_protection_assignments WHERE client_ip = '192.0.2.20'`).Scan(&legacy); err != nil {
+				t.Fatal(err)
+			}
+			if legacy != 0 {
+				t.Fatal("new owner inherited old IP protection")
+			}
+		})
+	}
+}
+
 func TestResolveAddressCorrelatesDualStackLocalDNS(t *testing.T) {
 	store := newTestStore(t)
 	if _, err := store.DB.Exec(`

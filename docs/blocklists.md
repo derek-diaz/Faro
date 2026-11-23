@@ -2,11 +2,11 @@
 
 [All guides](README.md) · Next: [Apply protection](protection.md)
 
-Install sources on **Blocklists**, then choose where they apply on **Protection**.
+Open **Protection → Blocklists** to manage filtering sources. When creating a protection setup, Standard and Stricter filtering can install their source within the setup flow.
 
 ## Install a listed source
 
-1. Open **Blocklists → Available**.
+1. Open **Protection → Blocklists → Available**.
 2. Search or filter by category. Read the source's description and compatibility guidance.
 3. Choose **Install** for the source you want.
 4. Wait for the download to finish.
@@ -17,7 +17,7 @@ Start with one general-purpose source and add specialized lists as needed. This 
 
 ## Add your own source
 
-1. Choose **Add custom** on **Blocklists**.
+1. Choose **Add custom** on **Protection → Blocklists**.
 2. Enter a name and the public URL of a hosts file or plain domain list.
 3. Leave **Enable after installation** selected if you want it available immediately.
 4. Choose **Add blocklist**.
@@ -27,7 +27,7 @@ Browser-extension filter lists can contain rules DNS cannot use. Use a hosts fil
 
 ## Update, pause, or remove a source
 
-1. Open **Blocklists → Installed**.
+1. Open **Protection → Blocklists → Installed**.
 2. Use **Update now** on a source to download it again.
 3. Use its pause/resume control to disable or re-enable it.
 4. To delete it, choose **Remove** and review the affected protection setups before confirming.

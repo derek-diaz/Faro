@@ -170,7 +170,7 @@ function flattenResults(results: SearchResults): CommandResult[] {
     ["domains", "Domain"],
     ["events", "Event"],
     ["rules", "Rule"],
-    ["local_records", "Local DNS"],
+    ["local_records", "Local names"],
     ["blocklists", "Blocklist"]
   ];
   return groups.flatMap(([group, groupLabel]) => results[group].map((item) => ({ ...item, group, groupLabel })));

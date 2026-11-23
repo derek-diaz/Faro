@@ -10,9 +10,9 @@ Use this guide after Faro answers a direct lookup. Examples use `192.168.1.10` f
 2. Change DNS from automatic to manual.
 3. Enter Faro's IP address. Remove other resolver addresses for this test.
 4. Save and reconnect the device.
-5. Browse a few sites and check **Activity** in Faro.
+5. Browse a few sites and check **Activity** in Faro. During initial setup, use **Check for DNS activity** on the **Connect & check** step instead.
 
-You should see requests from the device. To undo the test, return DNS to automatic and reconnect.
+You should see requests from the device. The setup check looks for recent requests after configuration was applied and excludes Faro's own address and loopback requests. A request confirms that lookup reached Faro; it does not confirm every device is connected or that the website loaded. To undo the test, return DNS to automatic and reconnect.
 
 ## Connect the whole network
 

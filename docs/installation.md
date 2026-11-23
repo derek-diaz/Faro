@@ -52,10 +52,12 @@ Wait for startup to finish. If the container keeps restarting, [check its logs](
 ## 3. Complete setup
 
 1. Open `http://192.168.1.10:1787`, using your machine's address.
-2. Create your administrator username and password. Account creation closes after the first administrator is created.
-3. Enter Faro's fixed LAN address and review the local domain suffix and cache setting.
-4. Choose upstream providers and a connection mode. **Encrypted** sends Faro's public lookups over HTTPS; devices still use ordinary DNS to reach Faro.
-5. Finish the remaining setup screens and review your choices.
+2. Create your administrator username and password in the setup screen. No terminal command is needed to create the account. Account creation closes after the first administrator is created.
+3. Enter Faro's fixed LAN address. The recommended setup uses **Cloudflare Standard over HTTPS**, **OISD small**, a five-minute DNS cache, and `.home` local names. Cloudflare Standard adds no provider filtering; Faro applies the starter blocklist.
+4. Choose **Customize settings** if you want different providers, protection, local names, or cache behavior. Encrypted upstreams cover Faro's public lookups; devices still use ordinary DNS to reach Faro.
+5. Choose **Apply and connect**. Faro applies the configuration before showing connection instructions.
+6. Point one device's DNS at Faro, open a few websites, then choose **Check for DNS activity**. Seeing a request confirms that request reached Faro, not that all devices use it or that a website loaded.
+7. Choose **Finish setup and open Faro** after requests appear. If you are not ready to change DNS, choose **Finish setup and connect later**; this finishes configuration without claiming the connection was checked.
 
 ## 4. Check DNS
 

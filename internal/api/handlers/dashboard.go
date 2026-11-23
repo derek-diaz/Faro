@@ -77,7 +77,7 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 	}
 	total := traffic.total
 	blocked := traffic.blocked
-	devices, _, inventory, err := handler.loadDeviceInventory(request, deviceInventoryOptions{page: 1, pageSize: 5, sort: "requests", direction: "desc", activeToday: true, paged: true})
+	devices, activeDevices, err := handler.loadDeviceInventory(request, start, deviceInventoryOptions{page: 1, pageSize: 5, sort: "requests", direction: "desc", activeToday: true})
 	if err != nil {
 		writeError(responseWriter, err)
 		return
@@ -117,10 +117,15 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 		upstreamSnapshot = handler.upstreams.Snapshot()
 	}
 
+	highlights := dashboardHighlights{
+		blocked: blocked, newDevices: counts.newDevices, topClients: topClients, topBlocked: topBlocked,
+		reloadFailures: counts.reloadFailures, upstreams: upstreamSnapshot,
+		dnsMetricsAvailable: liveCache.available, dnsMetricsPending: metricsPending,
+	}
 	payload := map[string]any{
 		"total_queries_today":   total,
-		"active_devices_today":  inventory.ActiveToday,
-		"observed_devices":      inventory.Observed,
+		"active_devices_today":  activeDevices,
+		"observed_devices":      counts.deviceCount,
 		"blocked_queries_today": blocked,
 		"block_percentage":      percentage(blocked, total),
 		"enabled_blocklists":    counts.enabledBlocklists,
@@ -139,22 +144,15 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 			"average_cache_latency_ms":    traffic.cacheLatency,
 			"average_upstream_latency_ms": traffic.upstreamLatency,
 		},
-		"network_summary": networkSummary(request.Context(), handler.store.DB, networkSummaryInput{
-			start: start, blocked: blocked, newDevices: counts.newDevices, newDevicesKnown: true, topClients: topClients, topBlocked: topBlocked,
-			upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available, dnsMetricsPending: metricsPending,
-		}),
-		"health_cards": healthCards(request.Context(), handler.store.DB, healthCardsInput{
+		"network_summary": networkSummary(highlights),
+		"health_cards": healthCards(healthCardsInput{
 			total: total, blocked: blocked, enabledBlocklists: counts.enabledBlocklists, blockEntries: counts.blockEntries,
 			deviceCount: counts.deviceCount, reloadFailures: counts.reloadFailures,
 			cacheAnswers: traffic.cacheHits, forwardedAnswers: traffic.upstreamQueries,
-			trafficCountsKnown:  true,
 			upstreams:           upstreamSnapshot,
 			dnsMetricsAvailable: liveCache.available, dnsMetricsPending: metricsPending,
 		}),
-		"stories": dashboardStories(request.Context(), handler.store.DB, dashboardStoriesInput{
-			start: start, blocked: blocked, newDevices: counts.newDevices, newDevicesKnown: true, topClients: topClients, topBlocked: topBlocked,
-			reloadFailures: counts.reloadFailures, upstreams: upstreamSnapshot, dnsMetricsAvailable: liveCache.available, dnsMetricsPending: metricsPending,
-		}),
+		"stories":                  dashboardStories(highlights),
 		"whats_new":                changes,
 		"sparklines":               sparklines,
 		"top_queried_domains":      topQueried,
@@ -321,11 +319,10 @@ func (handler *Handler) coreDNSCacheMetrics(ctx context.Context) cacheMetrics {
 	return result
 }
 
-type networkSummaryInput struct {
-	start               string
+type dashboardHighlights struct {
 	blocked             int
 	newDevices          int
-	newDevicesKnown     bool
+	reloadFailures      int
 	topClients          []map[string]any
 	topBlocked          []map[string]any
 	upstreams           upstreamhealth.Snapshot
@@ -333,21 +330,10 @@ type networkSummaryInput struct {
 	dnsMetricsPending   bool
 }
 
-func networkSummary(ctx context.Context, database *sql.DB, input networkSummaryInput) map[string]any {
+func networkSummary(input dashboardHighlights) map[string]any {
 	headline, messages := networkHeadline(input.blocked, input.upstreams, input.dnsMetricsAvailable, input.dnsMetricsPending)
 	messages = appendNetworkHighlights(messages, input.topClients, input.topBlocked)
-	newDevices := input.newDevices
-	if !input.newDevicesKnown {
-		newDevices = scalarInt(ctx, database, `
-			SELECT COUNT(*) FROM (
-				SELECT client_ip, MIN(timestamp) AS first_seen
-				FROM dns_queries
-				GROUP BY client_ip
-				HAVING first_seen >= ?
-			)
-		`, input.start)
-	}
-	if newDevices == 0 {
+	if input.newDevices == 0 {
 		messages = append(messages, "No new devices seen today.")
 	} else if input.newDevices == 1 {
 		messages = append(messages, "1 new device seen today.")
@@ -402,20 +388,7 @@ func firstLabel(items []map[string]any) string {
 	return label
 }
 
-type dashboardStoriesInput struct {
-	start               string
-	blocked             int
-	newDevices          int
-	newDevicesKnown     bool
-	topClients          []map[string]any
-	topBlocked          []map[string]any
-	reloadFailures      int
-	upstreams           upstreamhealth.Snapshot
-	dnsMetricsAvailable bool
-	dnsMetricsPending   bool
-}
-
-func dashboardStories(ctx context.Context, database *sql.DB, input dashboardStoriesInput) []map[string]any {
+func dashboardStories(input dashboardHighlights) []map[string]any {
 	stories := make([]map[string]any, 0, 4)
 	if input.dnsMetricsPending {
 		stories = append(stories, story("Checking DNS engine health.", "Traffic is ready; the engine health check is still running.", "info"))
@@ -430,12 +403,8 @@ func dashboardStories(ctx context.Context, database *sql.DB, input dashboardStor
 	} else {
 		stories = append(stories, story("DNS needs attention.", fmt.Sprintf("%d reload failures detected today.", input.reloadFailures), "critical"))
 	}
-	newDevices := input.newDevices
-	if !input.newDevicesKnown {
-		newDevices = scalarInt(ctx, database, `SELECT COUNT(*) FROM (SELECT client_ip, MIN(timestamp) first_seen FROM dns_queries GROUP BY client_ip HAVING first_seen >= ?)`, input.start)
-	}
-	if newDevices > 0 {
-		stories = append(stories, story(countedStory(newDevices, "new device joined today.", "new devices joined today."), "New clients are now visible in Devices.", "info"))
+	if input.newDevices > 0 {
+		stories = append(stories, story(countedStory(input.newDevices, "new device joined today.", "new devices joined today."), "New clients are now visible in Devices.", "info"))
 	}
 	if input.blocked > 0 {
 		stories = append(stories, story("Filtering blocked "+countedStory(input.blocked, "request today.", "requests today."), firstLabelSentence("Most blocked domain", input.topBlocked), "success"))
@@ -478,18 +447,13 @@ type healthCardsInput struct {
 	reloadFailures      int
 	cacheAnswers        int
 	forwardedAnswers    int
-	trafficCountsKnown  bool
 	upstreams           upstreamhealth.Snapshot
 	dnsMetricsAvailable bool
 	dnsMetricsPending   bool
 }
 
-func healthCards(ctx context.Context, database *sql.DB, input healthCardsInput) []map[string]any {
+func healthCards(input healthCardsInput) []map[string]any {
 	cacheAnswers, forwardedAnswers := input.cacheAnswers, input.forwardedAnswers
-	if !input.trafficCountsKnown {
-		cacheAnswers = scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'cache'`)
-		forwardedAnswers = scalarInt(ctx, database, `SELECT COUNT(*) FROM dns_queries WHERE source = 'upstream'`)
-	}
 	return []map[string]any{
 		dnsHealthCard(input.dnsMetricsAvailable, input.reloadFailures, input.dnsMetricsPending),
 		upstreamHealthCard(input.upstreams),
@@ -544,7 +508,15 @@ func whatsNew(ctx context.Context, database *sql.DB, start string) (map[string]a
 		args       []any
 	}{
 		{"devices", `SELECT address AS label, 'First seen today' AS subtitle FROM device_addresses WHERE first_seen_at >= ? ORDER BY first_seen_at DESC, id DESC LIMIT 5`, []any{start}},
-		{"domains", `SELECT q.domain AS label, 'First time observed' AS subtitle FROM dns_queries q WHERE q.timestamp >= ? AND NOT EXISTS (SELECT 1 FROM dns_queries prior WHERE prior.domain = q.domain AND prior.timestamp < ?) GROUP BY q.domain ORDER BY MIN(q.timestamp) DESC LIMIT 5`, []any{start, start}},
+		{"domains", `
+			SELECT q.domain AS label, 'First time observed' AS subtitle
+			FROM dns_queries q
+			WHERE q.timestamp >= ?
+			GROUP BY q.domain
+			HAVING NOT EXISTS (
+				SELECT 1 FROM dns_queries prior WHERE prior.domain = q.domain AND prior.timestamp < ?
+			)
+			ORDER BY MIN(q.timestamp) DESC, q.domain LIMIT 5`, []any{start, start}},
 		{"blocklists", `SELECT name AS label, 'Installed today' AS subtitle FROM blocklists WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5`, []any{start}},
 		{"local_records", `SELECT hostname AS label, 'Local DNS record' AS subtitle FROM dns_records WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5`, []any{start}},
 	} {

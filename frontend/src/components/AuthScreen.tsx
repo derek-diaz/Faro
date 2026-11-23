@@ -12,11 +12,12 @@ type AuthScreenProps = {
   readonly onSubmit: (username: string, password: string) => Promise<void>;
   readonly error: string;
   readonly onJoinExisting?: () => void;
+  readonly onCancelJoin?: () => void;
   readonly themeMode: ThemeMode;
   readonly onThemeModeChange: (mode: ThemeMode) => void;
 };
 
-export function AuthScreen({ mode, onSubmit, error, onJoinExisting, themeMode, onThemeModeChange }: AuthScreenProps) {
+export function AuthScreen({ mode, onSubmit, error, onJoinExisting, onCancelJoin, themeMode, onThemeModeChange }: AuthScreenProps) {
   const isSetup = mode === "setup";
   const [username, setUsername] = useState(mode === "setup" ? "admin" : "");
   const [password, setPassword] = useState("");
@@ -60,6 +61,7 @@ export function AuthScreen({ mode, onSubmit, error, onJoinExisting, themeMode, o
       passwordsMatch={passwordsMatch}
       onSubmit={submit}
       onJoinExisting={onJoinExisting}
+      onCancelJoin={onCancelJoin}
       themeMode={themeMode}
       onThemeModeChange={onThemeModeChange}
     />
@@ -82,11 +84,12 @@ type AuthLayoutProps = {
   readonly passwordsMatch: boolean;
   readonly onSubmit: (event: SubmitEvent) => Promise<void>;
   readonly onJoinExisting?: () => void;
+  readonly onCancelJoin?: () => void;
   readonly themeMode: ThemeMode;
   readonly onThemeModeChange: (mode: ThemeMode) => void;
 };
 
-function AuthLayout({ mode, onJoinExisting, themeMode, onThemeModeChange, ...formProps }: AuthLayoutProps) {
+function AuthLayout({ mode, onJoinExisting, onCancelJoin, themeMode, onThemeModeChange, ...formProps }: AuthLayoutProps) {
   const isSetup = mode === "setup";
   return (
     <main className={`auth-shell ${isSetup ? "setup-auth-shell" : ""}`}>
@@ -94,7 +97,9 @@ function AuthLayout({ mode, onJoinExisting, themeMode, onThemeModeChange, ...for
       {isSetup ? <SetupRail currentStep={0} /> : <LoginRail />}
       <section className="auth-main" aria-labelledby="auth-title">
         <div className="auth-form-wrap">
+          {onCancelJoin && <p role="status">Sign in to this Faro server to join another Faro home.</p>}
           <AuthForm mode={mode} {...formProps} />
+          {onCancelJoin && <Button variant="outline" type="button" onClick={onCancelJoin}>Back</Button>}
           {onJoinExisting && <JoinExisting onJoinExisting={onJoinExisting} />}
         </div>
       </section>

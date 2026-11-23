@@ -65,6 +65,7 @@ COPY --from=web-build /app/dist /usr/share/nginx/html
 COPY docker/nginx.all-in-one.conf /etc/nginx/nginx.conf
 COPY docker/faro-proxy-headers.conf /etc/nginx/faro-proxy-headers.conf
 COPY docker/faro-entrypoint.sh /usr/local/bin/faro-entrypoint
+COPY docker/go-cpu-limit.sh /usr/local/lib/faro/go-cpu-limit.sh
 COPY docker/faro-healthcheck.sh /usr/local/bin/faro-healthcheck
 COPY coredns/sample-blocklist.txt /app/coredns/sample-blocklist.txt
 

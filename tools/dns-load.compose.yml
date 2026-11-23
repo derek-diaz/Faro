@@ -1,0 +1,47 @@
+# Always use a unique -p project; this fixture creates its own disposable database.
+services:
+  upstream:
+    image: python:3.12-slim
+    command: [python, /tools/dns-load.py, upstream]
+    volumes:
+      - .:/tools:ro
+    networks:
+      test:
+        ipv4_address: 172.30.254.2
+  faro:
+    image: faro-load-test:local
+    cpus: 2
+    mem_limit: 512m
+    environment:
+      FARO_QUERY_LOG_MAX_BYTES: ${FARO_LOAD_LOG_BYTES:-10485760}
+    volumes:
+      - config:/config
+    networks: [test]
+    depends_on: [upstream]
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "2"
+  load:
+    image: python:3.12-slim
+    command: [python, /tools/dns-load.py, load]
+    network_mode: service:faro
+    environment:
+      FARO_LOAD_PHASES: ${FARO_LOAD_PHASES:-10:60,100:60,500:60,2000:60}
+      FARO_LOAD_RELOAD: ${FARO_LOAD_RELOAD:-0}
+      FARO_LOAD_PROFILES: ${FARO_LOAD_PROFILES:-0}
+    volumes:
+      - .:/tools:ro
+      - config:/config:ro
+    depends_on:
+      faro:
+        condition: service_healthy
+networks:
+  test:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.254.0/24
+volumes:
+  config:

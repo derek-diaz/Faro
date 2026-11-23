@@ -51,6 +51,31 @@ func TestSetupCreatesAuthenticatedSession(t *testing.T) {
 	}
 }
 
+func TestJoiningHomeRequiresLocalAdminOnlyAfterSetup(t *testing.T) {
+	manager := newTestManager(t)
+	protected := manager.Require(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	check := func(cookie *http.Cookie, want int) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/api/redundancy/join", nil)
+		if cookie != nil {
+			request.AddCookie(cookie)
+		}
+		response := httptest.NewRecorder()
+		protected.ServeHTTP(response, request)
+		if response.Code != want {
+			t.Fatalf("join status = %d, want %d", response.Code, want)
+		}
+	}
+	check(nil, http.StatusNoContent)
+	setup := httptest.NewRecorder()
+	manager.Setup(setup, httptest.NewRequest(http.MethodPost, "/api/auth/setup", bytes.NewBufferString(`{"username":"admin","password":"correct-horse-battery-staple"}`)))
+	if setup.Code != http.StatusCreated {
+		t.Fatalf("browser setup: %d %s", setup.Code, setup.Body.String())
+	}
+	check(nil, http.StatusUnauthorized)
+	check(setup.Result().Cookies()[0], http.StatusNoContent)
+}
+
 func TestSetupIsRejectedOnReplica(t *testing.T) {
 	manager := newTestManager(t)
 	if _, err := manager.store.DB.Exec(`UPDATE redundancy_state SET role = 'replica' WHERE id = 1`); err != nil {

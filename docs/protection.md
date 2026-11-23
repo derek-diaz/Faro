@@ -1,6 +1,6 @@
 # Set up protection and exceptions
 
-[All guides](README.md) · Before this: [Install blocklists](blocklists.md)
+[All guides](README.md) · Related: [Manage blocklists](blocklists.md)
 
 A setup combines blocklists, exact-domain exceptions, and a blocking schedule. **Home** is the default for devices without another assignment.
 
@@ -17,13 +17,18 @@ Check a fresh lookup from a device using Home. Devices assigned elsewhere use th
 ## Create a setup for selected devices
 
 1. Choose **New protection setup**.
-2. Enter a name and choose an icon.
-3. Select installed blocklists.
-4. Add any exact-domain exceptions you need.
-5. Select observed devices, or assign them later.
-6. Review and choose **Create protection**.
+2. Enter a name and choose **Standard**, **Stricter**, or **Custom**. Standard uses OISD Small for everyday blocking; Stricter uses HaGeZi Normal for broader privacy coverage. The icon is optional.
+3. For Custom, select installed lists or add a source name and URL. You can also use only domain exceptions.
+4. Select observed devices, or assign them later. Expand **Domain exceptions** if you need exact-domain allow or block rules.
+5. Review the affected devices and lists, then choose **Create protection**. Faro installs any required source at this point and adds it to this setup.
+
+New setups block domains all day. Edit the setup afterward to add a schedule. If a preset's list is disabled and already belongs to another setup, choose another option or review its effect in Blocklists before enabling it.
+
+If a download or creation fails, your choices remain in the wizard. Choose **Try again** after checking the error. Sources installed during the attempt remain available in Blocklists and are reused on retry.
 
 You can also assign a setup from the **Devices** page.
+
+When Faro recognizes a new address as belonging to an assigned device, it updates DNS protection automatically on its next 15-second policy check. A reused address with a different hardware identity belongs to the new device; the previous device keeps its history and assignments.
 
 ## Allow or block a domain
 

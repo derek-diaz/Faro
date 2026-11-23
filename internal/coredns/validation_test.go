@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/derek/faro/internal/db"
 )
@@ -55,6 +56,34 @@ func TestGeneratedValidationRejectsMissingHostsFile(t *testing.T) {
 	err := validateGeneratedFiles(files)
 	if err == nil || !strings.Contains(err.Error(), "missing hosts file") {
 		t.Fatalf("validation error = %v; want missing hosts file", err)
+	}
+}
+
+func TestReloadPreservesUnchangedHostsFile(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string][]byte{"Corefile": []byte("new config"), "local.hosts": []byte("192.0.2.1 printer.home\n")}
+	path := filepath.Join(dir, "local.hosts")
+	if err := os.WriteFile(path, files["local.hosts"], 0644); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Unix(1600000000, 0)
+	if err := os.Chtimes(path, before, before); err != nil {
+		t.Fatal(err)
+	}
+	names := fileNames(files)
+	backups, err := snapshotFiles(dir, names)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := replaceWithRollback(dir, files, nil, backups, names); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.ModTime().Equal(before) {
+		t.Fatal("unchanged hosts file was rewritten")
 	}
 }
 
@@ -394,6 +423,64 @@ func TestApplyAllowsUnchangedCorefileBeforeReloadHashIsInitialized(t *testing.T)
 
 	if err := manager.Apply(context.Background()); err != nil {
 		t.Fatalf("Apply returned unchanged-Corefile error: %v", err)
+	}
+}
+
+func TestLocalApplyPreservesReplicaFilesAcrossRestart(t *testing.T) {
+	store := openValidationStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	configDir := t.TempDir()
+	manager := NewManager(store, configDir)
+	manager.validateGenerated = func(context.Context, map[string][]byte) error { return nil }
+	manager.readLiveHash = func(context.Context) (string, error) { return "", errReloadHashUnavailable }
+	files := map[string][]byte{
+		"Corefile":           []byte(".:53 {\n hosts /etc/coredns/protection-1.hosts\n forward . 9.9.9.9\n}\n"),
+		"protection-1.hosts": []byte("192.0.2.8 primary-only.home\n"),
+	}
+	if err := manager.ApplyReplica(ctx, files, map[string]string{"upstream_dns": "9.9.9.9", "upstream_transport": "standard"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`UPDATE redundancy_state SET role = 'replica', config_revision = 7 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		manager = NewManager(store, configDir)
+		manager.validateGenerated = func(context.Context, map[string][]byte) error { return nil }
+		manager.readLiveHash = func(context.Context) (string, error) { return "", errReloadHashUnavailable }
+		if err := manager.Apply(ctx); err != nil {
+			t.Fatal(err)
+		}
+		for name, expected := range files {
+			actual, err := os.ReadFile(filepath.Join(configDir, name))
+			if err != nil || string(actual) != string(expected) {
+				t.Fatalf("replica file %s changed: %s (%v)", name, actual, err)
+			}
+		}
+	}
+}
+
+func TestAddressDiscoveredDuringApplyRemainsPending(t *testing.T) {
+	store := openValidationStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	manager := NewManager(store, t.TempDir())
+	manager.validateGenerated = func(context.Context, map[string][]byte) error { return nil }
+	manager.readLiveHash = func(context.Context) (string, error) { return "", errReloadHashUnavailable }
+	manager.AfterApply = func(context.Context) {
+		if _, err := store.DB.Exec(`INSERT INTO device_protection_assignments(client_ip, protection_id) VALUES('192.0.2.50', 1)`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := manager.Apply(ctx); err != nil {
+		t.Fatal(err)
+	}
+	current, err := manager.currentTemporalSignature(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current == manager.temporalSignature {
+		t.Fatal("address discovered during reload was marked as already applied")
 	}
 }
 

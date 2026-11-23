@@ -79,6 +79,30 @@ func TestDashboardCountsAndRanksStableDevices(t *testing.T) {
 	}
 }
 
+func TestWhatsNewDomainsUsesFirstVisit(t *testing.T) {
+	h, _, _ := troubleshootingFixture(t)
+	for _, visit := range []struct{ domain, timestamp string }{
+		{"returning.example", "2026-03-01T23:59:59Z"},
+		{"returning.example", "2026-03-02T12:00:00Z"},
+		{"early.example", "2026-03-02T00:00:00Z"},
+		{"early.example", "2026-03-02T13:00:00Z"},
+		{"later.example", "2026-03-02T10:00:00Z"},
+	} {
+		if _, err := h.store.DB.Exec(`INSERT INTO dns_queries(timestamp,client_ip,domain,query_type,action,source)
+			VALUES(?, '192.0.2.1', ?, 'A', 'allowed', 'cache')`, visit.timestamp, visit.domain); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recent, err := whatsNew(context.Background(), h.store.DB, "2026-03-02T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	domains := recent["domains"].([]map[string]any)
+	if len(domains) != 2 || domains[0]["label"] != "later.example" || domains[1]["label"] != "early.example" {
+		t.Fatalf("new domains = %v", domains)
+	}
+}
+
 func TestDomainSummarySeparatesHistoryFromCurrentPolicy(t *testing.T) {
 	h, _, input := troubleshootingFixture(t)
 	if _, err := h.store.DB.Exec(`INSERT INTO dns_queries(timestamp,client_ip,device_id,domain,query_type,action,source) VALUES(?,?,?,'broken.example','A','blocked','manual')`, time.Now().UTC().Format(time.RFC3339Nano), input.ClientIP, input.DeviceID); err != nil {

@@ -21,7 +21,7 @@ const (
 	// CurrentSchemaVersion is the highest SQLite schema version understood by
 	// this Faro release. It is deliberately independent of the application
 	// version so a future release can make multiple schema changes safely.
-	CurrentSchemaVersion = 14
+	CurrentSchemaVersion = 15
 
 	upgradeStateFilename = "faro-upgrade.json"
 	migrationBackupDir   = "migrations"
@@ -211,6 +211,16 @@ var migrationDefinitions = []migrationDefinition{
 			identity TEXT NOT NULL,
 			offset INTEGER NOT NULL CHECK(offset >= 0)
 		);
+		UPDATE settings SET value = ? WHERE key = 'database_schema_version';`, strconv.Itoa(CurrentSchemaVersion))
+		return err
+	}},
+	{version: 15, name: "covering-traffic-summary-indexes", apply: func(ctx context.Context, store *Store) error {
+		// Keep dashboard/device aggregates off the much larger decision-metadata rows.
+		_, err := store.DB.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_dns_queries_device_traffic ON dns_queries(device_id, timestamp, action);
+		CREATE INDEX IF NOT EXISTS idx_dns_queries_traffic ON dns_queries(timestamp, action, source, latency_ms);
+		DROP INDEX IF EXISTS idx_dns_queries_activity_order;
+		CREATE INDEX idx_dns_queries_activity_order ON dns_queries(julianday(timestamp) DESC, id DESC, action, source);
 		UPDATE settings SET value = ? WHERE key = 'database_schema_version';`, strconv.Itoa(CurrentSchemaVersion))
 		return err
 	}},

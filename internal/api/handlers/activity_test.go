@@ -196,6 +196,9 @@ func TestEventsRangeFiltersRowsAndBuildsTimeline(t *testing.T) {
 	if payload.Timeline == nil || payload.Timeline.BucketSeconds != 60 || len(payload.Timeline.Buckets) != 30 {
 		t.Fatalf("unexpected timeline shape: %#v", payload.Timeline)
 	}
+	if payload.Timeline.Buckets[5].Total != 1 || payload.Timeline.Buckets[15].Blocked != 1 {
+		t.Fatal("queries at exact minute boundaries landed in the wrong timeline buckets")
+	}
 	total, blocked := 0, 0
 	for _, bucket := range payload.Timeline.Buckets {
 		total += bucket.Total
@@ -203,5 +206,15 @@ func TestEventsRangeFiltersRowsAndBuildsTimeline(t *testing.T) {
 	}
 	if total != 2 || blocked != 1 {
 		t.Fatalf("unexpected timeline totals: total=%d blocked=%d", total, blocked)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/events?search=example&scope=blocked&range=custom&from=2026-07-12T12:00:00Z&to=2026-07-12T12:30:00Z", nil)
+	response = httptest.NewRecorder()
+	handler.events(response, request)
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Counts["dns"] != 2 || payload.Total != 1 || len(payload.Items) != 1 || payload.Items[0].Domain != "inside-blocked.example" {
+		t.Fatalf("search ignored scope or time bounds: %s", response.Body.String())
 	}
 }

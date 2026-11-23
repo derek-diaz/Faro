@@ -8,7 +8,7 @@ Choose what you want to do. Each guide explains where to go, what to change, and
 
 1. Install Faro with [Docker Compose](installation.md) or [Unraid](unraid.md).
 2. [Connect your devices and router](connect-devices.md).
-3. [Install blocklists](blocklists.md) and [choose protection](protection.md).
+3. [Choose protection](protection.md); Standard and Stricter filtering install their required lists for you. [Manage blocklists](blocklists.md) when you need more control.
 
 ## Use Faro
 

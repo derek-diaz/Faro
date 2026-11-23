@@ -1,0 +1,35 @@
+@layer components {
+  .protection-creation .protection-step-track { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .protection-creation .protection-name-field { margin-bottom: 14px; }
+  .protection-creation-options { margin: 18px 0; border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface); }
+  .protection-creation-options > summary { color: var(--ink); font-size: 13px; font-weight: 550; cursor: pointer; }
+  .protection-creation-options > summary > span { margin-left: 8px; color: var(--text-muted); font-size: 12px; font-weight: 400; }
+  .protection-creation-options > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 2px; }
+  .protection-creation-options[open] > summary { margin-bottom: 14px; }
+  .protection-creation-options > p, .protection-custom-blocking > p { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
+  .protection-creation-options .protection-icon-picker { margin: 0; }
+  .protection-level-choices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 20px; }
+  .protection-level-choices .faro-radio-card { position: relative; grid-template-columns: minmax(0, 1fr); align-items: flex-start; padding: 17px 15px; text-align: left; }
+  .protection-level-choices .faro-radio-card > span:first-child { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; min-width: 0; }
+  .protection-level-choices strong { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-right: 18px; color: var(--ink); font-size: 15px; font-weight: 600; }
+  .protection-level-choices strong em { color: var(--accent); font-size: 10px; font-weight: 500; font-style: normal; }
+  .protection-level-choices small { color: var(--text-muted); font-size: 12px; font-weight: 400; line-height: 1.55; }
+  .protection-level-choices .faro-radio-card > span:first-child > span { color: var(--text-muted); font-size: 11px; font-weight: 500; }
+  .protection-level-choices .faro-radio-card-indicator { position: absolute; right: 10px; top: 17px; }
+  .protection-creation .protection-source-note { margin: 15px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+  .protection-custom-blocking { margin-top: 20px; }
+  .protection-custom-blocking > h3 { margin: 0 0 12px; color: var(--ink); font-size: 14px; font-weight: 550; }
+  .protection-custom-source { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(180px, 2fr); gap: 14px; }
+  .protection-custom-source label { display: grid; gap: 7px; min-width: 0; color: var(--text-muted); font-size: 12px; }
+  .protection-source-validation { color: var(--warn); font-size: 12px; line-height: 1.5; }
+  .protection-creation-progress { display: flex; align-items: center; gap: 10px; margin-top: 20px; color: var(--accent); font-size: 13px; line-height: 1.5; }
+  .protection-creation-progress > svg { flex: none; }
+  .protection-creation .protection-wizard-error p { margin: 0; font-weight: 450; line-height: 1.6; }
+  .protection-creation .protection-wizard-error p + p { margin-top: 8px; }
+  .protection-creation .protection-review-row strong { overflow-wrap: anywhere; }
+  @media (max-width: 640px) {
+    .protection-level-choices, .protection-custom-source { grid-template-columns: 1fr; }
+    .protection-level-choices .faro-radio-card > span:first-child { gap: 6px; }
+    .protection-creation .protection-review-row { grid-template-columns: 100px minmax(0, 1fr); gap: 10px; }
+  }
+}

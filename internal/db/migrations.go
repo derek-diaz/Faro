@@ -21,7 +21,7 @@ const (
 	// CurrentSchemaVersion is the highest SQLite schema version understood by
 	// this Faro release. It is deliberately independent of the application
 	// version so a future release can make multiple schema changes safely.
-	CurrentSchemaVersion = 15
+	CurrentSchemaVersion = 16
 
 	upgradeStateFilename = "faro-upgrade.json"
 	migrationBackupDir   = "migrations"
@@ -222,6 +222,21 @@ var migrationDefinitions = []migrationDefinition{
 		DROP INDEX IF EXISTS idx_dns_queries_activity_order;
 		CREATE INDEX idx_dns_queries_activity_order ON dns_queries(julianday(timestamp) DESC, id DESC, action, source);
 		UPDATE settings SET value = ? WHERE key = 'database_schema_version';`, strconv.Itoa(CurrentSchemaVersion))
+		return err
+	}},
+	{version: 16, name: "replica-health-reports", apply: func(ctx context.Context, store *Store) error {
+		for _, statement := range []string{
+			`ALTER TABLE redundancy_nodes ADD COLUMN dns_report TEXT`,
+			`ALTER TABLE redundancy_nodes ADD COLUMN behind_since TEXT`,
+		} {
+			if err := addColumnIfMissing(ctx, store.DB, statement); err != nil {
+				return err
+			}
+		}
+		_, err := store.DB.ExecContext(ctx, `
+			UPDATE redundancy_nodes SET behind_since = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+			WHERE behind_since IS NULL AND config_revision < (SELECT config_revision FROM redundancy_state WHERE id = 1);
+			UPDATE settings SET value = ? WHERE key = 'database_schema_version'`, strconv.Itoa(CurrentSchemaVersion))
 		return err
 	}},
 }

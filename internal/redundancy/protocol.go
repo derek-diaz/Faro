@@ -140,12 +140,13 @@ func verifyPairingProof(session pairingSession, input PairRequest) error {
 
 func (manager *Manager) storePairedNode(ctx context.Context, input PairRequest, ciphertext string) error {
 	_, err := manager.store.DB.ExecContext(ctx, `
-		INSERT INTO redundancy_nodes(node_id, name, lan_address, secret_ciphertext, config_revision, last_seen_at, updated_at)
-		VALUES(?, ?, ?, ?, 0, ?, CURRENT_TIMESTAMP)
+		INSERT INTO redundancy_nodes(node_id, name, lan_address, secret_ciphertext, config_revision, last_seen_at, behind_since, updated_at)
+		VALUES(?1, ?2, ?3, ?4, 0, ?5, ?5, CURRENT_TIMESTAMP)
 		ON CONFLICT(node_id) DO UPDATE SET
 			name=excluded.name, lan_address=excluded.lan_address,
 			secret_ciphertext=excluded.secret_ciphertext, config_revision=0,
 			last_seen_at=excluded.last_seen_at, last_sync_at=NULL, last_error='',
+			behind_since=excluded.behind_since, dns_report=NULL,
 			updated_at=CURRENT_TIMESTAMP`,
 		input.NodeID, input.NodeName, input.LANAddress, ciphertext, manager.now().UTC().Format(time.RFC3339))
 	return err
@@ -219,7 +220,10 @@ func (manager *Manager) SnapshotEnvelope(ctx context.Context, since int64, secre
 	if err != nil {
 		return nil, 0, err
 	}
-	if since >= state.ConfigRevision {
+	if since > state.ConfigRevision {
+		return nil, state.ConfigRevision, errors.New("replica revision is ahead of the primary")
+	}
+	if since == state.ConfigRevision {
 		return nil, state.ConfigRevision, nil
 	}
 	var payload []byte
@@ -235,18 +239,44 @@ func (manager *Manager) RecordAcknowledgement(ctx context.Context, nodeID string
 	if ack.Revision < 0 || len(ack.Error) > 500 {
 		return errors.New("replica acknowledgement is invalid")
 	}
-	now := manager.now().UTC().Format(time.RFC3339)
-	_, err := manager.store.DB.ExecContext(ctx, `
+	now := manager.now().UTC()
+	var report any
+	if ack.DNS != nil {
+		if ack.DNS.AgeSeconds < 0 || ack.DNS.AgeSeconds > 86400 {
+			return errors.New("invalid DNS report")
+		}
+		if metrics := ack.DNS.Totals; metrics != nil &&
+			((metrics.MeanResponseMS != nil && *metrics.MeanResponseMS < 0) ||
+				(metrics.RequestsPerSecond != nil && *metrics.RequestsPerSecond < 0)) {
+			return errors.New("invalid DNS metrics")
+		}
+		data, err := json.Marshal(DNSReport{CheckedAt: now.Add(-time.Duration(ack.DNS.AgeSeconds) * time.Second), Totals: ack.DNS.Totals})
+		if err != nil {
+			return err
+		}
+		report = string(data)
+	}
+	result, err := manager.store.DB.ExecContext(ctx, `
 		UPDATE redundancy_nodes
-		SET config_revision = CASE WHEN ? = '' THEN ? ELSE config_revision END,
-		    last_sync_at = CASE WHEN ? = '' THEN ? ELSE last_sync_at END,
-		    last_error = ?, last_seen_at = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE node_id = ?`,
-		ack.Error, ack.Revision, ack.Error, now, ack.Error, now, nodeID)
-	return err
+		SET config_revision = CASE WHEN ?6 THEN ?2 ELSE config_revision END,
+		    last_sync_at = CASE WHEN ?1 = '' THEN ?3 ELSE last_sync_at END,
+		    behind_since = CASE WHEN NOT ?6 THEN behind_since
+		                        WHEN ?2 < (SELECT config_revision FROM redundancy_state WHERE id=1) THEN coalesce(behind_since, ?3)
+		                        ELSE NULL END,
+		    last_error = ?1, last_seen_at = ?3, dns_report = coalesce(?4, dns_report), updated_at = CURRENT_TIMESTAMP
+		WHERE node_id = ?5 AND (?1 <> '' OR
+		      ?2 BETWEEN config_revision AND (SELECT config_revision FROM redundancy_state WHERE id=1))`,
+		ack.Error, ack.Revision, now.Format(time.RFC3339), report, nodeID, ack.Error == "" || ack.RevisionApplied)
+	if err != nil {
+		return err
+	}
+	if updated, err := result.RowsAffected(); err != nil || updated == 0 {
+		return errors.New("replica acknowledgement has an unexpected revision or node")
+	}
+	return nil
 }
 
-func (manager *Manager) syncReplica(ctx context.Context) error {
+func (manager *Manager) syncReplica(ctx context.Context) (syncErr error) {
 	manager.operationMu.Lock()
 	defer manager.operationMu.Unlock()
 
@@ -266,6 +296,22 @@ func (manager *Manager) syncReplica(ctx context.Context) error {
 		return err
 	}
 	defer closeRedundancyResource("close redundancy snapshot response body", response.Body)
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return controllerSyncError(response)
+	}
+	// Every completed poll reports the last applied revision, even if the
+	// prior acknowledgement was lost or the next snapshot cannot be applied.
+	applied := state.ConfigRevision
+	defer func() {
+		ack := SyncAck{Revision: applied}
+		if syncErr != nil {
+			ack.Error = truncate(syncErr.Error(), 500)
+			ack.RevisionApplied = true
+		}
+		if ctx.Err() == nil {
+			manager.acknowledgeReplica(ctx, state, nodeSecret, ack)
+		}
+	}()
 	if response.StatusCode == http.StatusNoContent {
 		return manager.markReplicaSynchronized(ctx)
 	}
@@ -280,7 +326,11 @@ func (manager *Manager) syncReplica(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return manager.applyReplicaSnapshot(ctx, state, nodeSecret, snapshot, files)
+	if err := manager.applyReplicaSnapshot(ctx, snapshot, files); err != nil {
+		return err
+	}
+	applied = snapshot.Revision
+	return nil
 }
 
 func (manager *Manager) loadReplicaSecret(state localState) ([]byte, error) {
@@ -359,9 +409,8 @@ func snapshotFiles(snapshot map[string]string) (map[string][]byte, error) {
 	return files, nil
 }
 
-func (manager *Manager) applyReplicaSnapshot(ctx context.Context, state localState, secret []byte, snapshot ConfigSnapshot, files map[string][]byte) error {
+func (manager *Manager) applyReplicaSnapshot(ctx context.Context, snapshot ConfigSnapshot, files map[string][]byte) error {
 	if err := manager.applier.ApplyReplica(ctx, files, snapshot.RuntimeSettings); err != nil {
-		manager.acknowledgeReplica(context.WithoutCancel(ctx), state, secret, SyncAck{Revision: snapshot.Revision, Error: truncate(err.Error(), 500)})
 		return fmt.Errorf("apply controller configuration: %w", err)
 	}
 	now := manager.now().UTC().Format(time.RFC3339)
@@ -371,11 +420,16 @@ func (manager *Manager) applyReplicaSnapshot(ctx context.Context, state localSta
 		WHERE id = 1 AND role = ?`, snapshot.Revision, now, RoleReplica); err != nil {
 		return err
 	}
-	manager.acknowledgeReplica(context.WithoutCancel(ctx), state, secret, SyncAck{Revision: snapshot.Revision})
 	return nil
 }
 
 func (manager *Manager) acknowledgeReplica(ctx context.Context, state localState, secret []byte, ack SyncAck) {
+	if sample := manager.latestDNS(); sample != nil {
+		age := max(0, int64(manager.now().Sub(sample.CheckedAt).Seconds()))
+		if age <= 86400 {
+			ack.DNS = &DNSReading{AgeSeconds: age, Totals: sample.Totals}
+		}
+	}
 	if err := manager.sendAcknowledgement(ctx, state, secret, ack); err != nil {
 		log.Printf("send redundancy acknowledgement: %v", err)
 	}

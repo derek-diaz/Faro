@@ -35,6 +35,10 @@ Faro encrypts the stored API key and does not display it again. It accepts local
 
 Manual Faro names and device choices take precedence over imported suggestions. Traffic and blocking still come from DNS requests Faro observes.
 
+When UniFi confirms an address change, Faro keeps the device's name, DNS history, and protection attached to its identity and retires its previous address in that address family. Reusing that IP does not transfer the previous device's settings or history. IPv4 changes preserve separately observed IPv6 addresses. Device panels and edits follow the device even when its IP changes.
+
+Changes become known at the next successful sync (normally within a minute); the resolver checks for policy address changes every 15 seconds. Traffic before Faro learns about an address reassignment can still be attributed to the last known owner. DHCP reservations remain useful when assignments must be predictable immediately.
+
 ## If synchronization stops
 
 - Re-test the local URL and API key.

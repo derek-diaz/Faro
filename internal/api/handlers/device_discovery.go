@@ -45,14 +45,14 @@ func newDeviceNameResolver() *deviceNameResolver {
 	}
 }
 
-// discoverDeviceNames prefers explicit Local DNS and UniFi names before bounded
+// discoverDeviceNames prefers UniFi's device identity and then Local DNS before bounded
 // cached reverse-DNS names. Missing PTR records are resolved in the background
 // so a router timeout never delays a device panel.
 func (handler *Handler) discoverDeviceNames(ctx context.Context, clientIPs []string) map[string]deviceIdentity {
 	identities := make(map[string]deviceIdentity, len(clientIPs))
 	requested := uniqueDeviceAddresses(clientIPs)
-	loadLocalDeviceNames(ctx, handler.store.DB, requested, identities)
 	loadUniFiDeviceNames(ctx, handler.store.DB, requested, identities)
+	loadLocalDeviceNames(ctx, handler.store.DB, requested, identities)
 	resolveReverseDeviceNames(ctx, clientIPs, identities, handler.deviceNames)
 	return identities
 }
@@ -87,10 +87,11 @@ func loadUniFiDeviceNames(ctx context.Context, database *sql.DB, requested []str
 		end := min(start+400, len(requested))
 		arguments, placeholders := stringQueryArguments(requested[start:end])
 		rows, err := database.QueryContext(ctx, `
-			SELECT a.address, n.name
-			FROM device_names n
-			JOIN device_addresses a ON a.device_id = n.device_id
-			WHERE n.source = 'unifi' AND TRIM(n.name) <> '' AND a.address IN (`+placeholders+`)
+			SELECT a.address, COALESCE(n.name, '')
+			FROM device_addresses a
+			LEFT JOIN device_names n ON n.device_id = a.device_id AND n.source = 'unifi'
+			WHERE ((a.source = 'unifi' AND EXISTS (SELECT 1 FROM integration_configs WHERE kind = 'unifi' AND enabled = 1))
+			       OR TRIM(n.name) <> '') AND a.address IN (`+placeholders+`)
 			ORDER BY n.last_seen_at DESC
 		`, arguments...)
 		if err != nil {
@@ -101,8 +102,13 @@ func loadUniFiDeviceNames(ctx context.Context, database *sql.DB, requested []str
 			if err := rows.Scan(&clientIP, &name); err != nil {
 				continue
 			}
-			if _, exists := identities[clientIP]; !exists && usefulHostname(name, clientIP) {
-				identities[clientIP] = deviceIdentity{DisplayName: name, NameSource: "unifi"}
+			if _, exists := identities[clientIP]; !exists {
+				identity := deviceIdentity{DisplayName: clientIP, NameSource: "address"}
+				if usefulHostname(name, clientIP) {
+					identity = deviceIdentity{DisplayName: name, NameSource: "unifi"}
+				}
+				// IP-based DNS/PTR names may still belong to the previous lease holder.
+				identities[clientIP] = identity
 			}
 		}
 		closeRows(rows)

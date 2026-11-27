@@ -46,4 +46,4 @@ To allow normally blocked domains instead, [pause protection](protection.md#paus
 
 ## Keep assignments predictable
 
-Use DHCP reservations for important devices. DNS policies depend on the source addresses Faro sees. [UniFi](unifi.md) can help correlate identities across address changes. If everything appears under your router, check [device connections](connect-devices.md#if-requests-are-missing).
+Use DHCP reservations for important devices. DNS policies depend on the source addresses Faro sees. [UniFi](unifi.md) keeps names, DNS history, and protection with the device when it confirms an address change. Previous addresses remain visible in retained DNS history but stop receiving that device's protection. Synchronization is periodic, so a changed lease can briefly use the last known mapping. If everything appears under your router, check [device connections](connect-devices.md#if-requests-are-missing).

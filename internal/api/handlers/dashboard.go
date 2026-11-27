@@ -1,16 +1,15 @@
 package handlers
 
 import (
-	"bufio"
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/derek/faro/internal/coredns"
 	"github.com/derek/faro/internal/upstreamhealth"
 )
 
@@ -118,7 +117,8 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 	}
 
 	highlights := dashboardHighlights{
-		blocked: blocked, newDevices: counts.newDevices, topClients: topClients, topBlocked: topBlocked,
+		replicasBehind: counts.replicasBehind,
+		blocked:        blocked, newDevices: counts.newDevices, topClients: topClients, topBlocked: topBlocked,
 		reloadFailures: counts.reloadFailures, upstreams: upstreamSnapshot,
 		dnsMetricsAvailable: liveCache.available, dnsMetricsPending: metricsPending,
 	}
@@ -201,6 +201,7 @@ func dashboardTrafficSummary(ctx context.Context, database *sql.DB, start string
 
 type dashboardCounts struct {
 	enabledBlocklists, blockEntries, deviceCount, reloadFailures, newDevices int
+	replicasBehind                                                           int
 }
 
 func dashboardCountsSummary(ctx context.Context, database *sql.DB, start string) (dashboardCounts, error) {
@@ -211,10 +212,12 @@ func dashboardCountsSummary(ctx context.Context, database *sql.DB, start string)
 			(SELECT COUNT(*) FROM blocklist_entries),
 			(SELECT COUNT(*) FROM devices),
 			(SELECT COUNT(*) FROM events WHERE type = 'dns.reload_failed' AND timestamp >= ?),
-			(SELECT COUNT(*) FROM devices WHERE first_seen_at >= ?)
+			(SELECT COUNT(*) FROM devices WHERE first_seen_at >= ?),
+			(SELECT COUNT(*) FROM redundancy_nodes n JOIN redundancy_state s ON s.id=1
+			 WHERE s.role='controller' AND n.config_revision < s.config_revision)
 	`, start, start).Scan(
 		&counts.enabledBlocklists, &counts.blockEntries, &counts.deviceCount,
-		&counts.reloadFailures, &counts.newDevices,
+		&counts.reloadFailures, &counts.newDevices, &counts.replicasBehind,
 	)
 	return counts, err
 }
@@ -269,57 +272,15 @@ func (handler *Handler) cachedCoreDNSCacheMetrics() (cacheMetrics, bool) {
 }
 
 func (handler *Handler) coreDNSCacheMetrics(ctx context.Context) cacheMetrics {
-	requestCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, handler.metricsURL, nil)
+	metrics, err := coredns.ReadMetrics(ctx, handler.metricsURL)
 	if err != nil {
 		return cacheMetrics{}
 	}
-	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
-	if err != nil {
-		return cacheMetrics{}
-	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			log.Printf("close CoreDNS metrics response body: %v", err)
-		}
-	}()
-	if resp.StatusCode != http.StatusOK {
-		return cacheMetrics{}
-	}
-
-	result := cacheMetrics{available: true}
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		value, parseErr := strconv.ParseFloat(fields[len(fields)-1], 64)
-		if parseErr != nil {
-			continue
-		}
-		name := fields[0]
-		if label := strings.Index(name, "{"); label >= 0 {
-			name = name[:label]
-		}
-		switch name {
-		case "coredns_cache_entries":
-			result.entries += value
-		case "coredns_cache_hits_total":
-			result.hits += value
-		case "coredns_cache_requests_total":
-			result.requests += value
-		}
-	}
-	return result
+	return cacheMetrics{available: true, entries: metrics.CacheEntries, hits: metrics.CacheHits, requests: metrics.CacheRequests}
 }
 
 type dashboardHighlights struct {
+	replicasBehind      int
 	blocked             int
 	newDevices          int
 	reloadFailures      int
@@ -390,6 +351,12 @@ func firstLabel(items []map[string]any) string {
 
 func dashboardStories(input dashboardHighlights) []map[string]any {
 	stories := make([]map[string]any, 0, 4)
+	if input.replicasBehind > 0 {
+		warning := story(countedStory(input.replicasBehind, "backup server is behind.", "backup servers are behind."),
+			"Devices using a backup may still get older DNS rules.", "warning")
+		warning["section"] = "redundancy"
+		stories = append(stories, warning)
+	}
 	if input.dnsMetricsPending {
 		stories = append(stories, story("Checking DNS engine health.", "Traffic is ready; the engine health check is still running.", "info"))
 	} else if !input.dnsMetricsAvailable {
@@ -398,10 +365,10 @@ func dashboardStories(input dashboardHighlights) []map[string]any {
 		stories = append(stories, story("Upstream DNS is unavailable.", input.upstreams.Summary, "critical"))
 	} else if input.upstreams.Status == "degraded" {
 		stories = append(stories, story("Upstream DNS is degraded.", input.upstreams.Summary, "warning"))
-	} else if input.reloadFailures == 0 {
-		stories = append(stories, story("Everything looks healthy today.", "No DNS reload failures detected.", "success"))
-	} else {
+	} else if input.reloadFailures > 0 {
 		stories = append(stories, story("DNS needs attention.", fmt.Sprintf("%d reload failures detected today.", input.reloadFailures), "critical"))
+	} else if input.replicasBehind == 0 {
+		stories = append(stories, story("Everything looks healthy today.", "No DNS reload failures detected.", "success"))
 	}
 	if input.newDevices > 0 {
 		stories = append(stories, story(countedStory(input.newDevices, "new device joined today.", "new devices joined today."), "New clients are now visible in Devices.", "info"))

@@ -24,6 +24,7 @@ type inventoryBaseDevice struct {
 	deviceID           int64
 	clientIP           string
 	name               string
+	unifiName          string
 	location           sql.NullString
 	notes              sql.NullString
 	storedDeviceType   string
@@ -311,6 +312,7 @@ func (handler *Handler) loadDeviceInventory(request *http.Request, start string,
 			d.id,
 			COALESCE(la.address, ''),
 			d.name,
+			COALESCE(un.name, ''),
 			d.location,
 			d.notes,
 			d.device_type,
@@ -345,7 +347,7 @@ func (handler *Handler) loadDeviceInventory(request *http.Request, start string,
 	for rows.Next() {
 		var device inventoryBaseDevice
 		if err := rows.Scan(
-			&device.deviceID, &device.clientIP, &device.name, &device.location, &device.notes,
+			&device.deviceID, &device.clientIP, &device.name, &device.unifiName, &device.location, &device.notes,
 			&device.storedDeviceType, &device.storedTypeSource, &device.total, &device.blocked,
 			&device.lastSeen, &device.classificationType, &device.category, &device.icon,
 			&device.confidence, &device.identifierKind, &device.protectionID,
@@ -379,9 +381,15 @@ func buildDeviceInventoryItems(baseDevices []inventoryBaseDevice, addressesByDev
 	for _, device := range baseDevices {
 		addresses := addressesByDevice[device.deviceID]
 		identity := bestDeviceIdentity(discoveredNames, addresses, device.clientIP)
+		if strings.TrimSpace(device.unifiName) != "" {
+			identity.DisplayName, identity.NameSource = device.unifiName, "unifi"
+		}
 		if strings.TrimSpace(device.name) != "" {
 			identity.DisplayName = device.name
 			identity.NameSource = "manual"
+		}
+		if identity.DisplayName == "" {
+			identity.DisplayName = fmt.Sprintf("Device %d", device.deviceID)
 		}
 		deviceType, confidence, typeSource := device.classificationType, device.confidence, "automatic"
 		if device.storedTypeSource == "manual" && validManualDeviceType(device.storedDeviceType) {

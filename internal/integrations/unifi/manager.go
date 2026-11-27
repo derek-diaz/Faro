@@ -263,35 +263,51 @@ func (manager *Manager) Sync(ctx context.Context) (SyncResult, error) {
 	if err != nil {
 		return SyncResult{}, manager.recordSyncError(ctx, friendlyConnectionError(err))
 	}
+	result, err := manager.reconcileClients(ctx, config.siteID, clients)
+	if err != nil {
+		return SyncResult{}, manager.recordSyncError(ctx, err)
+	}
+	return result, nil
+}
+
+func (manager *Manager) reconcileClients(ctx context.Context, siteID string, clients []Client) (SyncResult, error) {
+	tx, err := manager.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
 	startedAt := time.Now().UTC()
 	synced, skipped := 0, 0
 	for _, observed := range clients {
-		if err := manager.reconcileClient(ctx, config.siteID, observed, startedAt); err != nil {
+		if err := manager.reconcileClient(ctx, tx, siteID, observed, startedAt); err != nil {
 			if errors.Is(err, errUnusableClient) {
 				log.Printf("skip UniFi client %q: %v", observed.ID, err)
 				skipped++
 				continue
 			}
-			return SyncResult{}, manager.recordSyncError(ctx, err)
+			return SyncResult{}, err
 		}
 		synced++
 	}
-	if _, err := manager.store.DB.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM unifi_client_snapshots
-		WHERE site_id = ? AND last_synced_at < ?`, config.siteID, startedAt.Format(time.RFC3339Nano)); err != nil {
-		return SyncResult{}, manager.recordSyncError(ctx, err)
+		WHERE site_id = ? AND last_synced_at < ?`, siteID, startedAt.Format(time.RFC3339Nano)); err != nil {
+		return SyncResult{}, err
 	}
 	completedAt := time.Now().UTC().Format(time.RFC3339)
-	if _, err := manager.store.DB.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE integration_configs
 		SET last_sync_at = ?, last_error = '', synced_devices = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE kind = ?`, completedAt, synced, integrationKind); err != nil {
 		return SyncResult{}, err
 	}
+	if err := tx.Commit(); err != nil {
+		return SyncResult{}, err
+	}
 	return SyncResult{SyncedDevices: synced, Skipped: skipped, CompletedAt: completedAt}, nil
 }
 
-func (manager *Manager) reconcileClient(ctx context.Context, siteID string, client Client, observedAt time.Time) error {
+func (manager *Manager) reconcileClient(ctx context.Context, tx *sql.Tx, siteID string, client Client, observedAt time.Time) error {
 	ip := net.ParseIP(strings.TrimSpace(client.IPAddress))
 	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
 		return fmt.Errorf("%w: missing IP address", errUnusableClient)
@@ -308,13 +324,13 @@ func (manager *Manager) reconcileClient(ctx context.Context, siteID string, clie
 		{Kind: "mac", Value: strings.ToLower(mac.String()), Source: "unifi", Confidence: "strong"},
 		{Kind: "unifi_client", Value: siteID + "/" + clientID, Source: "unifi", Confidence: "strong"},
 	}
-	deviceID, err := deviceidentity.ObserveAddress(ctx, manager.store, ip.String(), "unifi", identifiers)
+	deviceID, err := deviceidentity.ObserveAddressTx(ctx, tx, ip.String(), "unifi", identifiers)
 	if err != nil {
 		return err
 	}
 	name := cleanClientName(client.Name, ip.String(), mac.String())
 	if name != "" {
-		if _, err := manager.store.DB.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO device_names(device_id, source, name)
 			VALUES(?, 'unifi', ?)
 			ON CONFLICT(device_id, source) DO UPDATE SET
@@ -328,7 +344,7 @@ func (manager *Manager) reconcileClient(ctx context.Context, siteID string, clie
 	if strings.TrimSpace(client.ConnectedAt) != "" {
 		connectedAt = client.ConnectedAt
 	}
-	_, err = manager.store.DB.ExecContext(ctx, `
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO unifi_client_snapshots(
 			client_id, site_id, device_id, mac_address, ip_address, name,
 			connection_type, uplink_device_id, connected_at, last_synced_at

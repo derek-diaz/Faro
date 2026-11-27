@@ -1,3 +1,5 @@
+import { packettaleBlocklists } from "./packettale";
+
 export type BlocklistCategory = "Everyday" | "Security" | "Privacy" | "Content" | "Network";
 
 export type CatalogBlocklist = {
@@ -543,4 +545,5 @@ export const blocklistCatalog: CatalogBlocklist[] = [
     url: blocklistProject("torrent"),
     caution: "Legitimate torrent resources may also be blocked.",
   },
+  ...packettaleBlocklists,
 ];

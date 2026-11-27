@@ -43,6 +43,7 @@ import {
   type ProtectionInput
 } from "../api/client";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ProtectionRulePreview } from "../components/ProtectionRulePreview";
 import { errorMessage, normalizeURL } from "../utils/formatting";
 import { blocklistCatalog } from "../data/blocklists";
 
@@ -86,6 +87,7 @@ const emptyDraft = (): Draft => ({
   allow_domains: [],
   block_domains: [],
   device_ips: [],
+  device_ids: [],
   schedule: { enabled: false, days: "1,2,3,4,5,6,7", start: "08:00", end: "22:00", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" }
 });
 
@@ -115,8 +117,8 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
     if (selected) setEditor(protectionDraft(selected));
   }, [selected]);
 
-  const assignedIPs = useMemo(() => new Set(protections.flatMap((item) => item.is_default ? [] : item.device_ips)), [protections]);
-  const homeDevices = devices.filter((device) => !assignedIPs.has(device.client_ip));
+  const assignedIDs = useMemo(() => new Set(protections.flatMap((item) => item.is_default ? [] : item.device_ids)), [protections]);
+  const homeDevices = devices.filter((device) => !assignedIDs.has(device.device_id));
 
   function openWizard() {
     setDraft(emptyDraft());
@@ -272,7 +274,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
       {!selected ? <ProtectionOverview protections={protections} blocklists={blocklists} devices={devices} homeDevices={homeDevices} pauseBusyID={pauseBusyID} onPause={changePause} onManage={(id) => { setSelectedID(id); setError(""); setNotice(""); }} onCreate={openWizard} /> : <ProtectionEditor selected={selected} editor={editor} setEditor={setEditor} blocklists={blocklists} devices={devices} homeDevices={homeDevices} saveStage={saveStage} busy={busy} onBack={() => { setSelectedID(null); setError(""); }} onDelete={() => setConfirmDelete(true)} onManageBlocklists={onManageBlocklists} saveSelected={saveSelected} />}
 
       {wizard && <ProtectionWizard step={step} setStep={(next) => { setStep(next); setError(""); }} draft={draft} setDraft={(next) => { pendingCreation.current = null; setDraft(next); }} level={level} setLevel={(next) => { pendingCreation.current = null; setLevel(next); }} customSource={customSource} setCustomSource={(next) => { pendingCreation.current = null; setCustomSource(next); }} blocklists={wizardBlocklists} devices={devices} busy={busy} error={error} creationStage={creationStage} preparedSources={preparedSources} created={createdProtection} onClose={() => { if (!busy) { setWizard(false); setError(""); } }} onFinish={() => void finishWizard()} />}
-      {confirmDelete && selected && !selected.is_default && <ConfirmDialog title={`Delete ${selected.name}?`} body="This protection setup and its exceptions will be permanently deleted." confirmLabel="Delete protection" busyLabel="Deleting protection…" busy={busy} onCancel={() => setConfirmDelete(false)} onConfirm={() => void removeSelected()} detail={<div className="confirm-dialog-impact warning"><Shield size={18} /><span><strong>{selected.device_ips.length} assigned device{selected.device_ips.length === 1 ? "" : "s"} will return to Home</strong><small>The devices themselves and their activity history will remain.</small></span></div>} />}
+      {confirmDelete && selected && !selected.is_default && <ConfirmDialog title={`Delete ${selected.name}?`} body="This protection setup and its exceptions will be permanently deleted." confirmLabel="Delete protection" busyLabel="Deleting protection…" busy={busy} onCancel={() => setConfirmDelete(false)} onConfirm={() => void removeSelected()} detail={<div className="confirm-dialog-impact warning"><Shield size={18} /><span><strong>{selected.device_ids.length} assigned device{selected.device_ids.length === 1 ? "" : "s"} will return to Home</strong><small>The devices themselves and their activity history will remain.</small></span></div>} />}
     </div>
   );
 }
@@ -292,6 +294,8 @@ function ProtectionEditor({ selected, editor, setEditor, blocklists, devices, ho
   readonly saveSelected: (event: SubmitEvent) => Promise<void>;
 }) {
   const enabledBlocklists = blocklists.filter((item) => item.enabled);
+  const rules = draftRules(editor);
+  const previewKey = JSON.stringify([selected.id, selected.updated_at, draftRules(protectionDraft(selected)), rules]);
   const defaultCopy = selected.is_default ? "Any device not assigned elsewhere uses Home." : "Only the devices selected below use these choices.";
   return <div className="protection-edit-view">
     <div className="protection-edit-nav"><Button variant="outline" className="secondary" type="button" disabled={Boolean(saveStage)} onClick={onBack}><ChevronLeft size={16} />All protection setups</Button><span><small>Editing setup</small><strong>{selected.name}</strong></span></div>
@@ -300,8 +304,9 @@ function ProtectionEditor({ selected, editor, setEditor, blocklists, devices, ho
       <EditorSection title="Icon" description="Choose a simple visual cue."><IconPicker value={editor.icon} onChange={(icon) => setEditor({ ...editor, icon })} compact /></EditorSection>
       <EditorSection title="Blocking" description="Select installed lists for this protection setup."><div className="protection-choice-grid">{enabledBlocklists.map((blocklist) => <label key={blocklist.id} className={editor.blocklist_ids.includes(blocklist.id) ? "selected" : ""}><Checkbox  checked={editor.blocklist_ids.includes(blocklist.id)} onCheckedChange={() => setEditor({ ...editor, blocklist_ids: toggleNumber(editor.blocklist_ids, blocklist.id) })} /><span><strong>{blocklist.name}</strong><small>{blocklist.entry_count.toLocaleString()} domains</small></span></label>)}{enabledBlocklists.length === 0 && <p className="protection-inline-empty">No active blocklists are installed. Add one from the Blocklists page first.</p>}</div><Button variant="outline" className="secondary protection-add-list" type="button" onClick={onManageBlocklists}>Manage blocklists</Button></EditorSection>
       <EditorSection title="Exceptions" description="Use one exact domain per line. Allowed domains always win."><div className="protection-domain-editors"><label><span>Always allow</span><Textarea value={editor.allow_domains.join("\n")} onChange={(event) => setEditor({ ...editor, allow_domains: lines(event.target.value) })} placeholder="example.com" /></label><label><span>Always block</span><Textarea value={editor.block_domains.join("\n")} onChange={(event) => setEditor({ ...editor, block_domains: lines(event.target.value) })} placeholder="telemetry.example" /></label></div></EditorSection>
+      <ProtectionRulePreview key={previewKey} id={selected.id} rules={rules} />
       <EditorSection title="Domain blocking schedule" description="Choose when Faro applies this setup’s blocklists and custom blocks. This schedule never disconnects devices."><ScheduleEditor draft={editor} setDraft={setEditor} /></EditorSection>
-      <EditorSection title="Devices" description={selected.is_default ? "Home automatically covers every device not assigned elsewhere." : "Choose which observed devices use this protection."}>{selected.is_default ? <DeviceSummaryList devices={homeDevices} /> : <DeviceChoices devices={devices} selected={editor.device_ips} onChange={(deviceIPs) => setEditor({ ...editor, device_ips: deviceIPs })} />}</EditorSection>
+      <EditorSection title="Devices" description={selected.is_default ? "Home automatically covers every device not assigned elsewhere." : "Choose which observed devices use this protection."}>{selected.is_default ? <DeviceSummaryList devices={homeDevices} /> : <DeviceChoices devices={devices} selected={editor.device_ids} onChange={(deviceIPs) => setEditor({ ...editor, device_ids: deviceIPs })} />}</EditorSection>
       <footer className={`protection-save-bar ${saveStage ? "saving" : ""}`}><ProtectionSaveProgress saveStage={saveStage} selectedName={selected.name} busy={busy} editorName={editor.name} /></footer>
     </form>
   </div>;
@@ -333,7 +338,7 @@ function ProtectionOverview({ protections, blocklists, devices, homeDevices, pau
       <div className="protection-card-grid">
         {protections.map((protection) => {
           const installed = blocklists.filter((item) => protection.blocklist_ids.includes(item.id));
-          const protectedDevices = protection.is_default ? homeDevices : devices.filter((device) => protection.device_ips.includes(device.client_ip));
+          const protectedDevices = protection.is_default ? homeDevices : devices.filter((device) => protection.device_ids.includes(device.device_id));
           const exceptionCount = protection.allow_entries.length + protection.block_entries.length;
           return (
             <article className={`protection-summary-card panel ${protection.is_default ? "default" : ""} ${protection.is_active ? "" : "inactive"}`} key={protection.id} aria-label={`${protection.name} protection`}>
@@ -385,6 +390,7 @@ function ProtectionWizard({ step, setStep, draft, setDraft, level, setLevel, cus
   const titles = ["Name and protection", "Choose devices", "Review and create"];
   const source = creationSource(level, customSource);
   const unavailableSource = source ? blocklists.find((item) => normalizeURL(item.url) === normalizeURL(source.url) && !item.enabled && (item.protection_count ?? 0) > 0) : undefined;
+  const exceptionCount = draft.allow_domains.filter(Boolean).length + draft.block_domains.filter(Boolean).length;
   const customSourceError = level === "custom" ? sourceValidation(customSource) : "";
   const canContinue = step !== 0 || (draft.name.trim().length > 0 && !customSourceError && !unavailableSource && draft.blocklist_ids.length + (level === "custom" && source ? 1 : 0) <= 20);
   return (
@@ -406,10 +412,10 @@ function ProtectionWizard({ step, setStep, draft, setDraft, level, setLevel, cus
           </>}
           {step === 1 && <>
             <p>Select the devices that should use {draft.name.trim()}. You can also assign them later.</p>
-            <DeviceChoices devices={devices} selected={draft.device_ips} onChange={(deviceIPs) => setDraft({ ...draft, device_ips: deviceIPs })} />
-            <details className="protection-creation-options"><summary>Domain exceptions <span>Optional{draft.allow_domains.length + draft.block_domains.length > 0 ? ` · ${draft.allow_domains.length + draft.block_domains.length} added` : ""}</span></summary><p>Use one exact domain per line. Allow exceptions take priority over blocks.</p><div className="protection-domain-editors"><label><span>Always allow</span><Textarea value={draft.allow_domains.join("\n")} onChange={(event) => setDraft({ ...draft, allow_domains: lines(event.target.value) })} placeholder="school.example" /></label><label><span>Always block</span><Textarea value={draft.block_domains.join("\n")} onChange={(event) => setDraft({ ...draft, block_domains: lines(event.target.value) })} placeholder="social.example" /></label></div></details>
+            <DeviceChoices devices={devices} selected={draft.device_ids} onChange={(deviceIPs) => setDraft({ ...draft, device_ids: deviceIPs })} />
+            <details className="protection-creation-options"><summary>Domain exceptions <span>Optional{exceptionCount > 0 ? ` · ${exceptionCount} added` : ""}</span></summary><p>Use one exact domain per line. Allow exceptions take priority over blocks.</p><div className="protection-domain-editors"><label><span>Always allow</span><Textarea value={draft.allow_domains.join("\n")} onChange={(event) => setDraft({ ...draft, allow_domains: lines(event.target.value) })} placeholder="school.example" /></label><label><span>Always block</span><Textarea value={draft.block_domains.join("\n")} onChange={(event) => setDraft({ ...draft, block_domains: lines(event.target.value) })} placeholder="social.example" /></label></div></details>
           </>}
-          {step === 2 && <Review draft={draft} level={level} source={source} blocklists={blocklists} devices={devices} created={created} />}
+          {step === 2 && <Review draft={cleanInput(draft)} level={level} source={source} blocklists={blocklists} devices={devices} created={created} />}
           {creationStage && <output className="protection-creation-progress" aria-live="polite"><LoaderCircle className="spinning" size={17} />{creationStage}…</output>}
           {error && <div className="protection-wizard-error" role="alert"><p>{created ? `Protection was created, but its details could not refresh. ${error}` : error}</p><p>{created ? "Choose Refresh protection to finish." : "Your choices are saved here. Go back to change them, or choose Try again."}</p>{preparedSources.length > 0 && <p>Available in Blocklists: {preparedSources.join(", ")}. Faro will reuse these sources when you try again.</p>}</div>}
         </div>
@@ -433,7 +439,7 @@ function Review({ draft, level, source, blocklists, devices, created }: { readon
   const installedNames = level === "custom" ? blocklists.filter((item) => draft.blocklist_ids.includes(item.id)).map((item) => item.name) : [];
   if (source) installedNames.push(source.name);
   const needsInstall = source && !blocklists.some((item) => normalizeURL(item.url) === normalizeURL(source.url));
-  return <><div className="protection-review"><div className="protection-review-identity"><ProtectionIcon name={draft.icon} /><span><strong>{draft.name}</strong><small>{created ? "Created" : "Ready to create"}</small></span></div><ReviewRow label="Protection" value={protectionLevels.find((item) => item.id === level)?.name ?? "Custom"} /><ReviewRow label="Blocklists" value={[...new Set(installedNames)].join(", ") || "None — domain exceptions only"} />{needsInstall && <ReviewRow label="Install on create" value={source.name} />}<ReviewRow label="Always allow" value={`${draft.allow_domains.length} domain${draft.allow_domains.length === 1 ? "" : "s"}`} /><ReviewRow label="Always block" value={`${draft.block_domains.length} domain${draft.block_domains.length === 1 ? "" : "s"}`} /><ReviewRow label="Devices" value={draft.device_ips.length ? devices.filter((device) => draft.device_ips.includes(device.client_ip)).map(deviceName).join(", ") : "None yet — assign later"} /><ReviewRow label="Schedule" value="Block domains all day, every day" /></div><p className="protection-source-note">{draft.device_ips.length ? "Selected devices will move to this protection when you create it." : "Assign devices later from Protection or Devices."} You can change the schedule after creating this setup.</p></>;
+  return <><div className="protection-review"><div className="protection-review-identity"><ProtectionIcon name={draft.icon} /><span><strong>{draft.name}</strong><small>{created ? "Created" : "Ready to create"}</small></span></div><ReviewRow label="Protection" value={protectionLevels.find((item) => item.id === level)?.name ?? "Custom"} /><ReviewRow label="Blocklists" value={[...new Set(installedNames)].join(", ") || "None — domain exceptions only"} />{needsInstall && <ReviewRow label="Install on create" value={source.name} />}<ReviewRow label="Always allow" value={`${draft.allow_domains.length} domain${draft.allow_domains.length === 1 ? "" : "s"}`} /><ReviewRow label="Always block" value={`${draft.block_domains.length} domain${draft.block_domains.length === 1 ? "" : "s"}`} /><ReviewRow label="Devices" value={draft.device_ids.length ? devices.filter((device) => draft.device_ids.includes(device.device_id)).map(deviceName).join(", ") : "None yet — assign later"} /><ReviewRow label="Schedule" value="Block domains all day, every day" /></div><p className="protection-source-note">{draft.device_ids.length ? "Selected devices will move to this protection when you create it." : "Assign devices later from Protection or Devices."} You can change the schedule after creating this setup.</p></>;
 }
 
 function ReviewRow({ label, value }: { readonly label: string; readonly value: string }) { return <div className="protection-review-row"><span>{label}</span><strong>{value}</strong></div>; }
@@ -467,12 +473,12 @@ function IconPicker({ value, onChange, compact = false }: { readonly value: Prot
 
 export function ProtectionIcon({ name, size = 20 }: { readonly name: ProtectionIconKey; readonly size?: number }) { const Icon = icons.find((item) => item.key === name)?.icon ?? Shield; return <Icon size={size} />; }
 
-function DeviceChoices({ devices, selected, onChange }: { readonly devices: DeviceSummary[]; readonly selected: string[]; readonly onChange: (selected: string[]) => void }) {
+function DeviceChoices({ devices, selected, onChange }: { readonly devices: DeviceSummary[]; readonly selected: number[]; readonly onChange: (selected: number[]) => void }) {
   if (!devices.length) return <p className="protection-inline-empty">No devices have been observed yet. You can assign devices later.</p>;
-  return <div className="protection-device-choices">{devices.map((device) => <label className={selected.includes(device.client_ip) ? "selected" : ""} key={device.client_ip}><Checkbox  checked={selected.includes(device.client_ip)} onCheckedChange={() => onChange(toggleString(selected, device.client_ip))} /><MonitorPlay size={17} aria-hidden="true" /><span className="protection-device-copy"><strong>{deviceName(device)}</strong><small>{device.client_ip}{device.protection ? ` · currently ${device.protection}` : ""}</small></span></label>)}</div>;
+  return <div className="protection-device-choices">{devices.map((device) => <label className={selected.includes(device.device_id) ? "selected" : ""} key={device.device_id}><Checkbox  checked={selected.includes(device.device_id)} onCheckedChange={() => onChange(toggleNumber(selected, device.device_id))} /><MonitorPlay size={17} aria-hidden="true" /><span className="protection-device-copy"><strong>{deviceName(device)}</strong><small>{device.client_ip || "No current address"}{device.protection ? ` · currently ${device.protection}` : ""}</small></span></label>)}</div>;
 }
 
-function DeviceSummaryList({ devices }: { readonly devices: DeviceSummary[] }) { return devices.length ? <div className="protection-device-summary">{devices.map((device) => <span key={device.client_ip}><MonitorPlay size={15} /><strong>{deviceName(device)}</strong><small>{device.client_ip}</small></span>)}</div> : <p className="protection-inline-empty">No observed devices currently fall back to Home.</p>; }
+function DeviceSummaryList({ devices }: { readonly devices: DeviceSummary[] }) { return devices.length ? <div className="protection-device-summary">{devices.map((device) => <span key={device.device_id}><MonitorPlay size={15} /><strong>{deviceName(device)}</strong><small>{device.client_ip}</small></span>)}</div> : <p className="protection-inline-empty">No observed devices currently fall back to Home.</p>; }
 function deviceName(device: DeviceSummary) { return device.display_name || device.name || device.client_ip; }
 function protectedDeviceLabel(count: number, isDefault: boolean) {
   if (count > 0) return `${count} currently covered`;
@@ -482,11 +488,14 @@ function customRuleLabel(count: number) {
   if (count === 0) return "None";
   return `${count} custom rule${count === 1 ? "" : "s"}`;
 }
-function protectionDraft(protection: Protection): Draft { return { name: protection.name, icon: protection.icon, blocklist_ids: protection.blocklist_ids, allow_domains: protection.allow_entries.map((item) => item.domain), block_domains: protection.block_entries.map((item) => item.domain), device_ips: protection.device_ips, schedule: protection.schedule }; }
-function cleanInput(draft: Draft): ProtectionInput { return { name: draft.name.trim(), icon: draft.icon, blocklist_ids: draft.blocklist_ids, allow_domains: draft.allow_domains.filter(Boolean), block_domains: draft.block_domains.filter(Boolean), device_ips: draft.device_ips, schedule: draft.schedule }; }
-function lines(value: string) { return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean); }
+function protectionDraft(protection: Protection): Draft { return { name: protection.name, icon: protection.icon, blocklist_ids: protection.blocklist_ids, allow_domains: protection.allow_entries.map((item) => item.domain), block_domains: protection.block_entries.map((item) => item.domain), device_ips: [], device_ids: protection.device_ids, schedule: protection.schedule }; }
+function draftRules(draft: Draft) {
+  return { blocklist_ids: draft.blocklist_ids, allow_domains: draft.allow_domains.filter(Boolean), block_domains: draft.block_domains.filter(Boolean) };
+}
+function cleanInput(draft: Draft): ProtectionInput { return { ...draft, ...draftRules(draft), name: draft.name.trim() }; }
+function lines(value: string) { return value.split(/\r?\n/).map((line) => line.trim()); }
 function toggleNumber(values: number[], value: number) { return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]; }
-function toggleString(values: string[], value: string) { return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]; }
+
 function toggleDay(days: string, day: number) { const values = days.split(",").filter(Boolean).map(Number); return (values.includes(day) ? values.filter((value) => value !== day) : [...values, day]).sort((a, b) => a - b).join(","); }
 function pauseUntil(preset: "5m" | "1h" | "tomorrow" | "resume") { if (preset === "resume") return ""; const until = new Date(); if (preset === "5m") until.setMinutes(until.getMinutes() + 5); else if (preset === "1h") until.setHours(until.getHours() + 1); else { until.setDate(until.getDate() + 1); until.setHours(7, 0, 0, 0); } return until.toISOString(); }
 function protectionStateLabel(protection: Protection) { if (protection.state === "paused") return `Domain blocking off until ${formatPauseTime(protection.paused_until)}`; if (protection.state === "scheduled_off") return "Domain blocking off · Outside schedule"; return "Blocking domains"; }
@@ -521,7 +530,7 @@ function sameProtection(protection: Protection, input: ProtectionInput): boolean
     blocklist_ids: [...new Set(value.blocklist_ids)].sort((a, b) => a - b),
     allow_domains: domains(value.allow_domains),
     block_domains: domains(value.block_domains),
-    device_ips: [...new Set(value.device_ips)].sort(),
+    device_ids: [...new Set(value.device_ids)].sort(),
     schedule: { enabled: value.schedule.enabled, days: value.schedule.days, start: value.schedule.start, end: value.schedule.end, timezone: value.schedule.timezone }
   });
   return comparable(protectionDraft(protection)) === comparable(input);

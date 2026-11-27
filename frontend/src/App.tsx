@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  deviceReference,
   type Blocklist,
   type DNSRecord,
   type DashboardSummary,
@@ -209,7 +210,7 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
   const [dashboardLoading, setDashboardLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDomain, setSelectedDomain] = useState<string | null>(initialRoute.domain);
-  const [selectedClientIP, setSelectedClientIP] = useState<string | null>(initialRoute.clientIP);
+  const [selectedDeviceRef, setSelectedDeviceRef] = useState<string | null>(initialRoute.clientIP);
   const [searchOpen, setSearchOpen] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const liveRefreshBusy = useRef(false);
@@ -263,7 +264,7 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
     function onPopState() {
       const route = readRoute();
       setPage(route.page);
-      setSelectedClientIP(route.clientIP);
+      setSelectedDeviceRef(route.clientIP);
       setSelectedDomain(route.domain);
       setSearchOpen(false);
       setNotificationOpen(false);
@@ -402,9 +403,9 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
   function navigateToPage(nextPage: Page) {
     setPage(nextPage);
     setSelectedDomain(null);
-    if (nextPage !== "devices") setSelectedClientIP(null);
-    const target = nextPage === "devices" && selectedClientIP
-      ? `/devices/${encodeURIComponent(selectedClientIP)}`
+    if (nextPage !== "devices") setSelectedDeviceRef(null);
+    const target = nextPage === "devices" && selectedDeviceRef
+      ? `/devices/${encodeURIComponent(selectedDeviceRef)}`
       : pagePaths[nextPage];
     pushRoute(target);
     window.scrollTo({ top: 0 });
@@ -412,10 +413,10 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
 
   function selectDevice(clientIP: string | null, replace = false) {
     setPage("devices");
-    setSelectedClientIP(clientIP);
+    setSelectedDeviceRef(clientIP);
     setSelectedDomain(null);
     const target = clientIP ? `/devices/${encodeURIComponent(clientIP)}` : pagePaths.devices;
-    const invalidCurrentSelection = selectedClientIP !== null && !devices.some((device) => device.client_ip === selectedClientIP);
+    const invalidCurrentSelection = selectedDeviceRef !== null && !devices.some((device) => deviceReference(device) === selectedDeviceRef);
     const shouldReplace = replace || invalidCurrentSelection || (window.location.pathname === pagePaths.devices && clientIP !== null);
     pushRoute(target, shouldReplace);
   }
@@ -469,8 +470,8 @@ function AuthenticatedApp({ username, onSignedOut, themeMode, onThemeModeChange 
             devices={devices}
             protections={protections}
             refresh={refreshDevices}
-            selectedClientIP={selectedClientIP}
-            onSelectClient={selectDevice}
+            selectedDeviceRef={selectedDeviceRef}
+            onSelectDevice={selectDevice}
             onDomainSelect={openDomain}
           />
         );

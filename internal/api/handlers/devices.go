@@ -59,8 +59,14 @@ func deviceAddressHistory(ctx context.Context, database *sql.DB, deviceID int64)
 	rows, err := database.QueryContext(ctx, `
 		SELECT address, family, source, confidence,
 		       strftime('%Y-%m-%dT%H:%M:%SZ', first_seen_at),
-		       strftime('%Y-%m-%dT%H:%M:%SZ', last_seen_at)
-		FROM device_addresses WHERE device_id = ? ORDER BY last_seen_at DESC, id DESC`, deviceID)
+		       strftime('%Y-%m-%dT%H:%M:%SZ', last_seen_at), 1 AS current
+		FROM device_addresses WHERE device_id = ?
+		UNION ALL
+		SELECT client_ip, CASE WHEN INSTR(client_ip, ':') > 0 THEN 'ipv6' ELSE 'ipv4' END, 'dns', 'observed',
+		       strftime('%Y-%m-%dT%H:%M:%SZ', MIN(timestamp)), strftime('%Y-%m-%dT%H:%M:%SZ', MAX(timestamp)), 0
+		FROM dns_queries q WHERE device_id = ?
+		AND NOT EXISTS (SELECT 1 FROM device_addresses a WHERE a.device_id = q.device_id AND a.address = q.client_ip)
+		GROUP BY client_ip ORDER BY current DESC, 6 DESC, address`, deviceID, deviceID)
 	if err != nil {
 		return []map[string]any{}
 	}
@@ -68,10 +74,11 @@ func deviceAddressHistory(ctx context.Context, database *sql.DB, deviceID int64)
 	items := make([]map[string]any, 0)
 	for rows.Next() {
 		var address, family, source, confidence, firstSeen, lastSeen string
-		if rows.Scan(&address, &family, &source, &confidence, &firstSeen, &lastSeen) == nil {
+		var current bool
+		if rows.Scan(&address, &family, &source, &confidence, &firstSeen, &lastSeen, &current) == nil {
 			items = append(items, map[string]any{
 				"address": address, "family": family, "source": source, "confidence": confidence,
-				"first_seen": firstSeen, "last_seen": lastSeen,
+				"first_seen": firstSeen, "last_seen": lastSeen, "current": current,
 			})
 		}
 	}
@@ -137,13 +144,9 @@ func unescapeDeviceIP(rawClientIP string) (string, error) {
 }
 
 func (handler *Handler) deviceDetails(responseWriter http.ResponseWriter, request *http.Request, clientIP string) {
-	deviceID, found, lookupErr := deviceidentity.DeviceIDForAddress(request.Context(), handler.store, clientIP)
+	deviceID, clientIP, lookupErr := handler.resolveDeviceReference(request.Context(), clientIP, "")
 	if lookupErr != nil {
 		writeBadRequest(responseWriter, lookupErr)
-		return
-	}
-	if !found {
-		writeBadRequest(responseWriter, errors.New("device was not found"))
 		return
 	}
 	addresses, addressErr := deviceidentity.Addresses(request.Context(), handler.store, deviceID)
@@ -159,8 +162,7 @@ func (handler *Handler) deviceDetails(responseWriter http.ResponseWriter, reques
 	blocked := scalarInt(request.Context(), handler.store.DB, `SELECT COUNT(*) FROM dns_queries WHERE device_id = ? AND timestamp >= ? AND action = 'blocked'`, deviceID, start)
 	var firstSeen, lastSeen sql.NullString
 	_ = handler.store.DB.QueryRowContext(request.Context(), `SELECT MIN(timestamp), MAX(timestamp) FROM dns_queries WHERE device_id = ?`, deviceID).Scan(&firstSeen, &lastSeen)
-	discovered := handler.discoverDeviceNames(request.Context(), addresses)
-	identity := bestDeviceIdentity(discovered, addresses, clientIP)
+	identity := handler.deviceIdentity(request.Context(), deviceID, addresses, clientIP)
 	if strings.TrimSpace(name) != "" {
 		identity.DisplayName = name
 		identity.NameSource = "manual"
@@ -185,7 +187,7 @@ func (handler *Handler) deviceDetails(responseWriter http.ResponseWriter, reques
 	if storedTypeSource == "manual" && validManualDeviceType(storedDeviceType) {
 		identity.DeviceType, identity.TypeConfidence, typeSource = storedDeviceType, "high", "manual"
 	}
-	protectionID, protectionName, protectionIcon := protectionForClient(request.Context(), handler.store.DB, clientIP)
+	protectionID, protectionName, protectionIcon := protectionForDevice(request.Context(), handler.store.DB, deviceID, clientIP)
 	var dnsPausedUntil sql.NullString
 	_ = handler.store.DB.QueryRowContext(request.Context(), `SELECT paused_until FROM device_dns_pauses WHERE device_id = ?`, deviceID).Scan(&dnsPausedUntil)
 	dnsPaused := false
@@ -232,8 +234,8 @@ func (handler *Handler) deviceDNSPause(responseWriter http.ResponseWriter, reque
 		methodNotAllowed(responseWriter)
 		return
 	}
-	deviceID, found, err := deviceidentity.DeviceIDForAddress(request.Context(), handler.store, clientIP)
-	if err != nil || !found {
+	deviceID, clientIP, err := handler.resolveDeviceReference(request.Context(), clientIP, "")
+	if err != nil {
 		writeBadRequest(responseWriter, errors.New("device was not found"))
 		return
 	}
@@ -298,8 +300,8 @@ func (handler *Handler) deviceReplay(responseWriter http.ResponseWriter, request
 		return
 	}
 
-	deviceID, found, err := deviceidentity.DeviceIDForAddress(request.Context(), handler.store, clientIP)
-	if err != nil || !found {
+	deviceID, clientIP, err := handler.resolveDeviceReference(request.Context(), clientIP, "")
+	if err != nil {
 		writeBadRequest(responseWriter, errors.New("device was not found"))
 		return
 	}
@@ -506,7 +508,7 @@ func (handler *Handler) deviceAlias(responseWriter http.ResponseWriter, request 
 		return
 	}
 	name := strings.TrimSpace(input.Name)
-	deviceID, err := deviceidentity.ResolveAddress(request.Context(), handler.store, clientIP, "manual")
+	deviceID, clientIP, err := handler.resolveDeviceReference(request.Context(), clientIP, "manual")
 	if err != nil {
 		writeBadRequest(responseWriter, err)
 		return
@@ -531,18 +533,6 @@ func (handler *Handler) deviceAlias(responseWriter http.ResponseWriter, request 
 	if _, err := handler.store.DB.ExecContext(request.Context(), `
 		UPDATE devices SET name = ?, location = ?, notes = ?, device_type = ?, type_source = ?, confirmed = 1, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?`, name, nullableInput(input.Location), nullableInput(input.Notes), currentDeviceType, currentTypeSource, deviceID); err != nil {
-		writeError(responseWriter, err)
-		return
-	}
-	if _, err := handler.store.DB.ExecContext(request.Context(), `
-		INSERT INTO device_aliases(client_ip, name, location, notes, updated_at)
-		VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(client_ip) DO UPDATE SET
-			name = excluded.name,
-			location = excluded.location,
-			notes = excluded.notes,
-			updated_at = CURRENT_TIMESTAMP
-	`, clientIP, name, nullableInput(input.Location), nullableInput(input.Notes)); err != nil {
 		writeError(responseWriter, err)
 		return
 	}

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/derek/faro/internal/coredns"
 	"github.com/derek/faro/internal/db"
 )
 
@@ -39,6 +40,7 @@ type Manager struct {
 	pairings map[string]pairingSession
 	replays  map[string]map[string]time.Time
 	syncNow  chan struct{}
+	localDNS *DNSReport
 
 	operationMu sync.Mutex
 	pairingMu   sync.Mutex
@@ -76,15 +78,30 @@ type Status struct {
 }
 
 type NodeInfo struct {
-	NodeID         string `json:"node_id"`
-	Name           string `json:"name"`
-	LANAddress     string `json:"lan_address,omitempty"`
-	Role           string `json:"role"`
-	Online         bool   `json:"online"`
-	ConfigRevision int64  `json:"config_revision"`
-	LastSeenAt     string `json:"last_seen_at,omitempty"`
-	LastSyncAt     string `json:"last_sync_at,omitempty"`
-	LastError      string `json:"last_error,omitempty"`
+	NodeID          string     `json:"node_id"`
+	Name            string     `json:"name"`
+	LANAddress      string     `json:"lan_address,omitempty"`
+	Role            string     `json:"role"`
+	Online          bool       `json:"online"`
+	ConfigRevision  int64      `json:"config_revision"`
+	LastSeenAt      string     `json:"last_seen_at,omitempty"`
+	LastSyncAt      string     `json:"last_sync_at,omitempty"`
+	LastError       string     `json:"last_error,omitempty"`
+	RevisionsBehind int64      `json:"revisions_behind"`
+	BehindSeconds   int64      `json:"behind_seconds"`
+	DNSStatus       string     `json:"dns_status"`
+	DNS             *DNSReport `json:"dns,omitempty"`
+}
+
+type DNSReport struct {
+	CheckedAt    time.Time    `json:"checked_at"`
+	Totals       *DNSActivity `json:"totals,omitempty"`
+	processStart float64
+}
+
+type DNSActivity struct {
+	coredns.DNSTotals
+	RequestsPerSecond *float64 `json:"requests_per_second,omitempty"`
 }
 
 type PairingCode struct {
@@ -149,6 +166,15 @@ type EncryptedEnvelope struct {
 type encryptedEnvelope = EncryptedEnvelope
 
 type SyncAck struct {
-	Revision int64  `json:"revision"`
-	Error    string `json:"error,omitempty"`
+	Revision int64       `json:"revision"`
+	Error    string      `json:"error,omitempty"`
+	DNS      *DNSReading `json:"dns,omitempty"`
+	// On older replicas a failed acknowledgement names the attempted revision.
+	RevisionApplied bool `json:"revision_applied,omitempty"`
+}
+
+// Send the sample age so the primary can date reports using its own clock.
+type DNSReading struct {
+	AgeSeconds int64        `json:"age_seconds"`
+	Totals     *DNSActivity `json:"totals,omitempty"`
 }

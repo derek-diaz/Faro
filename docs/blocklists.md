@@ -15,6 +15,14 @@ Open **Protection → Blocklists** to manage filtering sources. When creating a 
 
 Start with one general-purpose source and add specialized lists as needed. This makes unexpected blocking easier to trace.
 
+### Packettale
+
+In **Available**, choose **Packettale** in the **Provider** filter. Search for a topic such as phishing, smart TV tracking, or a regional ad filter. Install the categories you want, then select them in the protection setup for the intended devices.
+
+Packettale also offers bundles that combine several categories. One bundle can cover the same domains as its individual feeds or an existing list such as OISD Small. Whole-service lists such as Google services or remote access can disable those services for devices using that protection. [Packettale feed catalog](https://blocklist.packettale.com/feeds.md) · [Upstream sources](https://blocklist.packettale.com/sources.md)
+
+Faro’s Packettale catalog includes published domain feeds that fit its 64 MiB download limit. IP-only feeds belong on a firewall, and Packettale’s all-categories download exceeds the limit.
+
 ## Add your own source
 
 1. Choose **Add custom** on **Protection → Blocklists**.

@@ -193,7 +193,16 @@ function DashboardStoryRow({ item }: { readonly item: DashboardStory }) {
   const icon = item.tone === "critical" || item.tone === "warning"
     ? <AlertTriangle size={16} />
     : item.tone === "success" ? <CheckCircle2 size={16} /> : <Activity size={16} />;
-  return <article className={`dashboard-story-row ${item.tone}`}><span>{icon}</span><div><strong>{item.title}</strong><p>{item.body}</p></div></article>;
+  return (
+    <article className={`dashboard-story-row ${item.tone}`}>
+      <span>{icon}</span>
+      <div>
+        <strong>{item.title}</strong>
+        <p>{item.body}</p>
+        {item.section === "redundancy" && <a href="/settings#redundancy">View server health</a>}
+      </div>
+    </article>
+  );
 }
 
 function DashboardNewItem({ item, onSelect }: { readonly item: WhatsNewItem; readonly onSelect: () => void }) {

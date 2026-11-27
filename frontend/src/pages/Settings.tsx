@@ -21,7 +21,7 @@ type SettingsTab = "general" | "redundancy" | "integrations" | "data" | "advance
 type ActionState = "idle" | "working" | "done" | "error";
 
 export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps) {
-  const [tab, setTab] = useState<SettingsTab>("general");
+  const [tab, setTab] = useState<SettingsTab>(() => window.location.hash === "#redundancy" ? "redundancy" : "general");
   const [form, setForm] = useState<Record<string, string>>({});
   const [actionState, setActionState] = useState<ActionState>("idle");
   const [message, setMessage] = useState("");
@@ -153,7 +153,13 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
 
   return <SettingsWorkspace
     tab={tab}
-    setTab={(nextTab) => { setTab(nextTab); setMessage(""); }}
+    setTab={(nextTab) => {
+      setTab(nextTab);
+      setMessage("");
+      if (window.location.hash === "#redundancy" && nextTab !== "redundancy") {
+        window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
+      }
+    }}
     message={message}
     actionState={actionState}
     form={form}

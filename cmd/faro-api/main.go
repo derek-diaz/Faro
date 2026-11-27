@@ -90,6 +90,7 @@ func run() error {
 	}
 	startWorker(reloader.RunTemporalReloads)
 	startWorker(redundancyManager.Run)
+	startWorker(func(ctx context.Context) { redundancyManager.RunDNSMetrics(ctx, reloader.MetricsURL) })
 
 	tailer := querylog.NewTailer(store, logPath)
 	startWorker(tailer.Run)

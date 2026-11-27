@@ -116,36 +116,50 @@ func (manager *Manager) lanAddress(ctx context.Context) string {
 }
 
 func (manager *Manager) controllerStatus(ctx context.Context, state localState, result Status) (Status, error) {
-	now := manager.now().UTC().Format(time.RFC3339)
+	now := manager.now().UTC()
+	localDNS := manager.latestDNS()
 	result.ControllerName = state.NodeName
 	result.Nodes = append(result.Nodes, NodeInfo{
 		NodeID: state.NodeID, Name: state.NodeName, LANAddress: result.LANAddress,
 		Role: RoleController, Online: true, ConfigRevision: state.ConfigRevision,
-		LastSeenAt: now, LastSyncAt: now,
+		LastSeenAt: now.Format(time.RFC3339), DNS: localDNS, DNSStatus: dnsStatus(localDNS, true, now),
 	})
 	rows, err := manager.store.DB.QueryContext(ctx, `
-		SELECT node_id, name, lan_address, config_revision,
-		       COALESCE(last_seen_at, ''), COALESCE(last_sync_at, ''), last_error
-		FROM redundancy_nodes ORDER BY name COLLATE NOCASE`)
+		SELECT n.node_id, n.name, n.lan_address, n.config_revision, s.config_revision,
+		       COALESCE(n.last_seen_at, ''), COALESCE(n.last_sync_at, ''), n.last_error,
+		       COALESCE(behind_since, ''), COALESCE(dns_report, '')
+		FROM redundancy_nodes n JOIN redundancy_state s ON s.id = 1 ORDER BY name COLLATE NOCASE`)
 	if err != nil {
 		return Status{}, err
 	}
 	defer closeRedundancyResource("close redundancy status rows", rows)
 	for rows.Next() {
 		var node NodeInfo
+		var behindSince, report string
 		node.Role = RoleReplica
-		if err := rows.Scan(&node.NodeID, &node.Name, &node.LANAddress, &node.ConfigRevision, &node.LastSeenAt, &node.LastSyncAt, &node.LastError); err != nil {
+		if err := rows.Scan(&node.NodeID, &node.Name, &node.LANAddress, &node.ConfigRevision, &result.ConfigRevision, &node.LastSeenAt, &node.LastSyncAt, &node.LastError, &behindSince, &report); err != nil {
 			return Status{}, err
 		}
-		node.Online = recentlySeen(node.LastSeenAt, manager.now(), 3*manager.syncInterval+5*time.Second)
+		node.Online = recentlySeen(node.LastSeenAt, now, 3*manager.syncInterval+5*time.Second)
+		node.RevisionsBehind = max(0, result.ConfigRevision-node.ConfigRevision)
+		if since, err := time.Parse(time.RFC3339, behindSince); err == nil && node.RevisionsBehind > 0 {
+			node.BehindSeconds = max(0, int64(now.Sub(since).Seconds()))
+		}
+		if report != "" {
+			if err := json.Unmarshal([]byte(report), &node.DNS); err != nil {
+				return Status{}, fmt.Errorf("read DNS report for %s: %w", node.Name, err)
+			}
+		}
+		node.DNSStatus = dnsStatus(node.DNS, node.Online, now)
 		result.Nodes = append(result.Nodes, node)
 	}
 	if err := rows.Err(); err != nil {
 		return Status{}, err
 	}
+	result.Nodes[0].ConfigRevision = result.ConfigRevision
 	result.Healthy = len(result.Nodes) > 1
 	for _, node := range result.Nodes {
-		if !node.Online || node.ConfigRevision != state.ConfigRevision || node.LastError != "" {
+		if !node.Online || node.ConfigRevision != result.ConfigRevision || node.LastError != "" || node.DNSStatus != "available" {
 			result.Healthy = false
 		}
 	}
@@ -330,6 +344,10 @@ func (manager *Manager) captureSnapshot(ctx context.Context, state localState) e
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM redundancy_snapshots WHERE revision <> ?`, revision); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE redundancy_nodes SET behind_since = ?
+		WHERE behind_since IS NULL AND config_revision < ?`, manager.now().UTC().Format(time.RFC3339), revision); err != nil {
 		return err
 	}
 	return tx.Commit()

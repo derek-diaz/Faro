@@ -151,7 +151,7 @@ export function Onboarding({ username, onComplete, onJoinExisting, themeMode, on
           await api.updateProtection(home.id, {
             name: home.name, icon: home.icon, blocklist_ids: [...home.blocklist_ids, existing.id],
             allow_domains: home.allow_entries.map((entry) => entry.domain), block_domains: home.block_entries.map((entry) => entry.domain),
-            device_ips: home.device_ips, schedule: home.schedule
+            device_ips: [], device_ids: home.device_ids, schedule: home.schedule
           });
         }
       }

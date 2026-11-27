@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,55 @@ import (
 type fakeUniFi struct {
 	mu      sync.Mutex
 	clients []Client
+}
+
+func TestSyncRollsBackAddressChangesWhenAClientFails(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	fake := &fakeUniFi{clients: []Client{
+		{ID: "one", Name: "One", IPAddress: "192.0.2.20", MACAddress: "02:11:22:33:44:55"},
+		{ID: "two", Name: "Two", IPAddress: "192.0.2.21", MACAddress: "02:aa:bb:cc:dd:ee"},
+	}}
+	server := httptest.NewTLSServer(fake)
+	t.Cleanup(server.Close)
+	sum := sha256.Sum256(server.Certificate().Raw)
+	manager := NewManager(store, filepath.Join(t.TempDir(), "key"))
+	status, err := manager.Configure(context.Background(), ConfigureInput{BaseURL: server.URL, APIKey: "local-api-key", SiteID: "site-1", TLSFingerprint: hex.EncodeToString(sum[:])})
+	if err != nil || status.LastError != "" {
+		t.Fatalf("configure: %v %s", err, status.LastError)
+	}
+	firstID, _, _ := deviceidentity.DeviceIDForAddress(context.Background(), store, "192.0.2.20")
+	secondID, _, _ := deviceidentity.DeviceIDForAddress(context.Background(), store, "192.0.2.21")
+	if _, err := store.DB.Exec(fmt.Sprintf(`CREATE TRIGGER reject_second BEFORE UPDATE ON device_names WHEN NEW.device_id=%d BEGIN SELECT RAISE(ABORT,'test failure'); END`, secondID)); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	fake.clients[0].IPAddress, fake.clients[1].IPAddress = "192.0.2.21", "192.0.2.20"
+	fake.mu.Unlock()
+	if _, err := manager.Sync(context.Background()); err == nil {
+		t.Fatal("expected rejected second update")
+	}
+	for address, want := range map[string]int64{"192.0.2.20": firstID, "192.0.2.21": secondID} {
+		got, found, err := deviceidentity.DeviceIDForAddress(context.Background(), store, address)
+		if err != nil || !found || got != want {
+			t.Errorf("partial sync changed %s: %d, %v, %v", address, got, found, err)
+		}
+	}
+	if _, err := store.DB.Exec(`DROP TRIGGER reject_second`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for address, want := range map[string]int64{"192.0.2.21": firstID, "192.0.2.20": secondID} {
+		got, found, err := deviceidentity.DeviceIDForAddress(context.Background(), store, address)
+		if err != nil || !found || got != want {
+			t.Errorf("swap lost %s: %d, %v, %v", address, got, found, err)
+		}
+	}
 }
 
 func (unifi *fakeUniFi) ServeHTTP(responseWriter http.ResponseWriter, request *http.Request) {

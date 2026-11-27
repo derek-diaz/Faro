@@ -68,15 +68,9 @@ func (handler *Handler) troubleshooting(w http.ResponseWriter, r *http.Request) 
 }
 
 func (handler *Handler) readTroubleshooting(w http.ResponseWriter, r *http.Request) {
-	ip := net.ParseIP(r.URL.Query().Get("client_ip"))
-	if ip == nil {
+	deviceID, clientIP, err := handler.resolveDeviceReference(r.Context(), r.URL.Query().Get("client_ip"), "")
+	if err != nil || clientIP == "" {
 		writeBadRequest(w, errors.New("select a device"))
-		return
-	}
-	clientIP := ip.String()
-	var deviceID int64
-	if err := handler.store.DB.QueryRowContext(r.Context(), `SELECT device_id FROM device_addresses WHERE address = ?`, clientIP).Scan(&deviceID); err != nil {
-		writeBadRequest(w, errors.New("device is no longer in the inventory"))
 		return
 	}
 	since := time.Now().UTC().Add(-15 * time.Minute)

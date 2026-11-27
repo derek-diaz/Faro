@@ -47,7 +47,7 @@ export function Troubleshooter({ clientIP, deviceName, onDomainSelect }: {
     setError("");
     setNotice("");
     try {
-      await api.changeTroubleshooting({ action, token, client_ip: clientIP, device_id: report.device_id, protection_id: report.protection_id, domains: selected });
+      await api.changeTroubleshooting({ action, token, client_ip: report.client_ip, device_id: report.device_id, protection_id: report.protection_id, domains: selected });
       if (!mounted.current) return;
       setSelected([]);
       setNotice(action === "test" ? "Test started. Retry the site on this device, then keep the exceptions if they helped or undo them." : action === "keep" ? "Exceptions saved in the test's protection." : "Temporary exceptions removed. Existing permanent rules are unchanged.");

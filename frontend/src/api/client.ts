@@ -55,6 +55,7 @@ export type Protection = {
   allow_entries: DomainEntry[];
   block_entries: DomainEntry[];
   device_ips: string[];
+  device_ids: number[];
   paused_until?: string | null;
   state: "active" | "paused" | "scheduled_off";
   is_active: boolean;
@@ -80,7 +81,24 @@ export type ProtectionInput = {
   allow_domains: string[];
   block_domains: string[];
   device_ips: string[];
+  device_ids: number[];
   schedule: ProtectionSchedule;
+};
+
+export type ProtectionRules = Pick<ProtectionInput, "blocklist_ids" | "allow_domains" | "block_domains">;
+
+export type PreviewGroup = {
+  total: number;
+  items: { label: string; address?: string; count: number }[];
+};
+
+export type RulePreview = {
+  requests: number;
+  truncated: boolean;
+  newly_blocked: PreviewGroup;
+  newly_allowed: PreviewGroup;
+  still_blocked: PreviewGroup;
+  devices: PreviewGroup;
 };
 
 export type DNSQuery = {
@@ -136,6 +154,7 @@ export type DeviceSummary = {
     confidence: string;
     first_seen: string;
     last_seen: string;
+    current?: boolean;
   }>;
   identity_source?: string;
   name: string;
@@ -179,6 +198,10 @@ export type DeviceSummary = {
   dns_paused?: boolean;
   dns_paused_until?: string | null;
 };
+
+export function deviceReference(device: Pick<DeviceSummary, "device_id" | "client_ip">): string {
+  return device.device_id ? `id:${device.device_id}` : device.client_ip;
+}
 
 export type DeviceInventoryPage = {
   items: DeviceSummary[];
@@ -317,6 +340,7 @@ export type HealthCard = {
 };
 
 export type DashboardStory = {
+  section?: "redundancy";
   title: string;
   body: string;
   tone: OpenString<"success" | "info" | "warning" | "critical">;
@@ -576,6 +600,13 @@ export type RedundancyNode = {
   last_seen_at?: string;
   last_sync_at?: string;
   last_error?: string;
+  revisions_behind: number;
+  behind_seconds: number;
+  dns_status: "available" | "unavailable" | "stale" | "unreported";
+  dns?: {
+    checked_at: string;
+    totals?: { requests: number; server_failures: number; mean_response_ms?: number; requests_per_second?: number };
+  };
 };
 
 export type RedundancyStatus = RedundancyPublicStatus & {
@@ -727,6 +758,8 @@ export const api = {
   refreshBlocklists: () => request<{ updated: number; entry_count: number }>("/api/blocklists/refresh", { method: "POST" }),
   deleteBlocklist: (id: number) => request<{ ok: boolean }>(`/api/blocklists/${id}`, { method: "DELETE" }),
   protections: () => request<Protection[]>("/api/protections"),
+  previewProtection: (id: number, rules: ProtectionRules, signal: AbortSignal) =>
+    request<RulePreview>(`/api/protections/${id}/preview`, { method: "POST", body: JSON.stringify(rules), signal }),
   createProtection: (protection: ProtectionInput) =>
     request<{ id: number }>("/api/protections", { method: "POST", body: JSON.stringify(protection) }),
   updateProtection: (id: number, protection: ProtectionInput) =>

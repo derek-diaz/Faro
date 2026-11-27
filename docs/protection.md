@@ -9,8 +9,10 @@ A setup combines blocklists, exact-domain exceptions, and a blocking schedule. *
 1. Open **Protection** and select **Home**.
 2. Choose **Edit**.
 3. Select the installed blocklists you want.
-4. Review exceptions and the schedule.
-5. Choose **Save changes** and wait for confirmation.
+4. Select **Preview rule changes** to see what Faro would start or stop blocking and which devices would be affected. Expand a domain group to see the most frequent matches.
+5. Review the schedule and choose **Save changes** when ready.
+
+The preview compares saved and proposed rules against up to the latest 20,000 requests in the past 24 hours from devices currently covered by the setup. It assumes blocking is on and honors active temporary exceptions. Counts refer to DNS requests, so repeated lookups of one domain count separately.
 
 Check a fresh lookup from a device using Home. Devices assigned elsewhere use their own setup.
 

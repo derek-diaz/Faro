@@ -1,6 +1,6 @@
 import { Button } from "./ui/button";
 import { AlertTriangle, Check, CheckCircle2, Clock3, Copy, Network, Plus, RefreshCw, Server, ShieldCheck, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type PairingCode, type RedundancyNode, type RedundancyStatus } from "../api/client";
 import { copyText } from "../utils/clipboard";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -18,25 +18,29 @@ export function RedundancySettings() {
   const [pendingRemoval, setPendingRemoval] = useState<RedundancyNode | null>(null);
   const [disableOpen, setDisableOpen] = useState(false);
 
-  async function load() {
+  const statusRequest = useRef(0);
+  const load = useCallback(async () => {
+    const request = ++statusRequest.current;
     try {
-      setStatus(await api.redundancyStatus());
-      setError("");
+      const next = await api.redundancyStatus();
+      if (request !== statusRequest.current) return;
+      setStatus(next);
       setStatusError("");
     } catch (error_) {
-      setStatusError(error_ instanceof Error ? error_.message : "Could not load redundancy status.");
+      if (request === statusRequest.current) setStatusError(error_ instanceof Error ? error_.message : "Could not load redundancy status.");
     }
-  }
+  }, []);
 
   useEffect(() => {
     let active = true;
-    const refresh = () => api.redundancyStatus().then((next) => { if (active) { setStatus(next); setStatusError(""); } }).catch((error_) => {
-      if (active) setStatusError(error_ instanceof Error ? error_.message : "Could not load redundancy status.");
-    });
+    let timer: number;
+    const refresh = async () => {
+      await load();
+      if (active) timer = window.setTimeout(refresh, 5000);
+    };
     void refresh();
-    const timer = window.setInterval(refresh, 5000);
-    return () => { active = false; window.clearInterval(timer); };
-  }, []);
+    return () => { active = false; statusRequest.current++; window.clearTimeout(timer); };
+  }, [load]);
 
   useEffect(() => () => window.clearTimeout(copyResetTimer.current), []);
 
@@ -141,7 +145,7 @@ function RedundancyHero({ status, replicaCount, busy, onStartPairing }: Redundan
     <section className="panel redundancy-hero">
       <span className={`redundancy-hero-icon ${heroTone(status, hasReplicas)}`}><Network size={25} /></span>
       <div>
-        <h2>{heroHeading(status, hasReplicas)}</h2>
+        <h2 aria-live="polite">{heroHeading(status, hasReplicas)}</h2>
         <p>{heroDescription(status, hasReplicas)}</p>
       </div>
       <Button variant="default" type="button" onClick={onStartPairing} disabled={busy}><Plus size={17} />{status.role === "controller" ? "Add another server" : "Set up redundancy"}</Button>
@@ -155,14 +159,19 @@ function heroTone(status: RedundancyStatus, hasReplicas: boolean) {
 }
 
 function heroHeading(status: RedundancyStatus, hasReplicas: boolean) {
-  if (hasReplicas) return `Protected by ${status.nodes.length} Faro servers`;
-  return "DNS redundancy";
+  if (!hasReplicas) return "DNS redundancy";
+  const behind = status.nodes.filter(node => node.revisions_behind > 0);
+  if (behind.length === 1) return `${behind[0].name} is behind`;
+  if (behind.length > 1) return `${behind.length} backup servers are behind`;
+  if (status.nodes.some(node => !node.online)) return "Missing a backup server check-in";
+  return status.healthy ? "All DNS servers are in sync" : "Check server health";
 }
 
 function heroDescription(status: RedundancyStatus, hasReplicas: boolean) {
   if (!hasReplicas) return "Keep DNS available during an outage. Pair another Faro server on a different computer, NAS, or VM host.";
-  if (status.healthy) return "Every server is online and running the same validated DNS configuration.";
-  return "At least one server needs attention or has not accepted the latest configuration.";
+  if (status.healthy) return "All servers have confirmed the current settings and reported DNS metrics.";
+  if (status.nodes.some(node => node.revisions_behind > 0)) return `The primary is on revision ${status.config_revision}. Devices using a backup may still get older rules until it catches up.`;
+  return "Review each server’s last check-in, DNS settings, and metrics below.";
 }
 
 type PairingCardProps = Readonly<{
@@ -270,7 +279,9 @@ type RedundancyNodeCardProps = Readonly<{
 }>;
 
 function RedundancyNodeCard({ node, primaryRevision, onRemoveRequest }: RedundancyNodeCardProps) {
-  const display = nodeDisplayState(node, primaryRevision);
+  const isPrimary = node.role === "controller";
+  const behind = node.revisions_behind;
+  const display = nodeDisplayState(node);
   return (
     <article className={`redundancy-node ${display.tone}`}>
       <header className="redundancy-node-heading">
@@ -284,15 +295,18 @@ function RedundancyNodeCard({ node, primaryRevision, onRemoveRequest }: Redundan
       <div className="redundancy-node-summary">
         <div className="redundancy-node-state">
           <span className={`redundancy-node-state-icon ${display.tone}`}>{nodeStateIcon(display.tone)}</span>
-          <span><small>Status</small><strong>{display.label}</strong><em>{display.detail}</em></span>
+          <span><small>Connection</small><strong>{display.label}</strong><em>{isPrimary ? "This Faro server" : node.last_seen_at ? `Last check-in ${formatRelative(node.last_seen_at)}` : "Waiting for a check-in"}</em></span>
         </div>
-        <div className="redundancy-node-revision">
+        <div className="redundancy-node-revision" data-behind={behind > 0}>
           <span>DNS settings</span>
-          <strong>{display.settingsLabel}</strong>
-          <small>{display.settingsDetail}</small>
+          <strong>{settingsLabel(node, primaryRevision)}</strong>
+          <small>{isPrimary ? `Revision ${primaryRevision}` : node.config_revision === 0 ? `Waiting for the first copy of revision ${primaryRevision}` : `Revision ${node.config_revision} of ${primaryRevision}`}</small>
+          {behind > 0 && <small>Behind for {formatDuration(node.behind_seconds)}</small>}
+          {!isPrimary && node.last_sync_at && <small>Last confirmed {formatRelative(node.last_sync_at)}</small>}
         </div>
       </div>
-      {node.last_error && <div className="redundancy-node-error">{friendlyNodeError(node)}</div>}
+      {node.last_error && <details className="redundancy-node-error"><summary>Sync failed. Faro will retry automatically.</summary><p>{node.last_error}</p></details>}
+      <NodeDNSMetrics node={node} />
     </article>
   );
 }
@@ -308,9 +322,8 @@ function nodeAction(node: RedundancyNode, onRemoveRequest: (node: RedundancyNode
   return <span className="redundancy-controller-badge"><Check size={13} />Primary</span>;
 }
 
-function nodeStateIcon(tone: NodeDisplayState["tone"]): ReactNode {
+function nodeStateIcon(tone: "healthy" | "warning"): ReactNode {
   if (tone === "healthy") return <CheckCircle2 size={17} />;
-  if (tone === "syncing") return <RefreshCw className="spinning" size={17} />;
   return <AlertTriangle size={17} />;
 }
 
@@ -364,99 +377,53 @@ function formatTime(value: string) {
 function formatRelative(value: string) {
   const age = Date.now() - new Date(value).getTime();
   if (!Number.isFinite(age) || age < 0) return "just now";
-  if (age < 60_000) return "just now";
+  if (age < 5000) return "just now";
+  if (age < 60_000) return `${Math.floor(age / 1000)}s ago`;
   if (age < 3_600_000) return `${Math.floor(age / 60_000)}m ago`;
   return `${Math.floor(age / 3_600_000)}h ago`;
 }
 
-type NodeDisplayState = {
-  readonly tone: "warning" | "syncing" | "healthy";
-  readonly label: string;
-  readonly detail: string;
-  readonly settingsLabel: string;
-  readonly settingsDetail: string;
-};
+function formatDuration(seconds: number) {
+  if (seconds < 1) return "less than a second";
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`;
+}
 
-function nodeDisplayState(node: RedundancyNode, primaryRevision: number): NodeDisplayState {
-  if (!node.online) {
-    return offlineNodeState(node);
+function nodeDisplayState(node: RedundancyNode) {
+  return node.online
+    ? { tone: "healthy", label: "Online" } as const
+    : { tone: "warning", label: "No recent contact" } as const;
+}
+
+function settingsLabel(node: RedundancyNode, primaryRevision: number) {
+  if (node.role === "controller") return "Primary copy";
+  if (node.revisions_behind > 0) return `${node.revisions_behind} ${node.revisions_behind === 1 ? "update" : "updates"} behind`;
+  if (node.config_revision > primaryRevision) return "Revision mismatch";
+  return node.online ? "Up to date" : "Matched at last check-in";
+}
+
+function NodeDNSMetrics({ node }: { node: RedundancyNode }) {
+  const report = node.dns;
+  const totals = report?.totals;
+  let message = "Waiting for a DNS report.";
+  if (report) {
+    const when = formatRelative(report.checked_at);
+    if (node.dns_status === "stale") message = `Report out of date · Last checked ${when}`;
+    else if (!totals) message = `CoreDNS metrics unavailable · Checked ${when}`;
+    else message = `Checked ${when}`;
   }
-  if (node.last_error) {
-    return failedNodeState(node);
-  }
-  if (node.config_revision < 1) {
-    return initialNodeState(node);
-  }
-  if (node.config_revision !== primaryRevision) {
-    return synchronizingNodeState();
-  }
-  return healthyNodeState(node);
-}
-
-function offlineNodeState(node: RedundancyNode): NodeDisplayState {
-  const hasSafeCopy = node.config_revision > 0;
-  return {
-    tone: "warning",
-    label: "Offline",
-    detail: hasSafeCopy ? "Serving its last safe DNS settings" : "This server cannot be reached",
-    settingsLabel: hasSafeCopy ? "Last safe copy" : "Waiting",
-    settingsDetail: hasSafeCopy ? "Available during the outage" : "No settings received yet",
-  };
-}
-
-function failedNodeState(node: RedundancyNode): NodeDisplayState {
-  const hasSafeCopy = node.config_revision > 0;
-  return {
-    tone: "warning",
-    label: "Needs attention",
-    detail: "Faro will retry synchronization automatically",
-    settingsLabel: hasSafeCopy ? "Last safe copy" : "Waiting",
-    settingsDetail: hasSafeCopy ? "Latest update was not applied" : "No settings received yet",
-  };
-}
-
-function initialNodeState(node: RedundancyNode): NodeDisplayState {
-  const isController = node.role === "controller";
-  return {
-    tone: "syncing",
-    label: isController ? "Preparing" : "Connecting",
-    detail: isController ? "Getting DNS settings ready" : "Waiting for DNS settings from the primary server",
-    settingsLabel: "Preparing",
-    settingsDetail: isController ? "Creating the first safe copy" : "First sync has not finished",
-  };
-}
-
-function synchronizingNodeState(): NodeDisplayState {
-  return {
-    tone: "syncing",
-    label: "Synchronizing",
-    detail: "Receiving the latest DNS settings",
-    settingsLabel: "Updating",
-    settingsDetail: "The last safe copy remains active",
-  };
-}
-
-function healthyNodeState(node: RedundancyNode): NodeDisplayState {
-  const isController = node.role === "controller";
-  return {
-    tone: "healthy",
-    label: "Ready",
-    detail: healthyNodeDetail(node, isController),
-    settingsLabel: isController ? "Ready to share" : "Up to date",
-    settingsDetail: isController ? "Source for backup servers" : "Matches the primary server",
-  };
-}
-
-function healthyNodeDetail(node: RedundancyNode, isController: boolean) {
-  if (isController) return "Serving as the primary Faro server";
-  if (node.last_sync_at) return `Last synchronized ${formatRelative(node.last_sync_at)}`;
-  return "Configuration accepted";
-}
-
-function friendlyNodeError(node: RedundancyNode) {
-  const error = (node.last_error ?? "").toLowerCase();
-  if (error.includes("apply") || error.includes("coredns") || error.includes("configuration")) {
-    return "This server rejected the latest DNS update and is still using its last safe settings.";
-  }
-  return "This server could not finish synchronization and will retry automatically.";
+  return <section className="redundancy-dns-metrics" aria-label={`${node.name} DNS metrics`}>
+    <header><strong>DNS activity</strong><span data-warning={node.dns_status !== "available"}>{message}</span></header>
+    {totals && <>
+      <dl>
+        <div><dt>Recent requests/s</dt><dd>{totals.requests_per_second == null ? "—" : totals.requests_per_second.toLocaleString(undefined, { maximumFractionDigits: 1 })}</dd></div>
+        <div><dt>Requests</dt><dd>{totals.requests.toLocaleString()}</dd></div>
+        <div><dt>Server failures</dt><dd>{totals.server_failures.toLocaleString()}</dd></div>
+        <div><dt>Average response</dt><dd>{totals.mean_response_ms == null ? "—" : `${totals.mean_response_ms.toLocaleString(undefined, { maximumFractionDigits: 2 })} ms`}</dd></div>
+      </dl>
+      <small>Rate since the last sample. Totals and average since CoreDNS started.</small>
+    </>}
+    {!report && node.role === "replica" && <small>Older Faro versions report sync status only.</small>}
+  </section>;
 }

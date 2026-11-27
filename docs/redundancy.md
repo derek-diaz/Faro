@@ -45,6 +45,16 @@ If you already created an administrator on the new server, use the available joi
 
 Use your actual server addresses. A direct lookup against each server confirms they both work; client failover behavior still depends on the router and device.
 
+## Monitor servers from the primary
+
+Open **Settings → Redundancy** to see the primary and every paired server. The page refreshes every five seconds. When the dashboard warns that a backup is behind, select **View server health** to go straight there.
+
+- **Connection** shows when a replica last contacted the primary. After about 20 seconds without contact, Faro marks it as missing. A replica can continue answering DNS during a management connection outage.
+- **DNS settings** shows the last confirmed revision alongside the primary’s revision. When a backup falls behind, Faro shows how many updates it is missing and how long the gap has been observed. An unsuccessful sync keeps the last accepted revision visible. Expand the sync warning to read the reported error.
+- **DNS activity** shows recent requests per second, plus total requests, server-failure responses (SERVFAIL), and average response time since CoreDNS started. Faro samples locally every 15 seconds. The rate needs two samples from the same process. A dash means the measurement is pending or unavailable. Old reports are labeled, including when a replica stops checking in.
+
+Replicas send aggregate counters with their authenticated check-ins. Older replicas continue syncing and show a waiting message until they are upgraded.
+
 ## What happens if the primary goes offline
 
 Replicas continue answering with their last accepted configuration. They do not become primary automatically. Settings changes wait until the primary returns.

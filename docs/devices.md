@@ -2,7 +2,9 @@
 
 [All guides](README.md) · Related: [Protection](protection.md) · [UniFi](unifi.md)
 
-**Devices** lists DNS clients Faro has observed. A device appears after sending requests; this is not a scan of everything connected to your network.
+**Devices** opens with **With DNS history** selected. It shows clients with at least one request in Faro’s retained log, even when they have zero requests today. Choose **Active today** for today’s DNS clients or **All known devices** to include devices imported from UniFi before their first request.
+
+**Last DNS request** shows when Faro last recorded traffic from the device. If DHCP reassigns its address, **Last IP** identifies the address used for its most recent recorded request. A device with no known name or current address appears as **Unnamed device**.
 
 ![Device inventory with example data](screenshots/devices.svg)
 

@@ -93,13 +93,44 @@ func TestWhatsNewDomainsUsesFirstVisit(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	recent, err := whatsNew(context.Background(), h.store.DB, "2026-03-02T00:00:00Z")
+	recent, err := h.whatsNew(httptest.NewRequest(http.MethodGet, "/api/dashboard", nil), "2026-03-02T00:00:00Z")
 	if err != nil {
 		t.Fatal(err)
 	}
 	domains := recent["domains"].([]map[string]any)
 	if len(domains) != 2 || domains[0]["label"] != "later.example" || domains[1]["label"] != "early.example" {
 		t.Fatalf("new domains = %v", domains)
+	}
+}
+
+func TestWhatsNewLinksEachNewDeviceOnce(t *testing.T) {
+	h, _, input := troubleshootingFixture(t)
+	_, err := h.store.DB.Exec(`
+		UPDATE devices SET first_seen_at = '2026-03-01T12:00:00Z' WHERE id = ?;
+		INSERT INTO device_addresses(device_id,address,family,first_seen_at) VALUES(?, '192.0.2.55', 'ipv4', '2026-03-02T12:00:00Z');
+		INSERT INTO devices(id,name,first_seen_at) VALUES(77, 'Office laptop', '2026-03-02T12:00:00Z'), (78, '', '2026-03-02T10:00:00Z');
+		INSERT INTO device_names(device_id,source,name) VALUES(77,'unifi','factory-name');
+		INSERT INTO device_addresses(device_id,address,family,last_seen_at) VALUES
+			(77, '192.0.2.77', 'ipv4', '2026-03-02T16:00:00Z'), (77, '2001:db8::77', 'ipv6', '2026-03-02T17:00:00Z'),
+			(78, '192.0.2.78', 'ipv4', '2026-03-02T16:00:00Z');
+		INSERT INTO dns_records(id,hostname,type,value,created_at) VALUES(88,'kitchen.home.arpa','A','192.0.2.78','2026-03-02 12:30:00');
+		INSERT INTO blocklists(id,name,url,created_at) VALUES(99,'Office filter','https://example.test/office','2026-03-02 12:35:00');
+	`, input.DeviceID, input.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recent, err := h.whatsNew(httptest.NewRequest(http.MethodGet, "/api/dashboard", nil), "2026-03-02T04:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	devices := recent["devices"].([]map[string]any)
+	if len(devices) != 2 || devices[0]["device_id"] != int64(77) || devices[0]["label"] != "Office laptop" ||
+		devices[0]["subtitle"] != "2001:db8::77" || devices[1]["device_id"] != int64(78) || devices[1]["label"] != "kitchen" {
+		t.Fatalf("new devices = %v", devices)
+	}
+	records, lists := recent["local_records"].([]map[string]any), recent["blocklists"].([]map[string]any)
+	if len(records) != 1 || records[0]["id"] != int64(88) || len(lists) != 1 || lists[0]["id"] != int64(99) {
+		t.Fatalf("new records = %v, new blocklists = %v", records, lists)
 	}
 }
 

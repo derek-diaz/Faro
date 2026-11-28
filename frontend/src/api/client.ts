@@ -146,6 +146,7 @@ export type DNSDecision = {
 export type DeviceSummary = {
   device_id: number;
   client_ip: string;
+  last_query_ip?: string;
   addresses?: string[];
   address_history?: Array<{
     address: string;
@@ -159,7 +160,7 @@ export type DeviceSummary = {
   identity_source?: string;
   name: string;
   display_name?: string;
-  name_source?: OpenString<"manual" | "local_dns" | "reverse_dns">;
+  name_source?: OpenString<"manual" | "unifi" | "local_dns" | "reverse_dns" | "address" | "unknown">;
   location?: string | null;
   notes?: string | null;
   device_type: string;
@@ -349,6 +350,9 @@ export type DashboardStory = {
 export type WhatsNewItem = {
   label: string;
   subtitle?: string | null;
+  device_id?: number;
+  client_ip?: string | null;
+  id?: number;
 };
 
 export type WhatsNew = {
@@ -356,6 +360,13 @@ export type WhatsNew = {
   domains: WhatsNewItem[];
   blocklists: WhatsNewItem[];
   local_records: WhatsNewItem[];
+};
+
+export type TrafficHour = {
+  start: string;
+  end: string;
+  total: number;
+  blocked: number;
 };
 
 export type DashboardSummary = {
@@ -372,6 +383,7 @@ export type DashboardSummary = {
   stories: DashboardStory[];
   whats_new: WhatsNew;
   sparklines: Record<string, number[]>;
+  traffic_hours?: TrafficHour[];
   top_queried_domains: CountItem[];
   top_blocked_domains: CountItem[];
   top_clients: CountItem[];
@@ -412,6 +424,8 @@ export type Setting = {
 };
 
 export type SearchItem = {
+  id?: number;
+  kind?: "allow" | "block";
   label: string;
   subtitle?: string | null;
   count?: number;
@@ -645,7 +659,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 async function deviceInventoryRequest(
-  options: { page: number; pageSize: number; search: string; sort: string; direction: string; activeToday: boolean },
+  options: { page: number; pageSize: number; search: string; sort: string; direction: string; activeToday: boolean; withHistory: boolean },
   etag = "",
   signal?: AbortSignal
 ): Promise<DeviceInventoryResult> {
@@ -656,7 +670,8 @@ async function deviceInventoryRequest(
     search: options.search,
     sort: options.sort,
     direction: options.direction,
-    active_today: String(options.activeToday)
+    active_today: String(options.activeToday),
+    with_history: String(options.withHistory)
   });
   const response = await fetch(`${API_BASE}/api/devices?${query}`, {
     signal,
@@ -719,7 +734,8 @@ export const api = {
   removeRedundancyNode: (nodeID: string) =>
     request<{ ok: boolean }>(`/api/redundancy/nodes/${encodeURIComponent(nodeID)}`, { method: "DELETE" }),
   dashboard: () => request<DashboardSummary>("/api/dashboard"),
-  queries: (search = "") => request<DNSQuery[]>(`/api/queries?search=${encodeURIComponent(search)}`),
+  queries: (search = "", signal?: AbortSignal) => request<DNSQuery[]>(`/api/queries?search=${encodeURIComponent(search)}`, { signal }),
+  event: (id: number, signal?: AbortSignal) => request<FaroEvent>(`/api/events/${id}`, { signal }),
   events: <T = ActivityPage>(search = "", scope = "all", page = 1, pageSize = 50, range = "all", from = "", to = "", signal?: AbortSignal, detail?: "rows" | "summary") => {
     const params = new URLSearchParams({ search, scope, page: String(page), page_size: String(pageSize) });
     if (detail) params.set("detail", detail);
@@ -742,7 +758,7 @@ export const api = {
   updateDeviceAlias: (clientIP: string, alias: { name: string; location?: string; notes?: string; device_type?: string }) =>
     request<{ ok: boolean }>(`/api/devices/${encodeURIComponent(clientIP)}/alias`, { method: "PUT", body: JSON.stringify(alias) }),
   domainSummary: (domain: string, signal?: AbortSignal) => request<DomainSummary>(`/api/domains/${encodeURIComponent(domain)}/summary?include_events=false`, { signal }),
-  search: (q: string) => request<SearchResults>(`/api/search?q=${encodeURIComponent(q)}`),
+  search: (q: string, signal?: AbortSignal) => request<SearchResults>(`/api/search?q=${encodeURIComponent(q)}`, { signal }),
   records: () => request<DNSRecord[]>("/api/dns-records"),
   createRecord: (record: Omit<DNSRecord, "id">) =>
     request<{ id: number }>("/api/dns-records", { method: "POST", body: JSON.stringify(record) }),

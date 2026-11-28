@@ -528,134 +528,6 @@
   }
 }
 
-/* Blocklist library: neutral source rows and compact, theme-aware catalog cards. */
-@layer components {
-  :root[data-theme-resolved="light"] .blocklists-page { --warn: #8a5b0b; }
-  .blocklists-page { gap: 20px; }
-  .blocklist-page-toolbar { border: 0; padding-bottom: 0; flex-wrap: wrap; }
-  .blocklist-view-tabs .faro-tab > span { color: var(--text-muted); background: var(--surface-subtle); font-weight: 500; }
-  .blocklist-view-tabs .faro-tab[data-active] > span { color: var(--accent); background: var(--accent-soft); }
-  .blocklists-page > .faro-tab-panel { display: grid; gap: 20px; }
-  .blocklist-summary-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); background: transparent; border: 0; border-radius: 0; box-shadow: none; }
-  .blocklist-summary-item { padding: 8px 24px; min-height: 64px; border-color: var(--border-subtle); gap: 6px 12px; }
-  .blocklist-summary-item:first-child { padding-left: 0; }
-  .blocklist-summary-item span { color: var(--text-muted); font-size: 12px; font-weight: 450; }
-  .blocklist-summary-item strong, .blocklist-summary-item.healthy strong { color: var(--ink); font-size: 22px; font-weight: 600; }
-  .blocklist-summary-item.healthy svg { color: var(--accent); }
-  .blocklist-summary-item.warning svg, .blocklist-summary-item.warning strong { color: var(--warn); }
-  .installed-blocklists-panel { overflow: hidden; }
-  .installed-list-heading, .catalog-heading { padding: 24px; background: transparent; border-color: var(--border-subtle); }
-  .installed-list-heading h2, .catalog-heading h2 { color: var(--ink); font-size: 16px; font-weight: 600; }
-  .installed-list-heading p, .catalog-heading p { color: var(--text-muted); font-size: 13px; margin-top: 6px; line-height: 1.6; }
-  .installed-list-heading > span { font-size: 12px; font-weight: 450; }
-  .installed-blocklist-table { padding: 0; gap: 0; }
-  .installed-blocklist-columns, .installed-blocklist-row { grid-template-columns: minmax(220px, 1fr) 90px 140px 110px 72px; padding-inline: 24px; gap: 18px; }
-  .installed-blocklist-columns { min-height: 42px; background: var(--surface-muted); color: var(--text-muted); border-color: var(--border-subtle); font-size: 11px; font-weight: 500; letter-spacing: 0; text-transform: none; }
-  .installed-actions-label { text-align: right; }
-  .installed-blocklist-row { min-height: 88px; background: transparent; border: 0; border-bottom: 1px solid var(--border-subtle); border-radius: 0; padding-block: 16px; box-shadow: none; }
-  .installed-blocklist-row:last-child { border-bottom: 0; }
-  .installed-blocklist-row:hover { background: var(--surface-muted); }
-  .installed-list-identity { gap: 12px; }
-  .installed-list-identity strong { color: var(--ink); font-size: 14px; font-weight: 550; white-space: normal; overflow-wrap: anywhere; }
-  .installed-list-identity > div > span, .installed-list-metric span, .installed-list-updated span { color: var(--text-muted); font-size: 12px; line-height: 1.5; }
-  .installed-list-identity > div > span { white-space: normal; overflow-wrap: anywhere; }
-  .installed-list-identity > .blocklist-source-mark { color: var(--text-muted); background: var(--surface-subtle); border: 0; font-size: 13px; font-weight: 550; border-radius: 8px; }
-  .installed-list-metric strong, .installed-list-updated strong { color: var(--ink); font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
-  .installed-list-updated span.stale { color: var(--warn); }
-  .installed-list-status { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 12px; font-weight: 450; color: var(--text-muted); }
-  .installed-list-actions { gap: 4px; }
-  .installed-list-actions > .faro-button { color: var(--text-muted); background: transparent; }
-  .installed-list-actions > .faro-button:hover { color: var(--ink); background: var(--surface-subtle); }
-  .installed-list-actions > .blocklist-remove-button:hover { color: var(--blocked); background: var(--blocked-soft); }
-
-  .blocklists-page .blocklist-catalog-panel { background: transparent; border: 0; box-shadow: none; border-radius: 0; }
-  .catalog-heading { padding: 0 0 20px; }
-  .catalog-heading > .catalog-search { width: min(390px, 45%); }
-  .catalog-search { overflow: hidden; background: var(--input-bg); border-color: var(--border); border-radius: 8px; min-width: 0; }
-  .catalog-search svg { color: var(--text-muted); }
-  .catalog-search:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .catalog-guide { margin: 20px 0; padding: 0; border: 0; background: transparent; box-shadow: none; grid-template-columns: 32px minmax(0, 1fr); }
-  .catalog-guide-icon { width: 32px; height: 32px; color: var(--accent); background: var(--accent-soft); border-radius: 8px; }
-  .catalog-guide strong { color: var(--ink); font-size: 13px; font-weight: 550; }
-  .catalog-guide > div > span { color: var(--text-muted); font-size: 12px; line-height: 1.6; }
-  .catalog-refine-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin: 0; }
-  .catalog-refine-row label { display: grid; gap: 6px; flex: 1 1 180px; min-width: 0; max-width: 280px; color: var(--text-muted); font-size: 12px; font-weight: 450; }
-  .catalog-refine-row select { width: 100%; min-width: 0; min-height: 36px; font-size: 13px; }
-  .catalog-refine-row .text-action { margin: 0; min-height: 36px; font-size: 12px; }
-  .blocklist-catalog-sections { padding: 24px 0 0; gap: 28px; }
-  .catalog-category-section { gap: 16px; padding-top: 24px; }
-  .catalog-category-section + .catalog-category-section { margin: 0; }
-  .catalog-category-section > header { grid-template-columns: 24px minmax(0, 1fr); gap: 10px; }
-  .catalog-category-icon { width: 24px; height: 24px; color: var(--text-muted); background: transparent; border: 0; border-radius: 0; }
-  .catalog-category-title-row { min-height: 24px; }
-  .catalog-category-section > header h3 { font-size: 16px; font-weight: 600; }
-  .catalog-category-section > header p { font-size: 12px; line-height: 1.6; }
-  .catalog-category-count { border: 0; padding: 0; background: transparent; color: var(--text-muted); font-size: 12px; font-weight: 450; }
-  .blocklist-catalog-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: stretch; }
-  .catalog-blocklist-card, .catalog-blocklist-card.recommended { display: flex; flex-direction: column; gap: 12px; min-height: 0; padding: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: none; }
-  .catalog-blocklist-card:hover { background: var(--surface-muted); border-color: var(--border); box-shadow: none; }
-  .catalog-blocklist-card.installing { background: var(--surface-muted); border-color: var(--accent); box-shadow: none; }
-  .catalog-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-  .catalog-blocklist-card h4 { color: var(--ink); font-size: 15px; font-weight: 600; }
-  .catalog-provider { color: var(--text-muted); font-size: 12px; font-weight: 450; margin-top: 4px; }
-  .catalog-card-top { justify-content: flex-start; flex-wrap: wrap; gap: 8px; }
-  .compatibility-badge { color: var(--text-muted); background: var(--surface-subtle); font-size: 11px; font-weight: 500; border: 0; border-radius: 5px; white-space: nowrap; }
-  .compatibility-badge.easy { color: var(--accent); background: var(--accent-soft); }
-  .compatibility-badge.advanced { color: var(--warn); background: var(--warn-soft); }
-  .catalog-recommended { color: var(--accent); font-size: 11px; font-weight: 500; line-height: 1.6; }
-  .catalog-blocklist-card p { color: var(--text-muted); font-size: 13px; line-height: 1.6; }
-  .catalog-best-for { border: 0; padding: 0; gap: 3px; }
-  .catalog-best-for strong { color: var(--text-muted); font-size: 11px; font-weight: 450; text-transform: none; letter-spacing: 0; }
-  .catalog-best-for span { color: var(--ink); font-size: 12px; font-weight: 450; line-height: 1.6; }
-  .catalog-caution { background: transparent; color: var(--text-muted); padding: 0; font-size: 12px; line-height: 1.6; gap: 6px; }
-  .catalog-caution svg { color: var(--warn); margin-top: 2px; }
-  .catalog-tags { gap: 6px; }
-  .catalog-tags span { border: 0; padding: 0; color: var(--text-muted); font-size: 11px; font-weight: 450; }
-  .catalog-tags span + span::before { content: "·"; margin-right: 6px; }
-  .catalog-card-footer { margin-top: auto; padding-top: 4px; justify-content: flex-end; }
-  .catalog-blocklist-card.installing .catalog-install-button { color: var(--accent); background: var(--accent-soft); }
-  .blocklist-notice { background: var(--accent-soft); color: var(--accent); border-color: var(--border); border-radius: 8px; font-weight: 450; }
-  .blocklist-notice.error { background: var(--blocked-soft); color: var(--blocked); border-color: var(--blocked); }
-  .blocklist-install-progress { background: var(--surface); border-color: var(--border); border-radius: 10px; box-shadow: none; padding: 16px; }
-  .blocklist-install-spinner { color: var(--accent); background: var(--accent-soft); }
-  .blocklist-install-progress strong { color: var(--ink); font-size: 14px; font-weight: 550; }
-  .blocklist-install-progress > div > span { color: var(--text-muted); font-size: 12px; }
-  .blocklist-install-progress i { background: var(--surface-subtle); }
-  .blocklist-install-progress i b { background: var(--accent); }
-  .blocklist-modal header { border-color: var(--border-subtle); }
-  .blocklist-modal h2 { color: var(--ink); font-size: 18px; }
-  .blocklist-modal p { color: var(--text-muted); font-size: 13px; }
-  .blocklist-modal .stack-form > label { color: var(--ink); font-size: 13px; font-weight: 500; }
-  .blocklist-modal .checkbox-row { justify-content: flex-start; }
-  @media (max-width: 1280px) {
-    .blocklist-catalog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .installed-blocklist-columns, .installed-blocklist-row { grid-template-columns: minmax(180px, 1fr) 75px 120px 100px 68px; gap: 12px; padding-inline: 20px; }
-  }
-  @media (max-width: 900px) {
-    .installed-list-heading { align-items: flex-start; flex-wrap: wrap; padding: 20px; }
-    .installed-blocklist-columns { display: none; }
-    .installed-blocklist-row { grid-template-columns: minmax(0, 1fr) auto; gap: 16px; }
-    .installed-list-identity { grid-column: 1 / -1; }
-    .installed-list-metric, .installed-list-updated { grid-column: auto; }
-    .installed-list-updated { text-align: right; }
-    .installed-list-status { grid-column: 1; }
-    .installed-list-actions { grid-column: 2; grid-row: auto; }
-    .catalog-heading { flex-wrap: wrap; }
-    .catalog-heading > .catalog-search { width: 100%; }
-  }
-  @media (max-width: 600px) {
-    .blocklist-summary-item { padding: 8px 12px; grid-template-columns: minmax(0, 1fr); gap: 6px; }
-    .blocklist-summary-item svg { display: none; }
-    .blocklist-summary-item strong { font-size: 20px; }
-    .blocklist-summary-item span { font-size: 11px; }
-    .blocklist-primary-actions { justify-content: flex-start; }
-    .blocklist-catalog-grid { grid-template-columns: minmax(0, 1fr); }
-    .catalog-refine-row label { max-width: none; }
-    .catalog-blocklist-card { padding: 20px; }
-    .catalog-category-count { font-size: 11px; }
-  }
-}
-
 /* Protection and resolver selection follow the same restrained library surfaces. */
 @layer components {
   :root[data-theme-resolved="light"] :is(.protection-page, .upstreams-layout) { --warn: #8a5b0b; }
@@ -973,81 +845,6 @@
   }
 }
 
-/* Device inventory: quiet identity, readable data, and recoverable refresh states. */
-@layer components {
-  .devices-page > .device-summary-strip { background: transparent; border: 0; border-radius: 0; box-shadow: none; }
-  .devices-page > .device-summary-strip .device-summary-metric { grid-template-columns: 1fr; padding: 12px 20px; border-color: var(--border-subtle); }
-  .devices-page > .device-summary-strip .device-summary-icon { display: none; }
-  .devices-page > .device-summary-strip .device-summary-metric small { color: var(--text-muted); font-size: 12px; font-weight: 450; }
-  .devices-page > .device-summary-strip .device-summary-metric strong { color: var(--ink); font-size: 23px; font-weight: 600; }
-  .devices-page > .device-summary-strip .device-summary-metric.compact strong { font-size: 16px; }
-  .devices-page > .device-summary-strip .device-summary-metric em { color: var(--text-muted); font-size: 12px; font-weight: 400; }
-  .device-inventory-panel { min-width: 0; overflow: hidden; }
-  .device-inventory-header { padding: 12px 20px; gap: 16px; flex-wrap: wrap; border-color: var(--border-subtle); }
-  .device-inventory-tools { gap: 16px; justify-content: flex-start; }
-  .device-active-control { display: inline-flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; }
-  .device-search { width: 280px; min-width: 0; padding: 4px 10px; border-radius: 8px; }
-  .device-search > input { min-width: 0; }
-  .device-table-header { background: var(--surface-muted); border-color: var(--border-subtle); padding: 10px 20px; }
-  .device-sort-header { color: var(--text-muted); font-size: 11px; font-weight: 500; }
-  .device-table-row { padding: 14px 20px; min-height: 76px; border-color: var(--border-subtle); box-shadow: none; }
-  .device-table-row:hover, .device-table-row.active { background: var(--surface-subtle); border-color: var(--border-subtle); }
-  .device-table-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .device-table-identity { grid-template-columns: 36px minmax(0, 1fr); gap: 12px; }
-  .device-inventory-panel .device-icon { width: 36px; height: 36px; border-radius: 9px; background: var(--surface-muted); border-color: var(--border-subtle); color: var(--text-muted); }
-  .device-table-row.active .device-icon { color: var(--accent); background: var(--accent-soft); }
-  .device-inventory-panel .device-main strong { color: var(--ink); font-size: 13px; font-weight: 550; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
-  .device-inventory-panel .device-main small { color: var(--text-muted); font-size: 11px; font-weight: 400; line-height: 1.7; white-space: normal; overflow-wrap: anywhere; }
-  .device-table-value strong { color: var(--ink); font-size: 12px; font-weight: 450; font-variant-numeric: tabular-nums; }
-  .device-table-value.quiet strong, .device-table-value small, .device-table-value em { color: var(--text-muted); font-weight: 400; }
-  .device-table-value.blocked strong { color: var(--blocked); }
-  .device-inventory-panel .device-profile-badge { color: var(--text-muted); background: var(--surface-muted); border-color: var(--border-subtle); font-size: 11px; font-weight: 450; }
-  .device-refresh-error { display: flex; align-items: flex-start; gap: 12px; padding: 16px 20px; border-block: 1px solid var(--border-subtle); background: var(--surface-muted); color: var(--text-muted); font-size: 12px; }
-  .device-refresh-error > svg { flex-shrink: 0; color: var(--blocked); margin-top: 2px; }
-  .device-refresh-error > div { flex: 1; min-width: 0; }
-  .device-refresh-error strong { color: var(--ink); font-size: 13px; font-weight: 550; }
-  .device-refresh-error p { margin: 4px 0 0; line-height: 1.6; overflow-wrap: anywhere; }
-  .device-refresh-error details { margin-top: 8px; }
-  .device-refresh-error summary { cursor: pointer; width: fit-content; }
-  .device-pagination { padding: 16px 20px; background: transparent; border-color: var(--border-subtle); color: var(--text-muted); gap: 12px; }
-  .device-pagination > span, .device-pagination > div > span { color: var(--text-muted); font-size: 12px; font-weight: 400; }
-  .device-filter-empty, .device-inventory-loading { color: var(--text-muted); padding: 48px 20px; font-size: 13px; }
-  .device-filter-empty strong { color: var(--ink); font-weight: 550; }
-  .device-filter-empty span { color: var(--text-muted); }
-  .device-inventory-loading { display: flex; justify-content: center; align-items: center; gap: 10px; }
-  @media (min-width: 761px) {
-    .device-table-header > :nth-child(2), .device-table-header > :nth-child(3) { justify-content: flex-end; }
-    .device-table-row > .device-table-value:nth-child(2), .device-table-row > .device-table-value:nth-child(3) { text-align: right; }
-  }
-  @media (max-width: 1100px) and (min-width: 761px) {
-    .device-table-header, .device-table-row { grid-template-columns: minmax(180px, 1.4fr) minmax(76px, .5fr) minmax(68px, .5fr) minmax(110px, .7fr) 18px; gap: 12px; }
-  }
-  @media (max-width: 760px) {
-    .device-inventory-header { padding: 16px; }
-    .device-inventory-tools { flex-direction: row; flex-wrap: wrap; }
-    .device-search { width: 100%; order: -1; }
-    .device-table-row { padding: 16px 38px 16px 16px; }
-    .device-table-value strong { font-size: 11px; }
-    .device-table-value small { color: var(--text-muted); font-size: 10px; font-weight: 400; }
-    .device-refresh-error { flex-wrap: wrap; padding: 16px; }
-    .device-refresh-error > div { flex-basis: calc(100% - 32px); }
-    .device-refresh-error > button { margin-left: 31px; }
-    .device-pagination { padding: 16px; }
-  }
-}
-@layer components {
-  .device-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
-  .device-table-value.blocked { background: transparent; border: 0; padding: 0; }
-  @media (min-width: 761px) {
-    .device-table-header > :nth-child(2), .device-table-header > :nth-child(3) { justify-self: end; }
-  }
-}
-@layer components {
-  .device-table-value.blocked strong { background: transparent; border: 0; padding: 0; border-radius: 0; }
-  .devices-page > .device-summary-strip .device-summary-metric.compact strong { white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
-  @media (max-width: 760px) { .device-inventory-tools { justify-content: flex-start; } }
-}
-
 /* Activity follows the restrained inventory layout, with emphasis on the events. */
 @layer components {
   .activity-explorer { min-width: 0; }
@@ -1278,4 +1075,22 @@
     .local-dns-error p { flex-basis: calc(100% - 28px); }
     .local-dns-error > button { margin-left: 27px; }
   }
+}
+
+.dashboard-replica-warning {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: .75rem;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--warn) 48%, transparent);
+  border-radius: var(--radius, .75rem);
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+}
+.dashboard-replica-warning p { margin: .2rem 0 0; }
+.dashboard-replica-warning a { display: inline-flex; align-items: center; gap: .4rem; min-height: 44px; text-decoration: underline; }
+.installed-blocklist-row:focus { outline: 2px solid var(--accent); outline-offset: -2px; scroll-margin-block: 5rem; }
+@media (max-width: 640px) {
+  .dashboard-replica-warning { grid-template-columns: auto 1fr; align-items: start; }
+  .dashboard-replica-warning a { grid-column: 2; justify-self: start; }
 }

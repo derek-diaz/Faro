@@ -144,31 +144,13 @@ func decisionMetadataString(value any) string {
 	}
 }
 
-func searchRows(ctx context.Context, database *sql.DB, query string, args ...any) []map[string]any {
-	items, err := searchRowsResult(ctx, database, query, args...)
-	if err != nil {
-		log.Printf("database read: %v", err)
-		return make([]map[string]any, 0)
-	}
-	return items
-}
-
 func searchRowsResult(ctx context.Context, database *sql.DB, query string, args ...any) ([]map[string]any, error) {
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer closeRows(rows)
-	items := make([]map[string]any, 0)
-	for rows.Next() {
-		var label string
-		var subtitle sql.NullString
-		if err := rows.Scan(&label, &subtitle); err != nil {
-			return nil, err
-		}
-		items = append(items, map[string]any{"label": label, "subtitle": nullableString(subtitle)})
-	}
-	return items, rows.Err()
+	return scanRows(rows)
 }
 
 func topLabels(ctx context.Context, database *sql.DB, query string, args ...any) []string {

@@ -43,14 +43,20 @@ export function normalizeLANAddress(value: string): string {
   } catch { return ""; }
 }
 
-export function recentClientQueries<T extends ClientQuery>(queries: T[], lanAddress: string, appliedAt: number, now = Date.now()): T[] {
+export function clientQueries<T extends ClientQuery>(queries: T[], lanAddress: string): T[] {
   const faroAddress = normalizeLANAddress(lanAddress);
-  const earliest = Math.max(appliedAt, now - 5 * 60 * 1000);
   return queries.filter((query) => {
     const address = normalizeLANAddress(query.client_ip);
-    const timestamp = Date.parse(query.timestamp);
     const domain = query.domain.toLowerCase().replace(/\.$/, "");
-    return !!address && address !== faroAddress && timestamp >= earliest && timestamp <= now + 1000 &&
+    return !!address && address !== faroAddress &&
       domain !== "version.bind" && domain !== "id.server" && !domain.endsWith(".invalid");
+  });
+}
+
+export function recentClientQueries<T extends ClientQuery>(queries: T[], lanAddress: string, appliedAt: number, now = Date.now()): T[] {
+  const earliest = Math.max(appliedAt, now - 5 * 60 * 1000);
+  return clientQueries(queries, lanAddress).filter((query) => {
+    const timestamp = Date.parse(query.timestamp);
+    return timestamp >= earliest && timestamp <= now + 1000;
   });
 }

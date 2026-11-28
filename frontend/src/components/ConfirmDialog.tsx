@@ -11,15 +11,16 @@ type ConfirmDialogProps = {
   readonly detail?: ReactNode;
   readonly icon?: ReactNode;
   readonly autoFocusCancel?: boolean;
+  readonly returnFocus?: () => HTMLElement | null;
   readonly onCancel: () => void;
   readonly onConfirm: () => void;
 };
 
 
-export function ConfirmDialog({ title, body, confirmLabel, busyLabel = "Removing…", busy = false, detail, icon, autoFocusCancel = true, onCancel, onConfirm }: ConfirmDialogProps) {
+export function ConfirmDialog({ title, body, confirmLabel, busyLabel = "Removing…", busy = false, detail, icon, autoFocusCancel = true, returnFocus, onCancel, onConfirm }: ConfirmDialogProps) {
   const cancelRef = useRef<HTMLButtonElement>(null);
   return <AlertDialog open onOpenChange={(open, event) => { if (!open) { if (busy) event.cancel(); else onCancel(); } }}>
-    <AlertDialogContent className="max-h-[85vh] overflow-y-auto" initialFocus={autoFocusCancel ? cancelRef : undefined}>
+    <AlertDialogContent className="max-h-[85vh] overflow-y-auto wrap-anywhere" initialFocus={autoFocusCancel ? cancelRef : undefined} finalFocus={returnFocus}>
       <AlertDialogHeader>
         <AlertDialogMedia>{icon ?? <Trash2 size={20} />}</AlertDialogMedia>
         <AlertDialogTitle>{title}</AlertDialogTitle>

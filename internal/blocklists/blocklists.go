@@ -11,8 +11,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/derek/faro/internal/db"
@@ -37,30 +39,11 @@ type listSnapshot struct {
 	updatedAt       string
 }
 
-func (refresher Refresher) RefreshAndApply(ctx context.Context, id int64, apply func(context.Context) error) (int, error) {
-	snapshot, err := refresher.snapshot(ctx, id)
-	if err != nil {
-		return 0, err
-	}
-	count, err := refresher.Refresh(ctx, id)
-	if err != nil {
-		return 0, err
-	}
-	if apply == nil {
-		return count, nil
-	}
-	if err := apply(ctx); err != nil {
-		rollbackCtx := context.WithoutCancel(ctx)
-		if restoreErr := refresher.restore(rollbackCtx, id, snapshot); restoreErr != nil {
-			return 0, fmt.Errorf("apply refreshed blocklist: %w; restore previous entries: %v", err, restoreErr)
-		}
-		_ = apply(rollbackCtx)
-		return 0, fmt.Errorf("apply refreshed blocklist: %w; previous entries were restored", err)
-	}
-	return count, nil
-}
+// The scheduler and HTTP handlers can refresh the same live configuration.
+// Keep the comparison, apply and any rollback together, after the download.
+var applyMu sync.Mutex
 
-func (refresher Refresher) Refresh(ctx context.Context, id int64) (int, error) {
+func (refresher Refresher) RefreshAndApply(ctx context.Context, id int64, apply func(context.Context) error) (int, error) {
 	var source string
 	if err := refresher.Store.DB.QueryRowContext(ctx, `SELECT url FROM blocklists WHERE id = ?`, id).Scan(&source); err != nil {
 		return 0, err
@@ -84,24 +67,29 @@ func (refresher Refresher) Refresh(ctx context.Context, id int64) (int, error) {
 		return 0, errors.New("blocklist contained no valid domains; keeping the last known good version")
 	}
 
+	applyMu.Lock()
+	defer applyMu.Unlock()
 	tx, err := refresher.Store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM blocklist_entries WHERE blocklist_id = ?`, id); err != nil {
-		return 0, err
-	}
-	insert, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO blocklist_entries(blocklist_id, domain) VALUES(?, ?)`)
+	snapshot, err := readSnapshot(ctx, tx, id, source)
 	if err != nil {
 		return 0, err
 	}
-	defer func() { _ = insert.Close() }()
-	for _, domain := range domains {
-		if _, err := insert.ExecContext(ctx, id, domain); err != nil {
+	if slices.Equal(domains, snapshot.domains) {
+		if _, err := tx.ExecContext(ctx, `UPDATE blocklists SET last_refreshed_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err != nil {
 			return 0, err
 		}
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		return len(domains), nil
+	}
+	if err := replaceDomains(ctx, tx, id, domains); err != nil {
+		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE blocklists SET last_refreshed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, id); err != nil {
 		return 0, err
@@ -109,15 +97,29 @@ func (refresher Refresher) Refresh(ctx context.Context, id int64) (int, error) {
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	if apply != nil {
+		if err := apply(ctx); err != nil {
+			rollbackCtx := context.WithoutCancel(ctx)
+			if restoreErr := refresher.restore(rollbackCtx, id, snapshot); restoreErr != nil {
+				return 0, fmt.Errorf("apply refreshed blocklist: %w; restore previous entries: %v", err, restoreErr)
+			}
+			_ = apply(rollbackCtx)
+			return 0, fmt.Errorf("apply refreshed blocklist: %w; previous entries were restored", err)
+		}
+	}
 	return len(domains), nil
 }
 
-func (refresher Refresher) snapshot(ctx context.Context, id int64) (listSnapshot, error) {
+func (refresher Refresher) Refresh(ctx context.Context, id int64) (int, error) {
+	return refresher.RefreshAndApply(ctx, id, nil)
+}
+
+func readSnapshot(ctx context.Context, tx *sql.Tx, id int64, source string) (listSnapshot, error) {
 	var snapshot listSnapshot
-	if err := refresher.Store.DB.QueryRowContext(ctx, `SELECT last_refreshed_at, updated_at FROM blocklists WHERE id = ?`, id).Scan(&snapshot.lastRefreshedAt, &snapshot.updatedAt); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT last_refreshed_at, updated_at FROM blocklists WHERE id = ? AND url = ?`, id, source).Scan(&snapshot.lastRefreshedAt, &snapshot.updatedAt); err != nil {
 		return snapshot, err
 	}
-	rows, err := refresher.Store.DB.QueryContext(ctx, `SELECT domain FROM blocklist_entries WHERE blocklist_id = ? ORDER BY domain`, id)
+	rows, err := tx.QueryContext(ctx, `SELECT domain FROM blocklist_entries WHERE blocklist_id = ? ORDER BY domain`, id)
 	if err != nil {
 		return snapshot, err
 	}
@@ -138,6 +140,16 @@ func (refresher Refresher) restore(ctx context.Context, id int64, snapshot listS
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := replaceDomains(ctx, tx, id, snapshot.domains); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE blocklists SET last_refreshed_at = ?, updated_at = ? WHERE id = ?`, snapshot.lastRefreshedAt, snapshot.updatedAt, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func replaceDomains(ctx context.Context, tx *sql.Tx, id int64, domains []string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM blocklist_entries WHERE blocklist_id = ?`, id); err != nil {
 		return err
 	}
@@ -145,19 +157,13 @@ func (refresher Refresher) restore(ctx context.Context, id int64, snapshot listS
 	if err != nil {
 		return err
 	}
-	for _, domain := range snapshot.domains {
+	for _, domain := range domains {
 		if _, err := insert.ExecContext(ctx, id, domain); err != nil {
 			_ = insert.Close()
 			return err
 		}
 	}
-	if err := insert.Close(); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE blocklists SET last_refreshed_at = ?, updated_at = ? WHERE id = ?`, snapshot.lastRefreshedAt, snapshot.updatedAt, id); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return insert.Close()
 }
 
 type Manager struct {

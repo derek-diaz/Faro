@@ -3,7 +3,6 @@ package handlers
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -48,9 +47,6 @@ func (handler *Handler) resolveDeviceReference(ctx context.Context, reference, s
 }
 
 func (handler *Handler) deviceIdentity(ctx context.Context, deviceID int64, addresses []string, fallback string) deviceIdentity {
-	if fallback == "" {
-		fallback = fmt.Sprintf("Device %d", deviceID)
-	}
 	identity := bestDeviceIdentity(handler.discoverDeviceNames(ctx, addresses), addresses, fallback)
 	var name string
 	if handler.store.DB.QueryRowContext(ctx, `SELECT name FROM device_names WHERE device_id = ? AND source = 'unifi' AND TRIM(name) <> ''`, deviceID).Scan(&name) == nil {

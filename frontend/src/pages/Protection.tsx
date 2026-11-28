@@ -1,3 +1,6 @@
+import "./protection-creation.css";
+import type { ProtectionSession } from "../utils/useProtectionSession";
+import { ProtectionIcon, protectionIcons } from "../components/ProtectionIcon";
 import { RadioCard, RadioGroup } from "../components/ui/radio-card";
 import { DialogSurface } from "../components/DialogSurface";
 import { Textarea } from "../components/ui/textarea";
@@ -5,17 +8,10 @@ import { Checkbox } from "../components/ui/checkbox";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
 import {
-  Baby,
-  BriefcaseBusiness,
   CalendarClock,
   ChevronLeft,
   ChevronRight,
-  Cpu,
-  Gamepad2,
   Globe2,
-  House,
-  Laptop,
-  Lightbulb,
   ListFilter,
   LoaderCircle,
   MonitorPlay,
@@ -26,11 +22,7 @@ import {
   Settings2,
   Shield,
   ShieldCheck,
-  Smartphone,
   Trash2,
-  Tv,
-  UserRound,
-  Users,
   X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode, type SubmitEvent } from "react";
@@ -53,6 +45,10 @@ type Props = {
   readonly devices: DeviceSummary[];
   readonly refresh: () => Promise<void>;
   readonly onManageBlocklists: () => void;
+  readonly selectedID: number | null;
+  readonly onSelectSetup: (id: number | null, replace?: boolean) => void;
+  readonly exception?: { domain: string; kind: "allow" | "block" } | null;
+  readonly session: ProtectionSession;
 };
 
 type Draft = ProtectionInput;
@@ -65,21 +61,6 @@ const protectionLevels = [
   { id: "custom", name: "Custom", description: "Choose installed lists, add your own source, or use only domain exceptions.", sourceID: "" }
 ] as const;
 
-const icons: { key: ProtectionIconKey; label: string; icon: typeof House }[] = [
-  { key: "house", label: "Home", icon: House },
-  { key: "users", label: "Family", icon: Users },
-  { key: "baby", label: "Children", icon: Baby },
-  { key: "guest", label: "Guests", icon: UserRound },
-  { key: "tv", label: "TV", icon: Tv },
-  { key: "gamepad", label: "Gaming", icon: Gamepad2 },
-  { key: "smartphone", label: "Phone", icon: Smartphone },
-  { key: "laptop", label: "Computer", icon: Laptop },
-  { key: "briefcase", label: "Work", icon: BriefcaseBusiness },
-  { key: "lightbulb", label: "Smart home", icon: Lightbulb },
-  { key: "cpu", label: "Server", icon: Cpu },
-  { key: "shield", label: "Protection", icon: Shield }
-];
-
 const emptyDraft = (): Draft => ({
   name: "",
   icon: "shield",
@@ -91,9 +72,9 @@ const emptyDraft = (): Draft => ({
   schedule: { enabled: false, days: "1,2,3,4,5,6,7", start: "08:00", end: "22:00", timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC" }
 });
 
-export function ProtectionPage({ protections, blocklists, devices, refresh, onManageBlocklists }: Props) {
-  const [selectedID, setSelectedID] = useState<number | null>(null);
-  const [editor, setEditor] = useState<Draft>(emptyDraft);
+export function ProtectionPage({ protections, blocklists, devices, refresh, onManageBlocklists, selectedID, onSelectSetup, exception, session }: Props) {
+  const { drafts, setDrafts, returnToBlocklistsFor } = session;
+  const [discardID, setDiscardID] = useState<number | null>(null);
   const [wizard, setWizard] = useState(false);
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
@@ -112,10 +93,24 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
   const [pauseBusyID, setPauseBusyID] = useState<number | null>(null);
 
   const selected = protections.find((item) => item.id === selectedID) ?? null;
+  const editor = selected && (drafts.get(selected.id) ?? protectionDraft(selected));
 
-  useEffect(() => {
-    if (selected) setEditor(protectionDraft(selected));
-  }, [selected]);
+  function updateDraft(id: number, value: Draft | null, expected?: Draft) {
+    setDrafts((current) => {
+      if (expected && current.get(id) !== expected) return current;
+      const next = new Map(current);
+      if (value) next.set(id, value);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  function selectSetup(id: number | null, replace = false) {
+    setError("");
+    setNotice("");
+    returnToBlocklistsFor.current = null;
+    onSelectSetup(id, replace);
+  }
 
   const assignedIDs = useMemo(() => new Set(protections.flatMap((item) => item.is_default ? [] : item.device_ids)), [protections]);
   const homeDevices = devices.filter((device) => !assignedIDs.has(device.device_id));
@@ -136,7 +131,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
 
   async function saveSelected(event: SubmitEvent) {
     event.preventDefault();
-    if (!selected) return;
+    if (!selected || !editor || busy) return;
     setBusy(true);
     setSaveStage("Saving settings and applying DNS changes");
     setError("");
@@ -145,6 +140,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
       await api.updateProtection(selected.id, cleanInput(editor));
       setSaveStage("Refreshing the updated protection details");
       await refresh();
+      updateDraft(selected.id, null, editor);
       setNotice(`${editor.name} was updated.`);
     } catch (error_) {
       setError(errorMessage(error_, "Could not save protection."));
@@ -187,7 +183,7 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
       }
       setCreationStage("Refreshing your protection setups");
       await refresh();
-      setSelectedID(null);
+      selectSetup(null);
       setWizard(false);
       setNotice(`${draft.name} is ready.`);
     } catch (error_) {
@@ -239,7 +235,8 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
     setError("");
     try {
       await api.deleteProtection(selected.id);
-      setSelectedID(null);
+      updateDraft(selected.id, null);
+      selectSetup(null, true);
       await refresh();
       setNotice(`${selected.name} was deleted. Its devices now use Home.`);
     } catch (error_) {
@@ -271,15 +268,41 @@ export function ProtectionPage({ protections, blocklists, devices, refresh, onMa
     <div className="protection-page">
       {(error || notice) && <output className={`protection-message ${error ? "error" : "success"}`}><span>{error || notice}</span><Button variant="ghost" size="icon" className="icon-button" type="button" aria-label="Dismiss" onClick={() => { setError(""); setNotice(""); }}><X size={15} /></Button></output>}
 
-      {!selected ? <ProtectionOverview protections={protections} blocklists={blocklists} devices={devices} homeDevices={homeDevices} pauseBusyID={pauseBusyID} onPause={changePause} onManage={(id) => { setSelectedID(id); setError(""); setNotice(""); }} onCreate={openWizard} /> : <ProtectionEditor selected={selected} editor={editor} setEditor={setEditor} blocklists={blocklists} devices={devices} homeDevices={homeDevices} saveStage={saveStage} busy={busy} onBack={() => { setSelectedID(null); setError(""); }} onDelete={() => setConfirmDelete(true)} onManageBlocklists={onManageBlocklists} saveSelected={saveSelected} />}
+      {!selected || !editor ? <>
+        {selectedID !== null && <p role="status">This protection setup is no longer available.</p>}
+        <ProtectionOverview protections={protections} blocklists={blocklists} devices={devices} homeDevices={homeDevices} pauseBusyID={pauseBusyID} onPause={changePause} onManage={selectSetup} onCreate={openWizard} />
+      </> : <ProtectionEditor
+        key={selected.id}
+        selected={selected} editor={editor} blocklists={blocklists} devices={devices} homeDevices={homeDevices}
+        setEditor={(next) => updateDraft(selected.id, JSON.stringify(next) === JSON.stringify(protectionDraft(selected)) ? null : next)}
+        dirty={drafts.has(selected.id)} exception={exception} returnToBlocklistsFor={returnToBlocklistsFor}
+        saveStage={saveStage} busy={busy} saveSelected={saveSelected}
+        onBack={() => drafts.has(selected.id) ? setDiscardID(selected.id) : selectSetup(null)}
+        onDelete={() => setConfirmDelete(true)}
+        onManageBlocklists={() => {
+          returnToBlocklistsFor.current = selected.id;
+          onManageBlocklists();
+        }}
+      />}
 
+      {selected && discardID === selected.id && <ConfirmDialog
+        title={`Discard changes to ${selected.name}?`}
+        body="Your unsaved edits will be removed when you return to all protection setups."
+        confirmLabel="Discard changes"
+        onCancel={() => setDiscardID(null)}
+        onConfirm={() => {
+          updateDraft(selected.id, null);
+          setDiscardID(null);
+          selectSetup(null);
+        }}
+      />}
       {wizard && <ProtectionWizard step={step} setStep={(next) => { setStep(next); setError(""); }} draft={draft} setDraft={(next) => { pendingCreation.current = null; setDraft(next); }} level={level} setLevel={(next) => { pendingCreation.current = null; setLevel(next); }} customSource={customSource} setCustomSource={(next) => { pendingCreation.current = null; setCustomSource(next); }} blocklists={wizardBlocklists} devices={devices} busy={busy} error={error} creationStage={creationStage} preparedSources={preparedSources} created={createdProtection} onClose={() => { if (!busy) { setWizard(false); setError(""); } }} onFinish={() => void finishWizard()} />}
       {confirmDelete && selected && !selected.is_default && <ConfirmDialog title={`Delete ${selected.name}?`} body="This protection setup and its exceptions will be permanently deleted." confirmLabel="Delete protection" busyLabel="Deleting protection…" busy={busy} onCancel={() => setConfirmDelete(false)} onConfirm={() => void removeSelected()} detail={<div className="confirm-dialog-impact warning"><Shield size={18} /><span><strong>{selected.device_ids.length} assigned device{selected.device_ids.length === 1 ? "" : "s"} will return to Home</strong><small>The devices themselves and their activity history will remain.</small></span></div>} />}
     </div>
   );
 }
 
-function ProtectionEditor({ selected, editor, setEditor, blocklists, devices, homeDevices, saveStage, busy, onBack, onDelete, onManageBlocklists, saveSelected }: {
+function ProtectionEditor({ selected, editor, setEditor, blocklists, devices, homeDevices, saveStage, busy, dirty, exception, returnToBlocklistsFor, onBack, onDelete, onManageBlocklists, saveSelected }: {
   readonly selected: Protection;
   readonly editor: Draft;
   readonly setEditor: (draft: Draft) => void;
@@ -288,22 +311,69 @@ function ProtectionEditor({ selected, editor, setEditor, blocklists, devices, ho
   readonly homeDevices: DeviceSummary[];
   readonly saveStage: string;
   readonly busy: boolean;
+  readonly dirty: boolean;
+  readonly exception: Props["exception"];
+  readonly returnToBlocklistsFor: ProtectionSession["returnToBlocklistsFor"];
   readonly onBack: () => void;
   readonly onDelete: () => void;
   readonly onManageBlocklists: () => void;
   readonly saveSelected: (event: SubmitEvent) => Promise<void>;
 }) {
+  const manageButton = useRef<HTMLButtonElement>(null);
+  const allowField = useRef<HTMLTextAreaElement>(null);
+  const blockField = useRef<HTMLTextAreaElement>(null);
+  const focusedDestination = useRef<string | null>(null);
+  const domain = exception?.domain;
+  const kind = exception?.kind;
+  useEffect(() => {
+    const destination = `${kind ?? ""}/${domain ?? ""}`;
+    if (focusedDestination.current === destination) return;
+    focusedDestination.current = destination;
+    if (returnToBlocklistsFor.current === selected.id) {
+      returnToBlocklistsFor.current = null;
+      manageButton.current?.focus();
+      return;
+    }
+    if (!domain || !kind) return;
+    const field = kind === "allow" ? allowField.current : blockField.current;
+    if (!field) return;
+    const values = field.value.split("\n");
+    const index = values.findIndex((line) => line.trim().toLowerCase() === domain.toLowerCase());
+    field.focus({ preventScroll: true });
+    if (index >= 0) {
+      const start = values.slice(0, index).reduce((offset, line) => offset + line.length + 1, 0);
+      field.setSelectionRange(start, start + values[index].length);
+      if (field.scrollHeight > field.clientHeight) {
+        // Native selection does not scroll a textarea. Measure preceding wrapped lines at the same width.
+        const prefix = field.cloneNode(false) as HTMLTextAreaElement;
+        prefix.setAttribute("aria-hidden", "true");
+        prefix.style.cssText = `position:absolute;visibility:hidden;box-sizing:border-box;width:${field.offsetWidth}px;height:0;min-height:0;overflow-y:scroll`;
+        prefix.value = values.slice(0, index + 1).join("\n");
+        field.after(prefix);
+        field.scrollTop = prefix.scrollHeight - field.clientHeight / 2;
+        prefix.remove();
+      }
+    }
+    field.scrollIntoView({ block: "center" });
+  }, [selected.id, returnToBlocklistsFor, domain, kind]);
   const enabledBlocklists = blocklists.filter((item) => item.enabled);
   const rules = draftRules(editor);
   const previewKey = JSON.stringify([selected.id, selected.updated_at, draftRules(protectionDraft(selected)), rules]);
   const defaultCopy = selected.is_default ? "Any device not assigned elsewhere uses Home." : "Only the devices selected below use these choices.";
   return <div className="protection-edit-view">
-    <div className="protection-edit-nav"><Button variant="outline" className="secondary" type="button" disabled={Boolean(saveStage)} onClick={onBack}><ChevronLeft size={16} />All protection setups</Button><span><small>Editing setup</small><strong>{selected.name}</strong></span></div>
+    <div className="protection-edit-nav"><Button variant="outline" className="secondary" type="button" disabled={Boolean(saveStage)} onClick={onBack}><ChevronLeft size={16} />All protection setups</Button><span><small>{dirty ? "Unsaved changes" : "Editing setup"}</small><strong>{selected.name}</strong></span></div>
     <form className={`protection-editor panel ${saveStage ? "saving" : ""}`} aria-busy={Boolean(saveStage)} onSubmit={(event) => void saveSelected(event)}>
       <div className="protection-editor-heading"><div className="protection-title-icon"><ProtectionIcon name={editor.icon} /></div><div><span>{selected.is_default ? "Network default" : "Custom protection"}</span><Input value={editor.name} disabled={selected.is_default} maxLength={40} aria-label="Protection name" onChange={(event) => setEditor({ ...editor, name: event.target.value })} /><p>{defaultCopy}</p></div>{!selected.is_default && <Button variant="destructive" size="icon" className="icon-button" type="button" title="Delete protection" aria-label={`Delete ${selected.name}`} disabled={Boolean(saveStage)} onClick={onDelete}><Trash2 size={17} /></Button>}</div>
       <EditorSection title="Icon" description="Choose a simple visual cue."><IconPicker value={editor.icon} onChange={(icon) => setEditor({ ...editor, icon })} compact /></EditorSection>
-      <EditorSection title="Blocking" description="Select installed lists for this protection setup."><div className="protection-choice-grid">{enabledBlocklists.map((blocklist) => <label key={blocklist.id} className={editor.blocklist_ids.includes(blocklist.id) ? "selected" : ""}><Checkbox  checked={editor.blocklist_ids.includes(blocklist.id)} onCheckedChange={() => setEditor({ ...editor, blocklist_ids: toggleNumber(editor.blocklist_ids, blocklist.id) })} /><span><strong>{blocklist.name}</strong><small>{blocklist.entry_count.toLocaleString()} domains</small></span></label>)}{enabledBlocklists.length === 0 && <p className="protection-inline-empty">No active blocklists are installed. Add one from the Blocklists page first.</p>}</div><Button variant="outline" className="secondary protection-add-list" type="button" onClick={onManageBlocklists}>Manage blocklists</Button></EditorSection>
-      <EditorSection title="Exceptions" description="Use one exact domain per line. Allowed domains always win."><div className="protection-domain-editors"><label><span>Always allow</span><Textarea value={editor.allow_domains.join("\n")} onChange={(event) => setEditor({ ...editor, allow_domains: lines(event.target.value) })} placeholder="example.com" /></label><label><span>Always block</span><Textarea value={editor.block_domains.join("\n")} onChange={(event) => setEditor({ ...editor, block_domains: lines(event.target.value) })} placeholder="telemetry.example" /></label></div></EditorSection>
+      <EditorSection title="Blocking" description="Select installed lists for this protection setup."><div className="protection-choice-grid">{enabledBlocklists.map((blocklist) => <label key={blocklist.id} className={editor.blocklist_ids.includes(blocklist.id) ? "selected" : ""}><Checkbox  checked={editor.blocklist_ids.includes(blocklist.id)} onCheckedChange={() => setEditor({ ...editor, blocklist_ids: toggleNumber(editor.blocklist_ids, blocklist.id) })} /><span><strong>{blocklist.name}</strong><small>{blocklist.entry_count.toLocaleString()} domains</small></span></label>)}{enabledBlocklists.length === 0 && <p className="protection-inline-empty">No active blocklists are installed. Add one from the Blocklists page first.</p>}</div><Button ref={manageButton} variant="outline" className="secondary protection-add-list" type="button" onClick={onManageBlocklists}>Manage blocklists</Button></EditorSection>
+      <EditorSection title="Exceptions" description="Use one exact domain per line. Allowed domains always win.">
+        <div className="protection-domain-editors">
+          <label><span>Always allow</span><Textarea ref={allowField} value={editor.allow_domains.join("\n")} onChange={(event) => setEditor({ ...editor, allow_domains: lines(event.target.value) })} placeholder="example.com" /></label>
+          <label><span>Always block</span><Textarea ref={blockField} value={editor.block_domains.join("\n")} onChange={(event) => setEditor({ ...editor, block_domains: lines(event.target.value) })} placeholder="telemetry.example" /></label>
+        </div>
+        {domain && kind && !(kind === "allow" ? editor.allow_domains : editor.block_domains).some((rule) => rule.toLowerCase() === domain.toLowerCase()) &&
+          <p className="protection-inline-empty" role="status">{domain} is absent from the current {kind} exceptions.</p>}
+      </EditorSection>
       <ProtectionRulePreview key={previewKey} id={selected.id} rules={rules} />
       <EditorSection title="Domain blocking schedule" description="Choose when Faro applies this setup’s blocklists and custom blocks. This schedule never disconnects devices."><ScheduleEditor draft={editor} setDraft={setEditor} /></EditorSection>
       <EditorSection title="Devices" description={selected.is_default ? "Home automatically covers every device not assigned elsewhere." : "Choose which observed devices use this protection."}>{selected.is_default ? <DeviceSummaryList devices={homeDevices} /> : <DeviceChoices devices={devices} selected={editor.device_ids} onChange={(deviceIPs) => setEditor({ ...editor, device_ids: deviceIPs })} />}</EditorSection>
@@ -468,10 +538,9 @@ function ScheduleEditor({ draft, setDraft }: { readonly draft: Draft; readonly s
 }
 
 function IconPicker({ value, onChange, compact = false }: { readonly value: ProtectionIconKey; readonly onChange: (value: ProtectionIconKey) => void; readonly compact?: boolean }) {
-  return <div className={`protection-icon-picker ${compact ? "compact" : ""}`}>{icons.map((item) => { const Icon = item.icon; return <button type="button" className={value === item.key ? "selected" : ""} title={item.label} aria-label={item.label} aria-pressed={value === item.key} key={item.key} onClick={() => onChange(item.key)}><Icon size={compact ? 18 : 22} />{!compact && <span>{item.label}</span>}</button>; })}</div>;
+  return <div className={`protection-icon-picker ${compact ? "compact" : ""}`}>{protectionIcons.map((item) => { const Icon = item.icon; return <button type="button" className={value === item.key ? "selected" : ""} title={item.label} aria-label={item.label} aria-pressed={value === item.key} key={item.key} onClick={() => onChange(item.key)}><Icon size={compact ? 18 : 22} />{!compact && <span>{item.label}</span>}</button>; })}</div>;
 }
 
-export function ProtectionIcon({ name, size = 20 }: { readonly name: ProtectionIconKey; readonly size?: number }) { const Icon = icons.find((item) => item.key === name)?.icon ?? Shield; return <Icon size={size} />; }
 
 function DeviceChoices({ devices, selected, onChange }: { readonly devices: DeviceSummary[]; readonly selected: number[]; readonly onChange: (selected: number[]) => void }) {
   if (!devices.length) return <p className="protection-inline-empty">No devices have been observed yet. You can assign devices later.</p>;
@@ -493,7 +562,7 @@ function draftRules(draft: Draft) {
   return { blocklist_ids: draft.blocklist_ids, allow_domains: draft.allow_domains.filter(Boolean), block_domains: draft.block_domains.filter(Boolean) };
 }
 function cleanInput(draft: Draft): ProtectionInput { return { ...draft, ...draftRules(draft), name: draft.name.trim() }; }
-function lines(value: string) { return value.split(/\r?\n/).map((line) => line.trim()); }
+function lines(value: string) { return value ? value.split(/\r?\n/).map((line) => line.trim()) : []; }
 function toggleNumber(values: number[], value: number) { return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]; }
 
 function toggleDay(days: string, day: number) { const values = days.split(",").filter(Boolean).map(Number); return (values.includes(day) ? values.filter((value) => value !== day) : [...values, day]).sort((a, b) => a - b).join(","); }

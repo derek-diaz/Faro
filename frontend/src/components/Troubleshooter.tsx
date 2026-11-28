@@ -4,10 +4,11 @@ import { useEffect, useRef, useState } from "react";
 import { RefreshCw, ShieldCheck } from "lucide-react";
 import { api, type TroubleshootingReport, type TroubleshootingTrial } from "../api/client";
 
-export function Troubleshooter({ clientIP, deviceName, onDomainSelect }: {
+export function Troubleshooter({ clientIP, deviceName, onDomainSelect, onRulesChanged }: {
   readonly clientIP: string;
   readonly deviceName: string;
   readonly onDomainSelect: (domain: string) => void;
+  readonly onRulesChanged: () => Promise<void>;
 }) {
   const [since, setSince] = useState(() => new Date(Date.now() - 15 * 60_000).toISOString());
   const [report, setReport] = useState<TroubleshootingReport | null>(null);
@@ -48,6 +49,7 @@ export function Troubleshooter({ clientIP, deviceName, onDomainSelect }: {
     setNotice("");
     try {
       await api.changeTroubleshooting({ action, token, client_ip: report.client_ip, device_id: report.device_id, protection_id: report.protection_id, domains: selected });
+      if (action === "keep") void onRulesChanged().catch(() => undefined);
       if (!mounted.current) return;
       setSelected([]);
       setNotice(action === "test" ? "Test started. Retry the site on this device, then keep the exceptions if they helped or undo them." : action === "keep" ? "Exceptions saved in the test's protection." : "Temporary exceptions removed. Existing permanent rules are unchanged.");

@@ -14,6 +14,19 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react(), tailwindcss()],
+    build: {
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              { name: "entry", tags: ["$initial"], priority: 1 },
+              // Route splitting otherwise emits individual files for shared icons and small controls.
+              { name: "shared", minShareCount: 2, maxModuleSize: 5000 }
+            ]
+          }
+        }
+      }
+    },
     resolve: { alias: { "@": fileURLToPath(new URL("./src", import.meta.url)) } },
     server: {
       port: 1787,

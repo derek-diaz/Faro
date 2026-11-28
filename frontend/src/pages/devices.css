@@ -1,0 +1,74 @@
+/* Device inventory: quiet identity, readable data, and recoverable refresh states. */
+@layer components {
+  .devices-page > .device-summary-strip { background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+  .devices-page > .device-summary-strip .device-summary-metric { grid-template-columns: 1fr; padding: 12px 20px; border-color: var(--border-subtle); }
+  .devices-page > .device-summary-strip .device-summary-icon { display: none; }
+  .devices-page > .device-summary-strip .device-summary-metric small { color: var(--text-muted); font-size: 12px; font-weight: 450; }
+  .devices-page > .device-summary-strip .device-summary-metric strong { color: var(--ink); font-size: 23px; font-weight: 600; }
+  .devices-page > .device-summary-strip .device-summary-metric.compact strong { font-size: 16px; }
+  .devices-page > .device-summary-strip .device-summary-metric em { color: var(--text-muted); font-size: 12px; font-weight: 400; }
+  .device-inventory-panel { min-width: 0; overflow: hidden; }
+  .device-inventory-header { padding: 12px 20px; gap: 16px; flex-wrap: wrap; border-color: var(--border-subtle); }
+  .device-inventory-tools { gap: 16px; justify-content: flex-start; }
+  .device-active-control { display: inline-flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 12px; font-weight: 500; cursor: pointer; white-space: nowrap; }
+  .device-search { width: 280px; min-width: 0; padding: 4px 10px; border-radius: 8px; }
+  .device-search > input { min-width: 0; }
+  .device-table-header { background: var(--surface-muted); border-color: var(--border-subtle); padding: 10px 20px; }
+  .device-sort-header { color: var(--text-muted); font-size: 11px; font-weight: 500; }
+  .device-table-row { padding: 14px 20px; min-height: 76px; border-color: var(--border-subtle); box-shadow: none; }
+  .device-table-row:hover, .device-table-row.active { background: var(--surface-subtle); border-color: var(--border-subtle); }
+  .device-table-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .device-table-identity { grid-template-columns: 36px minmax(0, 1fr); gap: 12px; }
+  .device-inventory-panel .device-icon { width: 36px; height: 36px; border-radius: 9px; background: var(--surface-muted); border-color: var(--border-subtle); color: var(--text-muted); }
+  .device-table-row.active .device-icon { color: var(--accent); background: var(--accent-soft); }
+  .device-inventory-panel .device-main strong { color: var(--ink); font-size: 13px; font-weight: 550; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
+  .device-inventory-panel .device-main small { color: var(--text-muted); font-size: 11px; font-weight: 400; line-height: 1.7; white-space: normal; overflow-wrap: anywhere; }
+  .device-table-value strong { color: var(--ink); font-size: 12px; font-weight: 450; font-variant-numeric: tabular-nums; }
+  .device-table-value.quiet strong, .device-table-value small, .device-table-value em { color: var(--text-muted); font-weight: 400; }
+  .device-table-value.blocked strong { color: var(--blocked); }
+  .device-inventory-panel .device-profile-badge { color: var(--text-muted); background: var(--surface-muted); border-color: var(--border-subtle); font-size: 11px; font-weight: 450; }
+  .device-refresh-error { display: flex; align-items: flex-start; gap: 12px; padding: 16px 20px; border-block: 1px solid var(--border-subtle); background: var(--surface-muted); color: var(--text-muted); font-size: 12px; }
+  .device-refresh-error > svg { flex-shrink: 0; color: var(--blocked); margin-top: 2px; }
+  .device-refresh-error > div { flex: 1; min-width: 0; }
+  .device-refresh-error strong { color: var(--ink); font-size: 13px; font-weight: 550; }
+  .device-refresh-error p { margin: 4px 0 0; line-height: 1.6; overflow-wrap: anywhere; }
+  .device-refresh-error details { margin-top: 8px; }
+  .device-refresh-error summary { cursor: pointer; width: fit-content; }
+  .device-pagination { padding: 16px 20px; background: transparent; border-color: var(--border-subtle); color: var(--text-muted); gap: 12px; }
+  .device-pagination > span, .device-pagination > div > span { color: var(--text-muted); font-size: 12px; font-weight: 400; }
+  .device-filter-empty, .device-inventory-loading { color: var(--text-muted); padding: 48px 20px; font-size: 13px; }
+  .device-filter-empty strong { color: var(--ink); font-weight: 550; }
+  .device-filter-empty span { color: var(--text-muted); }
+  .device-inventory-loading { display: flex; justify-content: center; align-items: center; gap: 10px; }
+  @media (min-width: 761px) {
+    .device-table-header > :nth-child(2), .device-table-header > :nth-child(3) { justify-content: flex-end; }
+    .device-table-row > .device-table-value:nth-child(2), .device-table-row > .device-table-value:nth-child(3) { text-align: right; }
+  }
+  @media (max-width: 1100px) and (min-width: 761px) {
+    .device-table-header, .device-table-row { grid-template-columns: minmax(180px, 1.4fr) minmax(76px, .5fr) minmax(68px, .5fr) minmax(110px, .7fr) 18px; gap: 12px; }
+  }
+  @media (max-width: 760px) {
+    .device-inventory-header { padding: 16px; }
+    .device-inventory-tools { flex-direction: row; flex-wrap: wrap; }
+    .device-search { width: 100%; order: -1; }
+    .device-table-row { padding: 16px 38px 16px 16px; }
+    .device-table-value strong { font-size: 11px; }
+    .device-table-value small { color: var(--text-muted); font-size: 10px; font-weight: 400; }
+    .device-refresh-error { flex-wrap: wrap; padding: 16px; }
+    .device-refresh-error > div { flex-basis: calc(100% - 32px); }
+    .device-refresh-error > button { margin-left: 31px; }
+    .device-pagination { padding: 16px; }
+  }
+}
+@layer components {
+  .device-search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 15%, transparent); }
+  .device-table-value.blocked { background: transparent; border: 0; padding: 0; }
+  @media (min-width: 761px) {
+    .device-table-header > :nth-child(2), .device-table-header > :nth-child(3) { justify-self: end; }
+  }
+}
+@layer components {
+  .device-table-value.blocked strong { background: transparent; border: 0; padding: 0; border-radius: 0; }
+  .devices-page > .device-summary-strip .device-summary-metric.compact strong { white-space: normal; overflow-wrap: anywhere; line-height: 1.4; }
+  @media (max-width: 760px) { .device-inventory-tools { justify-content: flex-start; } }
+}

@@ -25,6 +25,47 @@
   .section-navigation a:hover { color: var(--ink); background: var(--surface-muted); }
   .section-navigation a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
   .section-navigation a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .settings-directory, .settings-directory-back { display: none; }
+  @media (max-width: 700px) {
+    .settings-page-navigation, .settings-workspace .settings-tabs,
+    .settings-directory-open .settings-section-content { display: none; }
+    .settings-directory {
+      display: grid;
+      overflow: hidden;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+    .settings-directory a {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+      min-height: 64px;
+      padding: 12px 14px;
+      color: var(--text-muted);
+      text-decoration: none;
+    }
+    .settings-directory a + a { border-top: 1px solid var(--border-subtle); }
+    .settings-directory a:hover, .settings-directory a:focus-visible { background: var(--surface-muted); }
+    .settings-directory a:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+    .settings-directory a > span { display: grid; gap: 3px; }
+    .settings-directory strong { font-size: 15px; font-weight: 550; color: var(--ink); }
+    .settings-directory small { font-size: 13px; line-height: 1.45; }
+    .settings-directory-back {
+      display: inline-flex;
+      justify-self: start;
+      align-items: center;
+      gap: 5px;
+      min-height: 44px;
+      color: var(--accent);
+      font-size: 14px;
+      font-weight: 550;
+      text-decoration: none;
+    }
+    .settings-directory-back:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .main-content > .settings-directory-back { margin-bottom: 12px; }
+  }
   @media (max-width: 600px) {
     .section-navigation { gap: 4px; margin-bottom: 16px; }
     .section-navigation a { padding: 8px 10px; }

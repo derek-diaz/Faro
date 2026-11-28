@@ -136,6 +136,60 @@ func TestDeviceInventoryReadDoesNotClassifyDevices(t *testing.T) {
 	}
 }
 
+func TestDNSHistoryInventoryUsesRecordedQueries(t *testing.T) {
+	h, _, input := troubleshootingFixture(t)
+	const lastQuery = "2020-02-03T04:05:06Z"
+	if _, err := h.store.DB.Exec(`UPDATE devices SET name='Quiet client', last_seen_at=CURRENT_TIMESTAMP WHERE id=?;
+		INSERT INTO dns_queries(timestamp,client_ip,device_id,domain,query_type,action,source) VALUES(?,?,?,'quiet.example','A','allowed','upstream');
+		INSERT INTO devices(name,last_seen_at) VALUES('Imported client',CURRENT_TIMESTAMP)`, input.DeviceID, lastQuery, input.ClientIP, input.DeviceID); err != nil {
+		t.Fatal(err)
+	}
+	read := func(query string) (int, []map[string]any, string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		h.devices(w, httptest.NewRequest(http.MethodGet, "/api/devices?format=page&"+query, nil))
+		var p struct {
+			Total int
+			Items []map[string]any
+		}
+		if w.Code != http.StatusOK {
+			t.Fatal(w.Body.String())
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p.Total, p.Items, w.Header().Get("ETag")
+	}
+	total, rows, historyTag := read("with_history=true")
+	if total != 1 || len(rows) != 1 || rows[0]["name"] != "Quiet client" || rows[0]["last_seen"] != lastQuery || rows[0]["total_queries_today"] != float64(0) {
+		t.Fatalf("DNS history view: %#v", rows)
+	}
+	if total, _, _ := read("active_today=true"); total != 0 {
+		t.Fatalf("active today = %d", total)
+	}
+	total, rows, allTag := read("with_history=false")
+	if total != 2 || len(rows) != 2 || rows[0]["name"] != "Imported client" || rows[0]["last_seen"] != nil || allTag == historyTag {
+		t.Fatalf("all known devices: %#v, total=%d", rows, total)
+	}
+	if _, err := h.store.DB.Exec(`
+		INSERT INTO dns_queries(timestamp, client_ip, device_id, domain, query_type, action, source)
+		SELECT ?, '192.0.2.20', id, 'new.example', 'A', 'allowed', 'upstream' FROM devices WHERE name = 'Imported client'
+	`, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	total, _, beforePurge := read("with_history=true")
+	if total != 2 {
+		t.Fatalf("after the imported client's first request, got %d devices", total)
+	}
+	if _, err := h.store.DB.Exec(`DELETE FROM dns_queries WHERE timestamp = ?`, lastQuery); err != nil {
+		t.Fatal(err)
+	}
+	total, rows, afterPurge := read("with_history=true")
+	if total != 1 || len(rows) != 1 || rows[0]["name"] != "Imported client" || beforePurge == afterPurge {
+		t.Fatalf("after history expired: %#v, total=%d", rows, total)
+	}
+}
+
 func TestDeviceInventoryCanFilterToActiveDevicesToday(t *testing.T) {
 	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
 	if err != nil {
@@ -193,5 +247,39 @@ func TestDeviceInventoryCanFilterToActiveDevicesToday(t *testing.T) {
 	}
 	if payload.Summary.Observed != 3 || payload.Summary.ActiveToday != 1 {
 		t.Fatalf("inventory summary = %#v, want observed=3 active_today=1", payload.Summary)
+	}
+}
+
+func TestAddresslessHistoryDoesNotUseDatabaseIDOrNewOwnersName(t *testing.T) {
+	h, _, input := troubleshootingFixture(t)
+	if _, err := h.store.DB.Exec(`INSERT INTO dns_queries(timestamp,client_ip,device_id,domain,query_type,action,source) VALUES(?,?,?,'quiet.example','A','allowed','upstream');
+		DELETE FROM device_addresses WHERE device_id=?;
+		INSERT INTO dns_records(hostname,type,value) VALUES('new-owner.home','A',?)`, time.Now().UTC().Format(time.RFC3339), input.ClientIP, input.DeviceID, input.DeviceID, input.ClientIP); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	h.devices(w, httptest.NewRequest(http.MethodGet, "/api/devices?format=page&with_history=true", nil))
+	var page struct {
+		Items   []map[string]any
+		Summary deviceInventorySummary
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 {
+		t.Fatal(w.Body.String())
+	}
+	item := page.Items[0]
+	if item["display_name"] != "Unnamed device" || item["client_ip"] != "" || item["last_query_ip"] != input.ClientIP || page.Summary.MostActiveName != "Unnamed device" {
+		t.Fatal(w.Body.String())
+	}
+	w = httptest.NewRecorder()
+	h.device(w, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/devices/id:%d", input.DeviceID), nil))
+	var detail map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail["display_name"] != "Unnamed device" || detail["client_ip"] != "" {
+		t.Fatal(w.Body.String())
 	}
 }

@@ -7,7 +7,7 @@ FROM --platform=$BUILDPLATFORM golang:1.23-bookworm AS go-build
 ARG TARGETOS
 ARG TARGETARCH
 ARG BUILDARCH
-ARG FARO_VERSION=0.11.0
+ARG FARO_VERSION=0.12.0
 
 WORKDIR /app
 COPY go.mod go.sum* ./
@@ -42,11 +42,12 @@ WORKDIR /app
 COPY frontend/package*.json ./
 RUN npm ci
 COPY frontend .
-RUN npm run build
+RUN npm run build && \
+    find dist/assets -type f \( -name '*.js' -o -name '*.css' \) -size +255c -exec gzip -9k {} +
 
 FROM debian:bookworm-slim
 
-ARG FARO_VERSION=0.11.0
+ARG FARO_VERSION=0.12.0
 
 LABEL org.opencontainers.image.title="Faro" \
       org.opencontainers.image.version="$FARO_VERSION" \

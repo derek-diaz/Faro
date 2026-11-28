@@ -82,6 +82,32 @@ func (handler *Handler) queries(responseWriter http.ResponseWriter, request *htt
 	writeRows(responseWriter, rows)
 }
 
+func (handler *Handler) event(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/api/events/"), 10, 64)
+	if err != nil || id <= 0 {
+		http.NotFound(w, r)
+		return
+	}
+	var record activityRecord
+	err = handler.store.DB.QueryRowContext(r.Context(), `
+    SELECT id, timestamp, type, severity, title, description, COALESCE(client_ip, ''), COALESCE(domain, ''), metadata, source
+    FROM events WHERE id = ?`, id).Scan(&record.recordID, &record.timestamp, &record.eventType, &record.severity,
+		&record.title, &record.description, &record.clientIP, &record.domain, &record.metadata, &record.source)
+	if err == sql.ErrNoRows {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "This event is no longer in Activity."})
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, eventRecordMap(record))
+}
+
 func (handler *Handler) events(responseWriter http.ResponseWriter, request *http.Request) {
 	if request.Method != http.MethodGet {
 		methodNotAllowed(responseWriter)
@@ -120,17 +146,12 @@ func (handler *Handler) events(responseWriter http.ResponseWriter, request *http
 		writeJSON(responseWriter, http.StatusOK, map[string]any{"items": items, "page": page, "page_size": pageSize, "has_more": hasMore})
 		return
 	}
-	counts, err := handler.cachedActivityCounts(request.Context(), search, window)
+	summary, err := handler.cachedActivitySummary(request.Context(), search, window)
 	if err != nil {
 		writeError(responseWriter, err)
 		return
 	}
-	timeline, err := activityTimelineFor(request.Context(), handler.store.DB, search, scope, window)
-	if err != nil {
-		writeError(responseWriter, err)
-		return
-	}
-	total := counts[scope]
+	total := summary.counts[scope]
 	totalPages := 0
 	if total > 0 {
 		totalPages = (total + pageSize - 1) / pageSize
@@ -149,8 +170,8 @@ func (handler *Handler) events(responseWriter http.ResponseWriter, request *http
 		"page_size":   pageSize,
 		"total":       total,
 		"total_pages": totalPages,
-		"counts":      counts,
-		"timeline":    timeline,
+		"counts":      summary.counts,
+		"timeline":    summary.timeline(scope),
 	})
 }
 
@@ -251,6 +272,16 @@ func (window activityWindow) cacheKey() string {
 func activityTimeClause(field string, window activityWindow) (string, []any) {
 	if !window.enabled {
 		return "", nil
+	}
+	if window.from.Nanosecond() == 0 && window.to.Nanosecond() == 0 {
+		// Bare second prefixes sort before both ".123Z" and "Z". Match both
+		// UTC encodings in stored history, keeping the indexed timestamp ranges.
+		const iso = "2006-01-02T15:04:05"
+		const sqlite = "2006-01-02 15:04:05"
+		return fmt.Sprintf("((%[1]s >= ? AND %[1]s < ? AND substr(%[1]s, 11, 1) = 'T') OR (%[1]s >= ? AND %[1]s < ? AND substr(%[1]s, 11, 1) = ' '))", field), []any{
+			window.from.Format(iso), window.to.Format(iso),
+			window.from.Format(sqlite), window.to.Format(sqlite),
+		}
 	}
 	return fmt.Sprintf("%s >= ? AND %s < ?", field, field), []any{
 		window.from.Format(time.RFC3339Nano),
@@ -535,13 +566,11 @@ type activityRecord struct {
 }
 
 type activityCountCacheEntry struct {
-	counts    map[string]int
+	summary   *activitySummary
 	expiresAt time.Time
 }
 
-// Counts do not need to change at query-ingest cadence. Keeping them for two
-// live refresh intervals prevents the activity page from rescanning history
-// on every five-second refresh while keeping the UI close to current.
+// Reuse the same aggregate when switching scopes within a live refresh interval.
 const activityCountCacheTTL = 10 * time.Second
 
 const (
@@ -557,7 +586,11 @@ const (
 	queryActionField      = "q.action"
 	querySourceField      = "q.source"
 	queryTimestampField   = "q.timestamp"
-	queryDeviceNameField  = "COALESCE(NULLIF(TRIM(a.name), ''), (SELECT NULLIF(TRIM(n.name), '') FROM device_names n WHERE n.device_id = a.id AND n.source = 'unifi'), (SELECT hostname FROM dns_records WHERE value = q.client_ip ORDER BY updated_at DESC, id DESC LIMIT 1), q.client_ip)"
+	queryDeviceNameField  = `COALESCE(
+		(SELECT COALESCE(NULLIF(TRIM(a.name), ''), (SELECT NULLIF(TRIM(n.name), '') FROM device_names n WHERE n.device_id = a.id AND n.source = 'unifi'))
+		 FROM devices a WHERE a.id = q.device_id),
+		(SELECT hostname FROM dns_records WHERE value = q.client_ip ORDER BY updated_at DESC, id DESC LIMIT 1),
+		q.client_ip)`
 )
 
 func activityRecords(ctx context.Context, database *sql.DB, limit, offset int, search, scope string, window activityWindow) ([]activityRecord, error) {
@@ -629,6 +662,12 @@ func activityEventRecordsPart(search string, window activityWindow) (string, []a
 
 // Older query history can contain addresses without a device_addresses row.
 const firstSeenDevices = `
+	WITH RECURSIVE observed_ips(ip) AS (
+		SELECT MIN(client_ip) FROM dns_queries
+		UNION ALL
+		SELECT (SELECT MIN(client_ip) FROM dns_queries WHERE client_ip > observed_ips.ip)
+		FROM observed_ips WHERE ip IS NOT NULL
+	)
 	SELECT da.address AS client_ip, da.first_seen_at AS timestamp,
 	       COALESCE(a.name, '') AS device_name, COALESCE(a.location, '') AS location
 	FROM device_addresses da
@@ -638,7 +677,7 @@ const firstSeenDevices = `
 	SELECT q.client_ip, MIN(q.timestamp), COALESCE(MAX(a.name), ''), COALESCE(MAX(a.location), '')
 	FROM dns_queries q
 	LEFT JOIN devices a ON a.id = q.device_id
-	WHERE q.client_ip IN (SELECT client_ip FROM dns_queries EXCEPT SELECT address FROM device_addresses)
+	WHERE q.client_ip IN (SELECT ip FROM observed_ips WHERE ip IS NOT NULL EXCEPT SELECT address FROM device_addresses)
 	GROUP BY q.client_ip`
 
 func firstSeenActivityQuery(columns, search string, window activityWindow) (string, []any) {
@@ -666,9 +705,8 @@ func activityQueryRecordsPart(search, scope string, window activityWindow) (stri
 		       q.latency_ms AS latency_ms, q.decision_reason AS decision_reason,
 		       q.decision_metadata AS decision_metadata,
 		       ` + queryDeviceNameField + ` AS device_name, '' AS location
-		FROM dns_queries q
-		LEFT JOIN devices a ON a.id = q.device_id`
-	clauses, args := activityFilterClauses(search, []string{queryDomainField, queryClientIPField, queryTypeField, queryActionField, querySourceField, queryDeviceNameField}, queryTimestampField, window)
+		FROM dns_queries q`
+	clauses, args := activityQueryFilterClauses(search, window)
 	switch scope {
 	case "cache":
 		clauses = append(clauses, `q.source = 'cache'`)
@@ -678,6 +716,24 @@ func activityQueryRecordsPart(search, scope string, window activityWindow) (stri
 		clauses = append(clauses, `q.action = 'blocked'`)
 	}
 	return activityWithClauses(query, "WHERE", clauses), args
+}
+
+func activityQueryFilterClauses(search string, window activityWindow) ([]string, []any) {
+	clauses, args := activityFilterClauses("", nil, queryTimestampField, window)
+	fields, values := activityLikeClause(search, queryDomainField, queryClientIPField, queryTypeField, queryActionField, querySourceField)
+	if fields == "" {
+		return clauses, args
+	}
+	// Check the small name directory once. Only resolve names on individual
+	// history rows if some directory entry can actually match the search.
+	const anyMatchingName = `EXISTS (SELECT 1 FROM (
+		SELECT name FROM devices UNION ALL SELECT name FROM device_names WHERE source = 'unifi'
+		UNION ALL SELECT hostname FROM dns_records
+	) WHERE name LIKE ?)`
+	clauses = append(clauses, "("+fields+" OR ("+anyMatchingName+" AND "+queryDeviceNameField+" LIKE ?))")
+	like := "%" + search + "%"
+	args = append(args, values...)
+	return clauses, append(args, like, like)
 }
 
 func activityFilterClauses(search string, fields []string, timeField string, window activityWindow) ([]string, []any) {
@@ -715,123 +771,118 @@ func activityRecordsUnionQuery(parts []string) string {
 	return strings.Replace(query, placeholder, "("+strings.Join(parts, ` UNION ALL `)+")", 1)
 }
 
-func activityTimelineFor(ctx context.Context, database *sql.DB, search, scope string, window activityWindow) (*activityTimeline, error) {
-	if !window.enabled {
-		return nil, nil
-	}
+type activityBucketCounts struct {
+	dns, cache, upstream, blocked, system int
+	cacheBlocked, upstreamBlocked         int
+}
 
-	from := window.from.Format(time.RFC3339Nano)
-	bucketSeconds := window.bucketSeconds
-	parts, args := activityTimelineParts(search, scope, window, from, bucketSeconds)
-	query := activityTimelineUnionQuery(parts)
+func (counts *activityBucketCounts) add(b activityBucketCounts) {
+	counts.dns += b.dns
+	counts.cache += b.cache
+	counts.upstream += b.upstream
+	counts.blocked += b.blocked
+	counts.system += b.system
+	counts.cacheBlocked += b.cacheBlocked
+	counts.upstreamBlocked += b.upstreamBlocked
+}
 
-	bucketDuration := time.Duration(window.bucketSeconds) * time.Second
-	bucketCount := int(window.to.Sub(window.from) / bucketDuration)
-	if window.to.Sub(window.from)%bucketDuration != 0 {
-		bucketCount++
-	}
-	if bucketCount < 1 {
-		bucketCount = 1
-	}
-	timeline := &activityTimeline{
-		From:          window.from.Format(time.RFC3339Nano),
-		To:            window.to.Format(time.RFC3339Nano),
-		BucketSeconds: window.bucketSeconds,
-		Buckets:       make([]activityTimelineBucket, bucketCount),
-	}
-	for index := range timeline.Buckets {
-		timeline.Buckets[index].Timestamp = window.from.Add(time.Duration(index) * bucketDuration).Format(time.RFC3339Nano)
-	}
+// Counts and all scope timelines come from the same snapshot. Source and
+// action overlap, so keep the blocked subset for cache and upstream separately.
+type activitySummary struct {
+	window  activityWindow
+	counts  map[string]int
+	buckets []activityBucketCounts
+}
 
+func loadActivitySummary(ctx context.Context, database *sql.DB, search string, window activityWindow) (*activitySummary, error) {
+	queryClauses, queryArgs := activityQueryFilterClauses(search, window)
+	eventClauses, eventArgs := activityFilterClauses(search, []string{eventTitleField, eventDescriptionField, eventTypeField, eventDomainField, eventClientIPField}, eventTimestampField, window)
+	events := activityWithClauses("SELECT e.timestamp FROM events e", "WHERE", eventClauses)
+	devices, deviceArgs := firstSeenActivityQuery("timestamp", search, window)
+
+	bucket := "0"
+	var bucketArgs []any
+	var group string
+	summary := &activitySummary{window: window}
+	if window.enabled {
+		// Round to SQLite's millisecond precision at exact bucket boundaries.
+		bucket = "CAST(ROUND((julianday(timestamp) - julianday(?)) * 86400000) AS INTEGER) / (? * 1000)"
+		bucketArgs = []any{window.from.Format(time.RFC3339Nano), window.bucketSeconds}
+		group = " GROUP BY bucket_index"
+		duration := time.Duration(window.bucketSeconds) * time.Second
+		summary.buckets = make([]activityBucketCounts, (window.to.Sub(window.from)+duration-1)/duration)
+	}
+	// Group DNS before combining it with system events. Unfiltered ranges can
+	// aggregate directly on a covering index, and only bucket totals cross the union.
+	dns := "SELECT " + bucket + ` AS bucket_index, COUNT(*),
+		COUNT(*) FILTER (WHERE source = 'cache'), COUNT(*) FILTER (WHERE source = 'upstream'),
+		COUNT(*) FILTER (WHERE action = 'blocked'), 0,
+		COUNT(*) FILTER (WHERE source = 'cache' AND action = 'blocked'),
+		COUNT(*) FILTER (WHERE source = 'upstream' AND action = 'blocked')
+		FROM dns_queries q`
+	system := "SELECT " + bucket + " AS bucket_index, 0, 0, 0, 0, COUNT(*), 0, 0 FROM (" + events + " UNION ALL " + devices + ")"
+	query := activityWithClauses(dns, "WHERE", queryClauses) + group + " UNION ALL " + system + group
+	args := append([]any{}, bucketArgs...)
+	args = append(args, queryArgs...)
+	args = append(args, bucketArgs...)
+	args = append(args, eventArgs...)
+	args = append(args, deviceArgs...)
 	rows, err := database.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer closeRows(rows)
+	var totals activityBucketCounts
 	for rows.Next() {
-		var index, total, blocked int
-		if err := rows.Scan(&index, &total, &blocked); err != nil {
+		var index int
+		var b activityBucketCounts
+		if err := rows.Scan(&index, &b.dns, &b.cache, &b.upstream, &b.blocked, &b.system, &b.cacheBlocked, &b.upstreamBlocked); err != nil {
 			return nil, err
 		}
-		if index >= 0 && index < len(timeline.Buckets) {
-			timeline.Buckets[index].Total = total
-			timeline.Buckets[index].Blocked = blocked
+		totals.add(b)
+		if index >= 0 && index < len(summary.buckets) {
+			summary.buckets[index].add(b)
 		}
 	}
-	return timeline, rows.Err()
-}
-
-func activityTimelineParts(search, scope string, window activityWindow, from string, bucketSeconds int) ([]string, []any) {
-	parts := make([]string, 0, 3)
-	args := make([]any, 0, 12)
-	if scope == "all" || scope == "system" {
-		eventPart, eventArgs := activityTimelineEventPart(search, window, from, bucketSeconds)
-		parts = append(parts, eventPart)
-		args = append(args, eventArgs...)
-		devicePart, deviceArgs := activityTimelineDevicePart(search, window, from, bucketSeconds)
-		parts = append(parts, devicePart)
-		args = append(args, deviceArgs...)
+	summary.counts = map[string]int{
+		"all": totals.dns + totals.system, "dns": totals.dns, "system": totals.system,
+		"cache": totals.cache, "upstream": totals.upstream, "blocked": totals.blocked,
 	}
-	if scope != "system" {
-		queryPart, queryArgs := activityTimelineQueryPart(search, scope, window, from, bucketSeconds)
-		parts = append(parts, queryPart)
-		args = append(args, queryArgs...)
+	return summary, rows.Err()
+}
+
+func (summary *activitySummary) timeline(scope string) *activityTimeline {
+	window := summary.window
+	if !window.enabled {
+		return nil
 	}
-	return parts, args
-}
-
-func activityTimelineEventPart(search string, window activityWindow, from string, bucketSeconds int) (string, []any) {
-	query := `SELECT faro_activity_bucket AS bucket_index, 1 AS total, 0 AS blocked FROM events e`
-	query = strings.Replace(query, "faro_activity_bucket", activityTimelineBucketExpression(eventTimestampField), 1)
-	args := []any{from, bucketSeconds}
-	clauses, clauseArgs := activityFilterClauses(search, []string{eventTitleField, eventDescriptionField, eventTypeField, eventDomainField, eventClientIPField}, eventTimestampField, window)
-	args = append(args, clauseArgs...)
-	return activityWithClauses(query, "WHERE", clauses), args
-}
-
-func activityTimelineDevicePart(search string, window activityWindow, from string, bucketSeconds int) (string, []any) {
-	columns := activityTimelineBucketExpression("timestamp") + " AS bucket_index, 1 AS total, 0 AS blocked"
-	query, args := firstSeenActivityQuery(columns, search, window)
-	return query, append([]any{from, bucketSeconds}, args...)
-}
-
-func activityTimelineQueryPart(search, scope string, window activityWindow, from string, bucketSeconds int) (string, []any) {
-	query := `
-		SELECT faro_activity_bucket AS bucket_index, 1 AS total,
-		       CASE WHEN q.action = 'blocked' THEN 1 ELSE 0 END AS blocked
-		FROM dns_queries q
-		LEFT JOIN devices a ON a.id = q.device_id`
-	if search == "" {
-		query = strings.Replace(query, "LEFT JOIN devices a ON a.id = q.device_id", "", 1)
+	timeline := &activityTimeline{
+		From:          window.from.Format(time.RFC3339Nano),
+		To:            window.to.Format(time.RFC3339Nano),
+		BucketSeconds: window.bucketSeconds,
+		Buckets:       make([]activityTimelineBucket, len(summary.buckets)),
 	}
-	query = strings.Replace(query, "faro_activity_bucket", activityTimelineBucketExpression(queryTimestampField), 1)
-	args := []any{from, bucketSeconds}
-	clauses, clauseArgs := activityFilterClauses(search, []string{queryDomainField, queryClientIPField, queryTypeField, queryActionField, querySourceField, queryDeviceNameField}, queryTimestampField, window)
-	args = append(args, clauseArgs...)
-	switch scope {
-	case "cache":
-		clauses = append(clauses, `q.source = 'cache'`)
-	case "upstream":
-		clauses = append(clauses, `q.source = 'upstream'`)
-	case "blocked":
-		clauses = append(clauses, `q.action = 'blocked'`)
+	for i, b := range summary.buckets {
+		total, blocked := b.dns+b.system, b.blocked
+		switch scope {
+		case "dns":
+			total = b.dns
+		case "cache":
+			total, blocked = b.cache, b.cacheBlocked
+		case "upstream":
+			total, blocked = b.upstream, b.upstreamBlocked
+		case "blocked":
+			total = b.blocked
+		case "system":
+			total, blocked = b.system, 0
+		}
+		timeline.Buckets[i] = activityTimelineBucket{
+			Timestamp: window.from.Add(time.Duration(i*window.bucketSeconds) * time.Second).Format(time.RFC3339Nano),
+			Total:     total,
+			Blocked:   blocked,
+		}
 	}
-	return activityWithClauses(query, "WHERE", clauses), args
-}
-
-func activityTimelineUnionQuery(parts []string) string {
-	const placeholder = "faro_activity_timeline"
-	query := `
-		SELECT bucket_index, COALESCE(SUM(total), 0), COALESCE(SUM(blocked), 0)
-		FROM faro_activity_timeline timeline
-		GROUP BY bucket_index
-		ORDER BY bucket_index`
-	return strings.Replace(query, placeholder, "("+strings.Join(parts, ` UNION ALL `)+")", 1)
-}
-
-func activityTimelineBucketExpression(field string) string {
-	// Round to SQLite's millisecond precision before assigning exact bucket boundaries.
-	return fmt.Sprintf("CAST(ROUND((julianday(%s) - julianday(?)) * 86400000) AS INTEGER) / (? * 1000)", field)
+	return timeline
 }
 
 func activityLikeClause(search string, fields ...string) (string, []any) {
@@ -948,94 +999,29 @@ func queryRecordMap(record activityRecord) map[string]any {
 	}
 }
 
-func activityCounts(ctx context.Context, database *sql.DB, search string, window activityWindow) (map[string]int, error) {
-	parts := make([]string, 0, 3)
-	args := make([]any, 0, 6)
-
-	eventPart := `SELECT 'event' AS kind, '' AS source, '' AS action FROM events e`
-	eventClauses, eventArgs := activityFilterClauses(search, []string{eventTitleField, eventDescriptionField, eventTypeField, eventDomainField, eventClientIPField}, eventTimestampField, window)
-	eventPart = activityWithClauses(eventPart, "WHERE", eventClauses)
-	parts = append(parts, eventPart)
-	args = append(args, eventArgs...)
-
-	devicePart, deviceArgs := activityDeviceCountPart(search, window)
-	parts = append(parts, devicePart)
-	args = append(args, deviceArgs...)
-
-	queryPart := `
-		SELECT 'query' AS kind, q.source, q.action
-		FROM dns_queries q
-		LEFT JOIN devices a ON a.id = q.device_id`
-	queryClauses, queryArgs := activityFilterClauses(search, []string{queryDomainField, queryClientIPField, queryTypeField, queryActionField, querySourceField, queryDeviceNameField}, queryTimestampField, window)
-	queryPart = activityWithClauses(queryPart, "WHERE", queryClauses)
-	parts = append(parts, queryPart)
-	args = append(args, queryArgs...)
-
-	query := activityCountsQuery(parts)
-	if search == "" {
-		history := activityWithClauses("FROM dns_queries q", "WHERE", queryClauses)
-		query = `SELECT COUNT(*),
-   COALESCE(SUM(q.source = 'cache'),0),
-   COALESCE(SUM(q.source = 'upstream'),0),
-   COALESCE(SUM(q.action = 'blocked'),0),
-   (SELECT COUNT(*) FROM (` + eventPart + ` UNION ALL ` + devicePart + `)) ` + history
-	}
-
-	var dns, cache, upstream, blocked, system int
-	if err := database.QueryRowContext(ctx, query, args...).Scan(&dns, &cache, &upstream, &blocked, &system); err != nil {
-		return nil, err
-	}
-	return map[string]int{
-		"all":      dns + system,
-		"dns":      dns,
-		"cache":    cache,
-		"upstream": upstream,
-		"blocked":  blocked,
-		"system":   system,
-	}, nil
-}
-
-func activityDeviceCountPart(search string, window activityWindow) (string, []any) {
-	return firstSeenActivityQuery("'device' AS kind, '' AS source, '' AS action", search, window)
-}
-
-func activityCountsQuery(parts []string) string {
-	const placeholder = "faro_activity_counts"
-	query := `
-		SELECT
-			COALESCE(SUM(CASE WHEN kind = 'query' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN kind = 'query' AND source = 'cache' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN kind = 'query' AND source = 'upstream' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN kind = 'query' AND action = 'blocked' THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN kind IN ('event', 'device') THEN 1 ELSE 0 END), 0)
-		FROM faro_activity_counts activity`
-	return strings.Replace(query, placeholder, "("+strings.Join(parts, ` UNION ALL `)+")", 1)
-}
-
-func (handler *Handler) cachedActivityCounts(ctx context.Context, search string, window activityWindow) (map[string]int, error) {
-	release, err := handler.readGate.acquire(ctx, "activity:"+search+"\x00"+window.cacheKey())
+func (handler *Handler) cachedActivitySummary(ctx context.Context, search string, window activityWindow) (*activitySummary, error) {
+	cacheKey := search + "\x00" + window.cacheKey()
+	release, err := handler.readGate.acquire(ctx, "activity:"+cacheKey)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
 	now := time.Now()
-	cacheKey := search + "\x00" + window.cacheKey()
 	handler.activityCountsMu.Lock()
 	if entry, ok := handler.activityCountsCache[cacheKey]; ok && now.Before(entry.expiresAt) {
-		counts := cloneActivityCounts(entry.counts)
 		handler.activityCountsMu.Unlock()
-		return counts, nil
+		return entry.summary, nil
 	}
 	generation := handler.activityCountsGeneration
 	handler.activityCountsMu.Unlock()
-	counts, err := activityCounts(ctx, handler.store.DB, search, window)
+	summary, err := loadActivitySummary(ctx, handler.store.DB, search, window)
 	if err != nil {
 		return nil, err
 	}
 	handler.activityCountsMu.Lock()
 	if generation != handler.activityCountsGeneration {
 		handler.activityCountsMu.Unlock()
-		return counts, nil
+		return summary, nil
 	}
 	if handler.activityCountsCache == nil {
 		handler.activityCountsCache = map[string]activityCountCacheEntry{}
@@ -1046,9 +1032,9 @@ func (handler *Handler) cachedActivityCounts(ctx context.Context, search string,
 			break
 		}
 	}
-	handler.activityCountsCache[cacheKey] = activityCountCacheEntry{counts: counts, expiresAt: now.Add(activityCountCacheTTL)}
+	handler.activityCountsCache[cacheKey] = activityCountCacheEntry{summary: summary, expiresAt: now.Add(activityCountCacheTTL)}
 	handler.activityCountsMu.Unlock()
-	return cloneActivityCounts(counts), nil
+	return summary, nil
 }
 
 func (handler *Handler) invalidateActivityCounts() {
@@ -1056,12 +1042,4 @@ func (handler *Handler) invalidateActivityCounts() {
 	handler.activityCountsCache = nil
 	handler.activityCountsGeneration++
 	handler.activityCountsMu.Unlock()
-}
-
-func cloneActivityCounts(counts map[string]int) map[string]int {
-	result := make(map[string]int, len(counts))
-	for key, value := range counts {
-		result[key] = value
-	}
-	return result
 }

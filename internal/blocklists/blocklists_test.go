@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -90,6 +91,48 @@ func TestInvalidRefreshPreservesLastKnownGoodEntries(t *testing.T) {
 	var domain string
 	if err := store.DB.QueryRow(`SELECT domain FROM blocklist_entries WHERE blocklist_id = ?`, id).Scan(&domain); err != nil || domain != "ads.example" {
 		t.Fatalf("last-known-good domain = %q, err = %v", domain, err)
+	}
+}
+
+func TestUnchangedRefreshOnlyUpdatesCheckTime(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "feed.txt")
+	if err := os.WriteFile(source, []byte("# feed\nb.example\na.example\nb.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := db.Open(filepath.Join(dir, "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	r, err := store.DB.Exec(`INSERT INTO blocklists(name, url, enabled) VALUES('test', ?, 1)`, "file://"+source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := r.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh := Refresher{Store: store}
+	applies := 0
+	apply := func(context.Context) error { applies++; return nil }
+	if n, err := refresh.RefreshAndApply(context.Background(), id, apply); err != nil || n != 2 || applies != 1 {
+		t.Fatalf("first refresh: entries=%d, applies=%d, error=%v", n, applies, err)
+	}
+	const old = "2000-01-01 00:00:00"
+	if _, err := store.DB.Exec(`UPDATE blocklists SET last_refreshed_at=?, updated_at=? WHERE id=?;
+		CREATE TRIGGER no_rewrite BEFORE DELETE ON blocklist_entries BEGIN SELECT RAISE(ABORT, 'unexpected rewrite'); END`, old, old, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("a.example\nb.example\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := refresh.RefreshAndApply(context.Background(), id, apply); err != nil || n != 2 || applies != 1 {
+		t.Fatalf("unchanged refresh: entries=%d, applies=%d, error=%v", n, applies, err)
+	}
+	var checked, updated string
+	if err := store.DB.QueryRow(`SELECT last_refreshed_at, updated_at FROM blocklists WHERE id=?`, id).Scan(&checked, &updated); err != nil || checked == old || updated != old {
+		t.Fatalf("checked=%q updated=%q error=%v", checked, updated, err)
 	}
 }
 

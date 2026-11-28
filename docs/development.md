@@ -84,7 +84,7 @@ For history-query performance changes, run:
 go test ./internal/api/handlers -run '^$' -bench BenchmarkHistoryReads -benchtime=3x -count=1
 ```
 
-That benchmark measures local handler/database work, not browser speed or real-world network latency.
+That benchmark measures local handler and database work. For the paired backend measurements and mobile and desktop browser timings, see the [Faro performance benchmarks](performance-benchmarks.md).
 
 ## 5. Stop the stack
 

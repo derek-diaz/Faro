@@ -1,0 +1,71 @@
+@layer components {
+  .overview-headline { display: inline-flex; align-items: baseline; gap: .5rem; color: var(--ink); font-size: .9375rem; font-weight: 500; }
+  .overview-headline::before { content: ""; width: .48rem; height: .48rem; flex: none; align-self: center; border-radius: 50%; background: var(--text-soft); }
+  .overview-headline.healthy::before { background: var(--accent); }
+  .overview-headline.warning::before { background: var(--warn); }
+  .dashboard-home { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .dashboard-home h2 { margin: 0; color: var(--ink); font-size: 1rem; font-weight: 600; }
+  .dashboard-home :where(button, a):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .home-attention, .home-connect-intro { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .home-attention { padding: 12px 18px; border-radius: 12px; background: var(--warn-soft); color: var(--ink); }
+  .home-attention > svg { color: var(--warn); }
+  .home-attention p, .home-connect-intro > div { flex: 1 1 12rem; margin: 0; }
+  .home-first-device { padding: 20px; }
+  .home-connect-intro > svg, .home-troubleshoot > svg:first-child { color: var(--accent); }
+  .home-connect-intro p, .home-discoveries > p { margin: 4px 0 0; color: var(--text-muted); font-size: .875rem; line-height: 1.55; }
+  .home-today { display: flex; align-items: center; gap: clamp(22px, 4vw, 68px); border-bottom: 1px solid var(--border); padding: 2px 0 18px; }
+  .home-today dl { display: flex; align-items: baseline; gap: clamp(24px, 5vw, 88px); margin: 0; }
+  .home-today dt { color: var(--text-muted); font-size: .8125rem; }
+  .home-today dd { margin: 3px 0 0; color: var(--ink); font-weight: 600; font-size: 1.5625rem; letter-spacing: -.025em; font-variant-numeric: tabular-nums; }
+  .home-today dd small { font-size: .75rem; font-weight: 500; color: var(--text-muted); letter-spacing: 0; }
+  .home-workspace { display: grid; gap: 12px 18px; min-width: 0; align-items: start; grid-template-columns: minmax(0, 1.9fr) minmax(245px, 1fr); grid-template-rows: auto auto 1fr; grid-template-areas: "traffic changes" "traffic help" "traffic providers"; }
+  .home-workspace > * { min-width: 0; }
+  .home-before-traffic { display: flex; flex-direction: column; gap: 14px; }
+  .home-workspace .home-traffic { grid-area: traffic; }
+  .home-discoveries { grid-area: changes; padding: 18px 20px; }
+  .home-workspace > .home-providers { grid-area: providers; }
+  .home-workspace .chart-legend { font-size: .75rem; }
+  .home-discoveries h2 { margin-bottom: 10px; }
+  .home-discovery-row, .home-troubleshoot, .home-provider-disclosure { display: flex; align-items: center; width: 100%; min-height: 44px; gap: 12px; border: 0; font: inherit; color: var(--ink); background: transparent; cursor: pointer; text-align: left; }
+  .home-discovery-row { border-top: 1px solid var(--border-subtle); padding: 9px 0; }
+  .home-discovery-row > svg, .home-provider-disclosure > svg { color: var(--text-muted); flex-shrink: 0; }
+  .home-discovery-row > span, .home-troubleshoot > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .home-discovery-row strong, .home-discovery-row small { display: block; }
+  .home-discovery-row strong { font-size: .875rem; font-weight: 550; }
+  .home-discovery-row small { font-size: .75rem; color: var(--text-muted); margin-top: 2px; }
+  .home-troubleshoot { grid-area: help; padding: 12px 16px; border: 1px solid var(--border); background: var(--surface); border-radius: 12px; font-weight: 550; font-size: .875rem; }
+  .home-troubleshoot:hover, .home-discovery-row:hover, .home-provider-disclosure:hover { color: var(--accent); background-color: var(--surface-muted); }
+  .home-providers { padding: 0; min-width: 0; }
+  .home-provider-disclosure { padding: 14px 18px; border-radius: 12px; font-weight: 550; }
+  .home-provider-disclosure small { flex: 1; font-size: .8125rem; font-weight: 450; color: var(--text-muted); }
+  .home-provider-disclosure svg:last-child { margin-left: auto; }
+  .home-provider-disclosure[aria-expanded="true"] svg:last-child { transform: rotate(180deg); }
+  #home-provider-details { padding: 0 18px 14px; }
+  .home-provider { display: grid; align-items: start; grid-template-columns: 24px 1fr; gap: 12px; border-top: 1px solid var(--border-subtle); padding: 14px 0; }
+  .home-provider > :first-child { width: 22px; height: 22px; }
+  .home-provider > div { display: grid; gap: 4px; min-width: 0; }
+  .home-provider strong, .home-cache-detail strong { color: var(--ink); font-size: .875rem; }
+  .home-provider code, .home-provider-address span, .home-cache-detail span, #home-provider-details > p { color: var(--text-muted); font-size: .8125rem; overflow-wrap: anywhere; }
+  .home-provider-address { display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap; }
+  .home-provider-address .unavailable { color: var(--blocked); }
+  .home-cache-detail { display: grid; gap: 4px; border-top: 1px solid var(--border-subtle); padding-top: 12px; }
+  .home-provider-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; }
+  @media (max-width: 760px) {
+    .dashboard-home { gap: 14px; }
+    .home-today { display: block; padding-bottom: 14px; }
+    .home-today dl { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 10px; }
+    .home-today dd { font-size: 1.25rem; }
+    .home-today dd small { display: block; }
+    .app-shell:has(.dashboard-home) { grid-template-rows: auto 1fr; }
+    .home-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto; grid-template-areas: "help" "traffic" "changes" "providers"; }
+    .home-first-device, .home-discoveries { padding: 16px; }
+    .home-connect-intro { display: grid; grid-template-columns: auto 1fr; align-items: start; }
+    .home-connect-intro > button { grid-column: 2; justify-self: start; }
+    .home-provider-disclosure { gap: 8px; padding-inline: 14px; }
+    .dashboard-home .dashboard-activity-table { width: 100%; min-width: 0; table-layout: fixed; }
+    .dashboard-home .dashboard-activity-table :is(th, td):is(:first-child, :nth-child(5), :nth-child(6)) { display: none; }
+    .dashboard-home .dashboard-activity-table :is(th, td):nth-child(2) { width: 23%; }
+    .dashboard-home .dashboard-activity-table :is(th, td) { padding-inline: 6px; overflow-wrap: anywhere; }
+    .dashboard-home .dashboard-activity-table button { max-width: 100%; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+  }
+}

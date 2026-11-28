@@ -30,7 +30,7 @@ Faro encrypts the stored API key and does not display it again. It accepts local
 ## 3. Check the result
 
 1. Check **Devices synchronized** and **Last synchronized**.
-2. Open **Devices** and inspect imported names and addresses.
+2. Open **Devices** and choose **All known devices** to inspect imported names and addresses, including clients with no DNS history.
 3. Use **Sync now** if you want an immediate refresh. Otherwise synchronization runs about once per minute.
 
 Manual Faro names and device choices take precedence over imported suggestions. Traffic and blocking still come from DNS requests Faro observes.

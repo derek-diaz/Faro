@@ -4,9 +4,7 @@
 @import "./styles.css" layer(legacy);
 @import "./modern.css";
 @import "./controls.css";
-@import "./components/navigation.css";
 @import "./components/onboarding.css";
-@import "./pages/protection-creation.css";
 
 @custom-variant dark (&:where([data-theme-resolved="dark"], [data-theme-resolved="dark"] *));
 

@@ -1,6 +1,6 @@
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { Check, Eye, EyeOff, LockKeyhole, LogIn, Network, ShieldCheck, UserRound } from "lucide-react";
+import { CheckCircle2, Circle, Eye, EyeOff, LockKeyhole, LogIn, Network, ShieldCheck, UserRound } from "lucide-react";
 import { useState, type SubmitEvent } from "react";
 import type { ThemeMode } from "../theme";
 import { AppearanceMenu } from "./AppearanceMenu";
@@ -161,7 +161,7 @@ function PasswordField({ mode, password, setPassword, visible, setVisible }: Pas
   return (
     <label>
       <span>Password</span>
-      <div className="auth-input"><LockKeyhole size={18} /><Input variant="embedded" type={inputType} autoComplete={mode === "setup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} required minLength={mode === "setup" ? 8 : undefined} /><Button variant="ghost" size="icon" className="auth-password-toggle size-11 self-stretch rounded-none" type="button" onClick={() => setVisible(!visible)} aria-label={visibilityLabel}>{visible ? <EyeOff size={18} /> : <Eye size={18} />}</Button></div>
+      <div className="auth-input"><LockKeyhole size={18} /><Input variant="embedded" type={inputType} autoComplete={mode === "setup" ? "new-password" : "current-password"} value={password} onChange={(event) => setPassword(event.target.value)} required minLength={mode === "setup" ? 8 : undefined} aria-describedby={mode === "setup" ? "setup-password-length" : undefined} /><Button variant="ghost" size="icon" className="auth-password-toggle size-11 self-stretch rounded-none" type="button" onClick={() => setVisible(!visible)} aria-label={visibilityLabel}>{visible ? <EyeOff size={18} /> : <Eye size={18} />}</Button></div>
     </label>
   );
 }
@@ -180,14 +180,22 @@ function SetupPasswordFields({ confirmation, setConfirmation, visible, passwordL
     <>
       <label>
         <span>Confirm password</span>
-        <div className="auth-input"><LockKeyhole size={18} /><Input variant="embedded" type={inputType} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required minLength={8} /></div>
+        <div className="auth-input"><LockKeyhole size={18} /><Input variant="embedded" type={inputType} autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} required minLength={8} aria-describedby="setup-password-match" /></div>
       </label>
-      <div className="password-requirements" aria-label="Password requirements">
-        <span className={passwordLongEnough ? "met" : ""}><Check size={13} /> 8 or more characters</span>
-        <span className={passwordsMatch ? "met" : ""}><Check size={13} /> Passwords match</span>
-      </div>
+      <ul className="setup-password-requirements" aria-label="Password requirements">
+        <PasswordRequirement id="setup-password-length" met={passwordLongEnough} label="8 or more characters" />
+        <PasswordRequirement id="setup-password-match" met={passwordsMatch} label="Passwords match" />
+      </ul>
     </>
   );
+}
+
+function PasswordRequirement({ id, met, label }: { readonly id: string; readonly met: boolean; readonly label: string }) {
+  const Icon = met ? CheckCircle2 : Circle;
+  return <li id={id} className={met ? "met" : undefined} aria-live="polite" aria-atomic="true">
+    <Icon size={14} aria-hidden="true" />
+    {label}<span className="sr-only">{met ? " (requirement met)" : " (requirement unmet)"}</span>
+  </li>;
 }
 
 function SubmitButton({ mode, busy }: Readonly<Pick<AuthLayoutProps, "mode" | "busy">>) {
@@ -244,6 +252,18 @@ function LoginRail() {
   );
 }
 
-export function AuthLoading({ themeMode, onThemeModeChange }: Pick<AuthScreenProps, "themeMode" | "onThemeModeChange">) {
-  return <main className="auth-shell auth-loading-shell"><AppearanceMenu className="public-appearance-control" themeMode={themeMode} onThemeModeChange={onThemeModeChange} /><div className="auth-loading"><BrandLogo /><strong>Faro</strong><span>Checking local session...</span></div></main>;
+type AuthLoadingProps = Pick<AuthScreenProps, "themeMode" | "onThemeModeChange"> & { readonly onRetry?: () => void };
+
+export function AuthLoading({ themeMode, onThemeModeChange, onRetry }: AuthLoadingProps) {
+  return <main className="auth-shell auth-loading-shell">
+    <AppearanceMenu className="public-appearance-control" themeMode={themeMode} onThemeModeChange={onThemeModeChange} />
+    <div className="auth-loading">
+      <BrandLogo />
+      {onRetry ? <>
+        <h1>Faro couldn’t connect</h1>
+        <p role="alert">Check that the Faro server is running and reachable from this device.</p>
+        <Button type="button" onClick={onRetry} autoFocus>Try again</Button>
+      </> : <><strong>Faro</strong><span role="status">Checking local session…</span></>}
+    </div>
+  </main>;
 }

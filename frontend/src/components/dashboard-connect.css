@@ -1,0 +1,23 @@
+@layer components {
+  .dashboard-connect-guide {
+    display: grid;
+    gap: 12px;
+    min-width: 0;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--ink);
+    font-size: .875rem;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
+  }
+  .dashboard-connect-guide h3 { margin: 0; font-size: 1rem; }
+  .dashboard-connect-guide p, .dashboard-connect-guide ol { margin: 0; }
+  .dashboard-connect-guide > p, .dashboard-connect-guide ol, .dashboard-connect-feedback { max-width: 68ch; color: var(--text-muted); }
+  .dashboard-connect-guide .dns-address-display { width: min(100%, 29rem); }
+  .dashboard-connect-guide ol { display: grid; gap: 6px; padding-inline-start: 1.4em; }
+  .dashboard-connect-guide li::marker, .dashboard-connect-feedback strong { color: var(--ink); font-weight: 650; }
+  .dashboard-connect-guide > a { justify-self: start; color: var(--accent); text-decoration: underline; text-underline-offset: .15em; }
+  .dashboard-connect-guide > button { justify-self: start; }
+  .dashboard-connect-feedback:empty { margin-top: -12px; }
+}

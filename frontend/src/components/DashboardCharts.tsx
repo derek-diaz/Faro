@@ -16,13 +16,17 @@ import {
 import { Bar, Line } from "react-chartjs-2";
 import { useMemo } from "react";
 import { useChartColors } from "../lib/use-chart-colors";
-import type { ReplayBucket } from "../api/client";
+import type { ReplayBucket, TrafficHour } from "../api/client";
+import { trafficAxisLabel, trafficHourCounts, trafficHourLabel } from "../utils/trafficHours";
 
 ChartJS.register(BarController, BarElement, CategoryScale, Filler, LineController, LineElement, LinearScale, PointElement, Tooltip);
 
 type TrafficChartCanvasProps = {
   readonly activity: number[];
   readonly blocked: number[];
+  readonly hours?: TrafficHour[];
+  readonly selectedIndex?: number;
+  readonly onSelect?: (index: number) => void;
 };
 
 type SparklineCanvasProps = {
@@ -45,18 +49,19 @@ type ReplayBarGeometry = {
 
 const pointCount = 24;
 const labels = Array.from({ length: pointCount }, (_, index) => String(index));
-export function TrafficChartCanvas({ activity, blocked }: TrafficChartCanvasProps) {
+export function TrafficChartCanvas({ activity, blocked, hours, selectedIndex = 0, onSelect }: TrafficChartCanvasProps) {
   const colors = useChartColors();
+  const selected = hours?.[selectedIndex];
   const data = useMemo<ChartData<"line", number[], string>>(() => ({
-    labels,
+    labels: hours?.map(trafficAxisLabel) ?? labels,
     datasets: [
       {
         label: "Total",
-        data: normalizeSeries(activity),
+        data: hours ? hours.map((hour) => hour.total) : normalizeSeries(activity),
         borderColor: colors.accent,
         backgroundColor: colors.fill,
         borderWidth: 2.5,
-        pointRadius: 0,
+        pointRadius: hours ? hours.map((_, i) => i === selectedIndex ? 4 : 0) : 0,
         pointHoverRadius: 4,
         pointHoverBackgroundColor: colors.accent,
         pointHoverBorderColor: colors.surface,
@@ -66,11 +71,11 @@ export function TrafficChartCanvas({ activity, blocked }: TrafficChartCanvasProp
       },
       {
         label: "Blocked",
-        data: normalizeSeries(blocked),
+        data: hours ? hours.map((hour) => hour.blocked) : normalizeSeries(blocked),
         borderColor: colors.blocked,
         backgroundColor: "transparent",
         borderWidth: 2.5,
-        pointRadius: 0,
+        pointRadius: hours ? hours.map((_, i) => i === selectedIndex ? 4 : 0) : 0,
         pointHoverRadius: 4,
         pointHoverBackgroundColor: colors.blocked,
         pointHoverBorderColor: colors.surface,
@@ -79,20 +84,26 @@ export function TrafficChartCanvas({ activity, blocked }: TrafficChartCanvasProp
         fill: false
       }
     ]
-  }), [activity, blocked, colors]);
+  }), [activity, blocked, colors, hours, selectedIndex]);
 
   const options = useMemo<ChartOptions<"line">>(() => ({
     responsive: true,
     maintainAspectRatio: false,
     animation: false,
     interaction: { intersect: false, mode: "index" },
+    onClick: (_event, points) => {
+      if (points.length) onSelect?.(points[0].index);
+    },
     layout: { padding: { top: 5, right: 8, bottom: 0, left: 0 } },
     plugins: {
       legend: { display: false },
       tooltip: {
         displayColors: true,
         callbacks: {
-          title: (items) => formatTimeLabel(items[0]?.dataIndex ?? 0),
+          title: (items) => {
+            const index = items[0]?.dataIndex ?? 0;
+            return hours ? trafficHourLabel(hours[index]) : formatTimeLabel(index);
+          },
           label: (context) => `${context.dataset.label}: ${Number(context.parsed.y).toLocaleString()}`
         }
       }
@@ -104,9 +115,10 @@ export function TrafficChartCanvas({ activity, blocked }: TrafficChartCanvasProp
         ticks: {
           color: colors.axis,
           maxRotation: 0,
-          autoSkip: false,
+          autoSkip: Boolean(hours),
+          maxTicksLimit: hours ? 4 : undefined,
           font: { size: 10, weight: 600 },
-          callback: (_value, index) => formatTimeLabel(index)
+          callback: (_value, index) => hours ? trafficAxisLabel(hours[index]) : formatTimeLabel(index)
         }
       },
       y: {
@@ -122,14 +134,34 @@ export function TrafficChartCanvas({ activity, blocked }: TrafficChartCanvasProp
         }
       }
     }
-  }), [colors]);
+  }), [colors, hours, onSelect]);
 
   return (
     <Line
-      aria-label="Queries and blocked requests over the last 24 hours"
+      aria-label={selected ? "DNS traffic by hour" : "Queries and blocked requests over the last 24 hours"}
+      aria-valuemin={selected ? 1 : undefined}
+      aria-valuemax={hours?.length}
+      aria-valuenow={selected ? selectedIndex + 1 : undefined}
+      aria-valuetext={selected && `${trafficHourLabel(selected)}, ${trafficHourCounts(selected)}`}
+      tabIndex={selected ? 0 : undefined}
+      onKeyDown={(event) => {
+        if (!hours || !onSelect) return;
+        let index: number;
+        switch (event.key) {
+          case "ArrowLeft":
+          case "ArrowDown": index = Math.max(0, selectedIndex - 1); break;
+          case "ArrowRight":
+          case "ArrowUp": index = Math.min(hours.length - 1, selectedIndex + 1); break;
+          case "Home": index = 0; break;
+          case "End": index = hours.length - 1; break;
+          default: return;
+        }
+        event.preventDefault();
+        onSelect(index);
+      }}
       data={data}
       options={options}
-      role="img"
+      role={selected ? "slider" : "img"}
       fallbackContent={<span>Traffic chart unavailable.</span>}
     />
   );

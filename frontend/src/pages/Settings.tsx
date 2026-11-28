@@ -3,8 +3,8 @@ import { Checkbox } from "../components/ui/checkbox";
 import { Textarea } from "../components/ui/textarea";
 import { Input } from "../components/ui/input";
 import { Button } from "../components/ui/button";
-import { AlertTriangle, Cable, Check, CheckCircle2, Clock3, Code2, Cpu, Database, Download, Eye, EyeOff, FileArchive, Gauge, Globe2, HardDrive, Image, KeyRound, LockKeyhole, Network, RefreshCw, RotateCw, Save, Server, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode, type SubmitEvent } from "react";
+import { AlertTriangle, Cable, Check, CheckCircle2, ChevronLeft, ChevronRight, Clock3, Code2, Cpu, Database, Download, Eye, EyeOff, FileArchive, Gauge, Globe2, HardDrive, Image, KeyRound, LockKeyhole, Network, RefreshCw, RotateCw, Router, Save, Server, ShieldCheck, Trash2, Upload, UserRound } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode, type SubmitEvent } from "react";
 import { api, type CoreDNSDiagnosticFile, type CoreDNSDiagnostics, type MaintenanceStatus, type PruneResult, type Setting } from "../api/client";
 import { LoadingState } from "../components/LoadingState";
 import { RedundancySettings } from "../components/RedundancySettings";
@@ -15,13 +15,27 @@ type SettingsProps = {
   readonly settings: Setting[];
   readonly refresh: () => Promise<void>;
   readonly onManageUpstreams: () => void;
+  readonly onManageLocalNames: () => void;
 };
 
 type SettingsTab = "general" | "redundancy" | "integrations" | "data" | "advanced" | "account";
 type ActionState = "idle" | "working" | "done" | "error";
 
-export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps) {
-  const [tab, setTab] = useState<SettingsTab>(() => window.location.hash === "#redundancy" ? "redundancy" : "general");
+const sections = [
+  { id: "general", label: "DNS & interface", description: "Local domain, network access, and cache.", icon: Gauge },
+  { id: "data", label: "Health & data", description: "Service health, retention, and backups.", icon: Database },
+  { id: "advanced", label: "Advanced", description: "DNS configuration and diagnostic files.", icon: Code2 },
+  { id: "redundancy", label: "Redundancy", description: "Pair a backup server and check replication.", icon: Network },
+  { id: "integrations", label: "Integrations", description: "Connect Faro to your UniFi network.", icon: Cable },
+  { id: "account", label: "Account", description: "Change your sign-in password.", icon: UserRound }
+] as const;
+
+function sectionFromHash() {
+  return sections.find((section) => `#${section.id}` === window.location.hash)?.id ?? null;
+}
+
+export function Settings({ settings, refresh, onManageUpstreams, onManageLocalNames }: SettingsProps) {
+  const [section, setSection] = useState<SettingsTab | null>(sectionFromHash);
   const [form, setForm] = useState<Record<string, string>>({});
   const [actionState, setActionState] = useState<ActionState>("idle");
   const [message, setMessage] = useState("");
@@ -38,6 +52,27 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
   const [advancedNetworkOpen, setAdvancedNetworkOpen] = useState(false);
 
   useEffect(() => {
+    function syncSection() {
+      setSection(sectionFromHash());
+      setMessage("");
+    }
+    window.addEventListener("popstate", syncSection);
+    window.addEventListener("hashchange", syncSection);
+    return () => {
+      window.removeEventListener("popstate", syncSection);
+      window.removeEventListener("hashchange", syncSection);
+    };
+  }, []);
+
+  function openSection(next: SettingsTab | null) {
+    const url = new URL(window.location.href);
+    url.hash = next ?? "";
+    if (url.href !== window.location.href) window.history.pushState(null, "", url);
+    setSection(next);
+    setMessage("");
+  }
+
+  useEffect(() => {
     const values = Object.fromEntries(settings.map((setting) => [setting.key, setting.value]));
     setForm(values);
     const days = Number(values.retention_days || 30);
@@ -45,8 +80,8 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
   }, [settings]);
 
   useEffect(() => {
-    void loadMaintenance();
-  }, []);
+    if (section === "data") void loadMaintenance();
+  }, [section]);
 
   const upstreams = useMemo(
     () => (form.upstream_dns ?? "").split(",").map((value) => value.trim()).filter(Boolean),
@@ -152,20 +187,16 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
   }
 
   return <SettingsWorkspace
-    tab={tab}
-    setTab={(nextTab) => {
-      setTab(nextTab);
-      setMessage("");
-      if (window.location.hash === "#redundancy" && nextTab !== "redundancy") {
-        window.history.replaceState(window.history.state, "", window.location.pathname + window.location.search);
-      }
-    }}
+    tab={section ?? "general"}
+    directory={section === null}
+    setTab={openSection}
     message={message}
     actionState={actionState}
     form={form}
     setForm={setForm}
     upstreams={upstreams}
     onManageUpstreams={onManageUpstreams}
+    onManageLocalNames={onManageLocalNames}
     reloadDNS={() => void reloadDNS()}
     saveGeneral={saveGeneral}
     advancedNetworkOpen={advancedNetworkOpen}
@@ -196,13 +227,15 @@ export function Settings({ settings, refresh, onManageUpstreams }: SettingsProps
 
 type SettingsWorkspaceProps = {
   readonly tab: SettingsTab;
-  readonly setTab: (tab: SettingsTab) => void;
+  readonly directory: boolean;
+  readonly setTab: (tab: SettingsTab | null) => void;
   readonly message: string;
   readonly actionState: ActionState;
   readonly form: Record<string, string>;
   readonly setForm: (form: Record<string, string>) => void;
   readonly upstreams: string[];
   readonly onManageUpstreams: () => void;
+  readonly onManageLocalNames: () => void;
   readonly reloadDNS: () => void;
   readonly saveGeneral: (event: SubmitEvent) => Promise<void>;
   readonly advancedNetworkOpen: boolean;
@@ -231,8 +264,48 @@ type SettingsWorkspaceProps = {
 };
 
 function SettingsWorkspace(props: SettingsWorkspaceProps) {
-  const { tab, setTab, message, actionState } = props;
-  return <Tabs value={tab} onValueChange={(value) => setTab(value as SettingsTab)} className="settings-workspace"><TabsList className="settings-tabs"  aria-label="Settings sections"><TabsTrigger value="general"     ><Gauge size={16} /> DNS & interface</TabsTrigger><TabsTrigger value="data"     ><Database size={16} /> Health & data</TabsTrigger><TabsTrigger value="advanced"     ><Code2 size={16} /> Advanced</TabsTrigger><TabsTrigger value="redundancy"     ><Network size={16} /> Redundancy</TabsTrigger><TabsTrigger value="integrations"     ><Cable size={16} /> Integrations</TabsTrigger><TabsTrigger value="account"     ><UserRound size={16} /> Account</TabsTrigger></TabsList>{message && <div role={actionState === "error" ? "alert" : "status"} className={`settings-feedback ${actionState === "error" ? "error" : "success"}`}>{actionState === "error" ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}<span>{message}</span></div>}<TabsContent value={tab}><SettingsTabContent {...props} /></TabsContent></Tabs>;
+  const { tab, directory, setTab, message, actionState } = props;
+  const backLink = useRef<HTMLAnchorElement>(null);
+  const lastRow = useRef<SettingsTab | null>(null);
+  const directoryLinks = useRef<HTMLElement>(null);
+  useEffect(() => {
+    if (!window.matchMedia("(max-width: 700px)").matches) return;
+    if (directory && lastRow.current) {
+      directoryLinks.current?.querySelector<HTMLAnchorElement>(`[href="#${lastRow.current}"]`)?.focus();
+    } else if (!directory) {
+      lastRow.current = tab;
+      backLink.current?.focus();
+    }
+  }, [directory, tab]);
+
+  function follow(event: MouseEvent<HTMLAnchorElement>, navigate: () => void) {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    navigate();
+  }
+
+  const rows = [
+    ...sections.slice(0, 1),
+    { id: "upstreams", label: "DNS providers", description: "Choose where Faro sends public DNS requests.", icon: Server } as const,
+    { id: "records", label: "Local names", description: "Give devices and services local DNS names.", icon: Router } as const,
+    ...sections.slice(1)
+  ];
+  return <Tabs value={tab} onValueChange={(value) => setTab(value as SettingsTab)} className={`settings-workspace ${directory ? "settings-directory-open" : ""}`}>
+    <TabsList className="settings-tabs" aria-label="Settings sections">
+      {sections.map(({ id, label, icon: Icon }) => <TabsTrigger key={id} value={id}><Icon size={16} />{label}</TabsTrigger>)}
+    </TabsList>
+    {directory ? <nav ref={directoryLinks} className="settings-directory" aria-label="Settings sections">
+      {rows.map(({ id, label, description, icon: Icon }) => {
+        const href = id === "upstreams" ? "/upstreams" : id === "records" ? "/local-dns" : `#${id}`;
+        const navigate = id === "upstreams" ? props.onManageUpstreams : id === "records" ? props.onManageLocalNames : () => setTab(id);
+        return <a key={id} href={href} onClick={(event) => follow(event, navigate)}>
+          <Icon size={19} aria-hidden="true" /><span><strong>{label}</strong><small>{description}</small></span><ChevronRight size={16} aria-hidden="true" />
+        </a>;
+      })}
+    </nav> : <a ref={backLink} className="settings-directory-back" href="/settings" onClick={(event) => follow(event, () => setTab(null))}><ChevronLeft size={16} />All settings</a>}
+    {message && <div role={actionState === "error" ? "alert" : "status"} className={`settings-feedback ${actionState === "error" ? "error" : "success"}`}>{actionState === "error" ? <AlertTriangle size={16} /> : <CheckCircle2 size={16} />}<span>{message}</span></div>}
+    <TabsContent value={tab} className="settings-section-content"><SettingsTabContent {...props} /></TabsContent>
+  </Tabs>;
 }
 
 function SettingsTabContent(props: SettingsWorkspaceProps) {

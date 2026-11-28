@@ -1,6 +1,12 @@
 @layer components {
+  .auth-loading { max-width: 32rem; padding: 24px; color: var(--ink); text-align: center; }
+  .auth-loading h1 { margin: 12px 0 0; font-size: 1.5rem; }
+  .auth-loading p { margin: 0 0 12px; color: var(--text-muted); line-height: 1.6; }
+  .setup-password-requirements { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: -6px 0 0; padding: 0; list-style: none; }
+  .setup-password-requirements li { display: inline-flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: .75rem; font-weight: 600; }
+  .setup-password-requirements li.met, .onboarding-guided .onboarding-step > header > span { color: var(--accent); }
   .onboarding-guided .onboarding-step { grid-template-rows: none; gap: 22px; min-height: 0; background: var(--surface); }
-  .onboarding-guided .onboarding-step > header h1, .onboarding-guided .onboarding-choice-copy strong, .onboarding-guided .onboarding-review h2, .onboarding-guided .onboarding-review > aside strong, .onboarding-guided .onboarding-connect-heading strong { color: var(--ink); }
+  .onboarding-guided .onboarding-step > header h1, .onboarding-guided .onboarding-choice-copy strong, .onboarding-guided .onboarding-toggle-row strong, .onboarding-guided .onboarding-privacy-choice strong { color: var(--ink); }
   .onboarding-config-fields { display: grid; gap: 20px; min-width: 0; margin: 0; padding: 0; border: 0; }
   .onboarding-guided .onboarding-form-section { padding: 0; }
   .onboarding-defaults { padding: 18px 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-muted); }
@@ -15,21 +21,56 @@
   .onboarding-custom-options h2 { margin: 0; font-size: .96rem; }
   .onboarding-guided .onboarding-choice-grid, .onboarding-guided .onboarding-choice-list { padding: 0; }
   .onboarding-guided .onboarding-upstream-step { gap: 16px; padding: 0; }
+  .onboarding-guided .onboarding-privacy-choice { border-color: var(--border); background: var(--surface-muted); }
+  .onboarding-privacy-options label { display: flex; align-items: center; gap: 9px; min-height: 52px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); cursor: pointer; }
+  .onboarding-privacy-options label:has(:checked) { border-color: var(--accent); background: var(--accent-soft); }
+  .onboarding-privacy-options label:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .onboarding-privacy-options input[type="radio"] { flex: none; width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+  .onboarding-privacy-options label > span { display: grid; gap: 2px; }
+  .onboarding-guided .onboarding-choice-copy code { color: var(--text-muted); }
+  .onboarding-guided .compact-toggle { color: var(--ink); }
+  .onboarding-guided .onboarding-suffix-input { border-color: var(--border); background: var(--input-bg); }
+  .onboarding-guided .onboarding-suffix-input strong { border-color: var(--border); color: var(--text-muted); }
   .onboarding-guided .onboarding-join-existing { justify-content: flex-start; margin: 0; flex-wrap: wrap; }
   .onboarding-guided .onboarding-actions { flex-wrap: wrap; }
   .onboarding-load-state { min-height: 160px; align-content: center; color: var(--text-muted); font-size: .85rem; line-height: 1.6; }
-  .onboarding-guided .onboarding-review { padding: 0; align-items: start; }
-  .onboarding-connect-instructions { padding-left: 20px; color: var(--text-muted); font-size: .81rem; line-height: 1.7; }
-  .onboarding-connect-instructions li + li { margin-top: 8px; }
-  .onboarding-connection-check { display: grid; gap: 12px; margin-top: 24px; padding: 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-muted); }
+  .onboarding-connection { display: grid; gap: 20px; align-items: start; }
+  .onboarding-connection-check { min-width: 0; }
+  .onboarding-connection-check, .onboarding-connection-details { display: grid; gap: 12px; }
+  .dns-address-display { grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 12px; margin: 0; padding: 14px; border-color: var(--border); border-radius: 8px; background: var(--surface-muted); }
+  .dns-address-display > div { display: grid; gap: 4px; }
+  .dns-address-display > div > span { color: var(--text-muted); font-size: .75rem; font-weight: 600; }
+  .dns-address-display > div > strong { color: var(--ink); font-size: 1.15rem; overflow-wrap: anywhere; user-select: all; }
+  .dns-address-display small { color: var(--text-muted); font-size: .72rem; }
+  .dns-address-display .onboarding-copy-feedback { grid-column: 1 / -1; color: var(--text-muted); font-size: .76rem; font-weight: 500; text-transform: none; }
+  .onboarding-copy-feedback:not(:empty) { padding-top: 8px; }
   .onboarding-connection-check > button { justify-self: start; }
-  .onboarding-connection-check p { margin: 7px 0 0; font-size: .8rem; line-height: 1.65; color: var(--text-muted); overflow-wrap: anywhere; }
+  .onboarding-connection p { margin: 0; font-size: .82rem; line-height: 1.6; color: var(--text-muted); overflow-wrap: anywhere; }
+  .onboarding-check-result:empty { margin-top: -12px; }
+  .onboarding-check-result p + p { margin-top: 4px; }
   .onboarding-connection-check .onboarding-observed { display: flex; align-items: flex-start; gap: 8px; color: var(--accent); font-weight: 600; }
   .onboarding-observed svg { flex-shrink: 0; margin-top: 3px; }
+  .onboarding-connection .onboarding-actions { justify-content: flex-start; border-color: var(--border); padding-top: 12px; }
+  .onboarding-connection-details details { min-width: 0; border-bottom: 1px solid var(--border); }
+  .onboarding-connection-details summary { padding: 12px 0; color: var(--ink); font-size: .83rem; font-weight: 600; cursor: pointer; }
+  .onboarding-connection-details .onboarding-command { margin: 0 0 8px; }
+  .onboarding-connection-details .onboarding-command code { background: var(--code-bg); color: var(--ink); white-space: normal; overflow-wrap: anywhere; }
+  .onboarding-connection-details p { margin-bottom: 12px; }
+  .onboarding-connection-details dl { display: grid; gap: 8px; margin: 0 0 12px; font-size: .8rem; }
+  .onboarding-connection-details dt { color: var(--text-muted); }
+  .onboarding-connection-details dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
+  @media (min-width: 1100px) {
+    .onboarding-connection { grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 32px; }
+  }
+  @media (max-width: 900px) {
+    .setup-rail ol { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
   @media (max-width: 680px) {
     .onboarding-guided .onboarding-step { padding: 24px 18px; }
-    .onboarding-guided .onboarding-review { grid-template-columns: 1fr; }
-    .onboarding-guided .onboarding-review > aside { border-left: 0; border-top: 1px solid var(--border); padding: 18px 0 0; }
     .onboarding-guided .onboarding-actions > button { width: 100%; }
+  }
+  @media (pointer: coarse) {
+    .onboarding-guided .faro-button, .auth-shell .faro-button, .onboarding-connection-details summary { min-height: 44px; }
+    .public-appearance-control { min-width: 44px; }
   }
 }

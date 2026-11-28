@@ -2,16 +2,15 @@ import { DialogSurface } from "./DialogSurface";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Database, FileText, HardDrive, ListFilter, RadioTower, Search, Shield, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { api, type SearchItem, type SearchResults } from "../api/client";
-import type { Page } from "../App";
+
+export type SearchSession = { query: string; index: number; resultKey?: string };
 
 type GlobalSearchProps = {
-  readonly open: boolean;
+  readonly session: SearchSession;
   readonly onClose: () => void;
-  readonly setPage: (page: Page) => void;
-  readonly onDomainSelect: (domain: string) => void;
-  readonly onDeviceSelect: (clientIP: string) => void;
+  readonly onSelect: (item: CommandResult, session: SearchSession) => void;
 };
 
 const emptyResults: SearchResults = {
@@ -23,80 +22,55 @@ const emptyResults: SearchResults = {
   blocklists: []
 };
 
-type CommandResult = SearchItem & {
+export type CommandResult = SearchItem & {
   group: keyof SearchResults;
   groupLabel: string;
 };
 
-export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceSelect }: GlobalSearchProps) {
-  const [query, setQuery] = useState("");
+export function GlobalSearch({ session, onClose, onSelect }: GlobalSearchProps) {
+  const listID = useId();
+  const [query, setQuery] = useState(session.query);
   const [results, setResults] = useState<SearchResults>(emptyResults);
-  const [activeIndex, setActiveIndex] = useState(0);
+  const [activeIndex, setActiveIndex] = useState(session.index);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
   const flatResults = useMemo(() => flattenResults(results), [results]);
 
   useEffect(() => {
-    if (!open) {
-      return undefined;
-    }
-    let cancelled = false;
     setError("");
     setResults(emptyResults);
     setLoading(query.trim() !== "");
+    if (query.trim() === "") return;
+
+    const controller = new AbortController();
+    const { signal } = controller;
     const timer = window.setTimeout(() => {
-      if (query.trim() === "") {
-        setResults(emptyResults);
-        return;
-      }
-      void api.search(query).then((nextResults) => {
-        if (cancelled) return;
+      void api.search(query, signal).then((nextResults) => {
+        if (signal.aborted) return;
         setResults(nextResults);
-        setActiveIndex(0);
+        const items = flattenResults(nextResults);
+        const restored = query === session.query ? items.findIndex((item) => resultKey(item) === session.resultKey) : -1;
+        setActiveIndex((index) => restored >= 0 ? restored : Math.max(0, Math.min(index, items.length - 1)));
       }).catch(() => {
-        if (!cancelled) setError("Search is unavailable. Try again in a moment.");
+        if (!signal.aborted) setError("Search is unavailable. Try again in a moment.");
       }).finally(() => {
-        if (!cancelled) setLoading(false);
+        if (!signal.aborted) setLoading(false);
       });
     }, 180);
-    return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [open, query]);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [query, session]);
 
+  const activeID = flatResults[activeIndex] ? `${listID}-${activeIndex}` : undefined;
   useEffect(() => {
-    if (open) {
-      setQuery("");
-      setResults(emptyResults);
-      setActiveIndex(0);
-    }
-  }, [open]);
+    if (activeID) document.getElementById(activeID)?.scrollIntoView({ block: "nearest" });
+  }, [activeID]);
 
-  if (!open) {
-    return null;
-  }
-
-  function runResult(item: CommandResult) {
-    switch (item.group) {
-      case "domains":
-        onDomainSelect(item.label);
-        break;
-      case "devices":
-        onDeviceSelect(item.label);
-        break;
-      case "events":
-        setPage("queries");
-        break;
-      case "local_records":
-        setPage("records");
-        break;
-      case "rules":
-        setPage("protection");
-        break;
-      case "blocklists":
-        setPage("blocklists");
-        break;
-    }
-    onClose();
+  function selectResult(item: CommandResult, index: number) {
+    onSelect(item, { query, index, resultKey: resultKey(item) });
   }
 
   return (
@@ -109,9 +83,14 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
         <div className="search-modal-bar">
           <Search size={19} />
           <Input variant="embedded"
+            role="combobox"
+            aria-autocomplete="list"
+            aria-expanded={true}
+            aria-controls={listID}
+            aria-activedescendant={activeID}
             autoFocus
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); setResults(emptyResults); }}
             onKeyDown={(event) => {
               if (event.key === "ArrowDown") {
                 event.preventDefault();
@@ -123,7 +102,7 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
               }
               if (event.key === "Enter" && flatResults[activeIndex]) {
                 event.preventDefault();
-                runResult(flatResults[activeIndex]);
+                selectResult(flatResults[activeIndex], activeIndex);
               }
             }}
             placeholder="Search devices, domains, events, rules, DNS records, blocklists"
@@ -134,19 +113,26 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
           </Button>
         </div>
 
-        <div className="command-results" aria-busy={loading}>
+        <div className="command-results">
           {error ? <p role="alert">{error}</p> : flatResults.length === 0 ? (
             <p role="status">{loading ? "Searching…" : query.trim() === "" ? "Type to search local Faro data." : "No matches"}</p>
-          ) : (
-            flatResults.map((item, index) => {
+          ) : null}
+          <div id={listID} role="listbox" aria-label="Search results" aria-busy={loading}>
+            {flatResults.map((item, index) => {
               const Icon = iconForGroup(item.group);
               return (
                 <button
                   className={index === activeIndex ? "active" : ""}
-                  key={`${item.group}-${item.label}-${item.subtitle ?? ""}`}
+                  key={resultKey(item)}
+                  role="option"
+                  id={`${listID}-${index}`}
+                  aria-selected={index === activeIndex}
+                  tabIndex={-1}
                   type="button"
-                  onMouseEnter={() => setActiveIndex(index)}
-                  onClick={() => runResult(item)}
+                  onPointerMove={(event) => {
+                    if (event.pointerType === "mouse" && (event.movementX || event.movementY)) setActiveIndex(index);
+                  }}
+                  onClick={() => selectResult(item, index)}
                 >
                   <Icon size={18} />
                   <span>
@@ -156,12 +142,16 @@ export function GlobalSearch({ open, onClose, setPage, onDomainSelect, onDeviceS
                   <em>{item.groupLabel}</em>
                 </button>
               );
-            })
-          )}
+            })}
+          </div>
         </div>
       </div>
     </DialogSurface>
   );
+}
+
+function resultKey(item: CommandResult) {
+  return JSON.stringify([item.group, item.id, item.kind, item.group === "rules" || !item.id ? item.label : null]);
 }
 
 function flattenResults(results: SearchResults): CommandResult[] {

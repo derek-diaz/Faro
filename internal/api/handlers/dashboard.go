@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -85,22 +84,17 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 	for _, device := range devices {
 		topClients = append(topClients, map[string]any{"label": device["display_name"], "count": device["total_queries_today"], "client_ip": device["client_ip"], "device_id": device["device_id"]})
 	}
-	topBlocked, err := groupedResult(request.Context(), handler.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? AND action = 'blocked' GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start)
+	topQueried, topBlocked, err := dashboardDomainRankings(ctx, handler.store.DB, start, traffic.narrowDay)
 	if err != nil {
 		writeError(responseWriter, err)
 		return
 	}
-	topQueried, err := groupedResult(ctx, handler.store.DB, `SELECT domain, COUNT(*) FROM dns_queries WHERE timestamp >= ? GROUP BY domain ORDER BY COUNT(*) DESC LIMIT 5`, start)
+	changes, err := handler.whatsNew(request, start)
 	if err != nil {
 		writeError(responseWriter, err)
 		return
 	}
-	changes, err := whatsNew(ctx, handler.store.DB, start)
-	if err != nil {
-		writeError(responseWriter, err)
-		return
-	}
-	sparklines, err := dashboardSparklines(ctx, handler.store.DB)
+	hours, err := dashboardTrafficHours(ctx, handler.store.DB, time.Now())
 	if err != nil {
 		writeError(responseWriter, err)
 		return
@@ -117,8 +111,8 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 	}
 
 	highlights := dashboardHighlights{
-		replicasBehind: counts.replicasBehind,
-		blocked:        blocked, newDevices: counts.newDevices, topClients: topClients, topBlocked: topBlocked,
+		replicasBehind: counts.replicasBehind, behindName: counts.behindName,
+		blocked: blocked, newDevices: counts.newDevices, topClients: topClients, topBlocked: topBlocked,
 		reloadFailures: counts.reloadFailures, upstreams: upstreamSnapshot,
 		dnsMetricsAvailable: liveCache.available, dnsMetricsPending: metricsPending,
 	}
@@ -154,7 +148,8 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 		}),
 		"stories":                  dashboardStories(highlights),
 		"whats_new":                changes,
-		"sparklines":               sparklines,
+		"traffic_hours":            hours,
+		"sparklines":               dashboardSparklines(hours),
 		"top_queried_domains":      topQueried,
 		"top_blocked_domains":      topBlocked,
 		"top_clients":              topClients,
@@ -173,9 +168,26 @@ func (handler *Handler) dashboard(responseWriter http.ResponseWriter, request *h
 	writeJSON(responseWriter, http.StatusOK, payload)
 }
 
+func dashboardDomainRankings(ctx context.Context, database *sql.DB, start string, narrowDay bool) ([]map[string]any, []map[string]any, error) {
+	allIndex, blockedIndex := "", ""
+	if narrowDay {
+		allIndex = " INDEXED BY idx_dns_queries_timestamp"
+		blockedIndex = " INDEXED BY idx_dns_queries_action_timestamp"
+	}
+	const selectDomain = "SELECT domain, COUNT(*) FROM dns_queries"
+	const ranking = " GROUP BY domain ORDER BY COUNT(*) DESC, domain LIMIT 5"
+	queried, err := groupedResult(ctx, database, selectDomain+allIndex+" WHERE timestamp >= ?"+ranking, start)
+	if err != nil {
+		return nil, nil, err
+	}
+	blocked, err := groupedResult(ctx, database, selectDomain+blockedIndex+" WHERE action = 'blocked' AND timestamp >= ?"+ranking, start)
+	return queried, blocked, err
+}
+
 type dashboardTraffic struct {
 	total, blocked, cacheHits, upstreamQueries int
 	cacheLatency, upstreamLatency              float64
+	narrowDay                                  bool
 }
 
 func dashboardTrafficSummary(ctx context.Context, database *sql.DB, start string) (dashboardTraffic, error) {
@@ -187,12 +199,16 @@ func dashboardTrafficSummary(ctx context.Context, database *sql.DB, start string
 			COALESCE(SUM(CASE WHEN source = 'cache' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN source = 'upstream' THEN 1 ELSE 0 END), 0),
 			COALESCE(AVG(CASE WHEN source = 'cache' THEN latency_ms END), 0),
-			COALESCE(AVG(CASE WHEN source = 'upstream' THEN latency_ms END), 0)
+			COALESCE(AVG(CASE WHEN source = 'upstream' THEN latency_ms END), 0),
+			-- The end IDs estimate retained rows with two index seeks. Prefer the
+			-- time range below one eighth of history, and covering domain indexes
+			-- on busy days. Gaps in the ID span only affect the plan choice.
+			COUNT(*) * 8 < COALESCE((SELECT MAX(id) FROM dns_queries) - (SELECT MIN(id) FROM dns_queries) + 1, 0)
 		FROM dns_queries
 		WHERE timestamp >= ?
 	`, start).Scan(
 		&traffic.total, &traffic.blocked, &traffic.cacheHits, &traffic.upstreamQueries,
-		&traffic.cacheLatency, &traffic.upstreamLatency,
+		&traffic.cacheLatency, &traffic.upstreamLatency, &traffic.narrowDay,
 	)
 	traffic.cacheLatency = roundedFloat(traffic.cacheLatency)
 	traffic.upstreamLatency = roundedFloat(traffic.upstreamLatency)
@@ -202,6 +218,7 @@ func dashboardTrafficSummary(ctx context.Context, database *sql.DB, start string
 type dashboardCounts struct {
 	enabledBlocklists, blockEntries, deviceCount, reloadFailures, newDevices int
 	replicasBehind                                                           int
+	behindName                                                               string
 }
 
 func dashboardCountsSummary(ctx context.Context, database *sql.DB, start string) (dashboardCounts, error) {
@@ -213,11 +230,11 @@ func dashboardCountsSummary(ctx context.Context, database *sql.DB, start string)
 			(SELECT COUNT(*) FROM devices),
 			(SELECT COUNT(*) FROM events WHERE type = 'dns.reload_failed' AND timestamp >= ?),
 			(SELECT COUNT(*) FROM devices WHERE first_seen_at >= ?),
-			(SELECT COUNT(*) FROM redundancy_nodes n JOIN redundancy_state s ON s.id=1
-			 WHERE s.role='controller' AND n.config_revision < s.config_revision)
+			COUNT(*), COALESCE(MIN(n.name), '') FROM redundancy_nodes n JOIN redundancy_state s ON s.id=1
+			 WHERE s.role='controller' AND n.config_revision < s.config_revision
 	`, start, start).Scan(
 		&counts.enabledBlocklists, &counts.blockEntries, &counts.deviceCount,
-		&counts.reloadFailures, &counts.newDevices, &counts.replicasBehind,
+		&counts.reloadFailures, &counts.newDevices, &counts.replicasBehind, &counts.behindName,
 	)
 	return counts, err
 }
@@ -281,6 +298,7 @@ func (handler *Handler) coreDNSCacheMetrics(ctx context.Context) cacheMetrics {
 
 type dashboardHighlights struct {
 	replicasBehind      int
+	behindName          string
 	blocked             int
 	newDevices          int
 	reloadFailures      int
@@ -352,8 +370,11 @@ func firstLabel(items []map[string]any) string {
 func dashboardStories(input dashboardHighlights) []map[string]any {
 	stories := make([]map[string]any, 0, 4)
 	if input.replicasBehind > 0 {
-		warning := story(countedStory(input.replicasBehind, "backup server is behind.", "backup servers are behind."),
-			"Devices using a backup may still get older DNS rules.", "warning")
+		title := countedStory(input.replicasBehind, "backup server is behind.", "backup servers are behind.")
+		if input.replicasBehind == 1 && input.behindName != "" {
+			title = "Backup server " + input.behindName + " is behind."
+		}
+		warning := story(title, "Devices using a backup may still get older DNS rules.", "warning")
 		warning["section"] = "redundancy"
 		stories = append(stories, warning)
 	}
@@ -468,13 +489,16 @@ func upstreamHealthCard(snapshot upstreamhealth.Snapshot) map[string]any {
 	return map[string]any{"label": "Upstreams", "value": value, "detail": detail, "status": status}
 }
 
-func whatsNew(ctx context.Context, database *sql.DB, start string) (map[string]any, error) {
-	result := make(map[string]any)
+func (handler *Handler) whatsNew(request *http.Request, start string) (map[string]any, error) {
+	devices, err := handler.newDashboardDevices(request, start)
+	if err != nil {
+		return nil, err
+	}
+	result := map[string]any{"devices": devices}
 	for _, item := range []struct {
 		key, query string
 		args       []any
 	}{
-		{"devices", `SELECT address AS label, 'First seen today' AS subtitle FROM device_addresses WHERE first_seen_at >= ? ORDER BY first_seen_at DESC, id DESC LIMIT 5`, []any{start}},
 		{"domains", `
 			SELECT q.domain AS label, 'First time observed' AS subtitle
 			FROM dns_queries q
@@ -484,10 +508,10 @@ func whatsNew(ctx context.Context, database *sql.DB, start string) (map[string]a
 				SELECT 1 FROM dns_queries prior WHERE prior.domain = q.domain AND prior.timestamp < ?
 			)
 			ORDER BY MIN(q.timestamp) DESC, q.domain LIMIT 5`, []any{start, start}},
-		{"blocklists", `SELECT name AS label, 'Installed today' AS subtitle FROM blocklists WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5`, []any{start}},
-		{"local_records", `SELECT hostname AS label, 'Local DNS record' AS subtitle FROM dns_records WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5`, []any{start}},
+		{"blocklists", `SELECT id, name AS label, 'Installed today' AS subtitle FROM blocklists WHERE created_at >= datetime(?) ORDER BY created_at DESC, id DESC LIMIT 5`, []any{start}},
+		{"local_records", `SELECT id, hostname AS label, 'Local DNS record' AS subtitle FROM dns_records WHERE created_at >= datetime(?) ORDER BY created_at DESC, id DESC LIMIT 5`, []any{start}},
 	} {
-		values, err := searchRowsResult(ctx, database, item.query, item.args...)
+		values, err := searchRowsResult(request.Context(), handler.store.DB, item.query, item.args...)
 		if err != nil {
 			return nil, err
 		}
@@ -496,46 +520,106 @@ func whatsNew(ctx context.Context, database *sql.DB, start string) (map[string]a
 	return result, nil
 }
 
-func dashboardSparklines(ctx context.Context, database *sql.DB) (map[string]any, error) {
-	activity, blocked, err := hourlyActivityCounts(ctx, database)
+func (handler *Handler) newDashboardDevices(request *http.Request, start string) ([]map[string]any, error) {
+	rows, err := handler.store.DB.QueryContext(request.Context(), `
+		SELECT d.id, COALESCE(NULLIF(TRIM(d.name), ''), TRIM(n.name), '')
+		FROM devices d
+		LEFT JOIN device_names n ON n.device_id = d.id AND n.source = 'unifi'
+		WHERE d.first_seen_at >= ?
+		ORDER BY d.first_seen_at DESC, d.id DESC LIMIT 5`, start)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
-		"activity": activity,
-		"blocked":  blocked,
-	}, nil
+	defer closeRows(rows)
+	var devices []inventoryBaseDevice
+	for rows.Next() {
+		var device inventoryBaseDevice
+		if err := rows.Scan(&device.deviceID, &device.name); err != nil {
+			return nil, err
+		}
+		devices = append(devices, device)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	addressesByDevice, clientIPs, err := handler.inventoryAddresses(request, devices)
+	if err != nil {
+		return nil, err
+	}
+	discovered := handler.discoverDeviceNames(request.Context(), clientIPs)
+	items := make([]map[string]any, 0, len(devices))
+	for _, device := range devices {
+		addresses := addressesByDevice[device.deviceID]
+		address := ""
+		if len(addresses) > 0 {
+			address = addresses[0]
+		}
+		label := device.name
+		if label == "" {
+			label = bestDeviceIdentity(discovered, addresses, address).DisplayName
+		}
+		subtitle := "First seen today"
+		if address != "" && address != label {
+			subtitle = address
+		}
+		items = append(items, map[string]any{"device_id": device.deviceID, "client_ip": address, "label": label, "subtitle": subtitle})
+	}
+	return items, nil
 }
 
-func hourlyActivityCounts(ctx context.Context, database *sql.DB) ([]int, []int, error) {
-	activity, blocked := make([]int, 24), make([]int, 24)
-	cutoff := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+type dashboardTrafficHour struct {
+	Start   time.Time `json:"start"`
+	End     time.Time `json:"end"`
+	Total   int       `json:"total"`
+	Blocked int       `json:"blocked"`
+}
+
+func dashboardSparklines(hours []dashboardTrafficHour) map[string][]int {
+	activity, blocked := make([]int, len(hours)), make([]int, len(hours))
+	for i, hour := range hours {
+		activity[i], blocked[i] = hour.Total, hour.Blocked
+	}
+	return map[string][]int{"activity": activity, "blocked": blocked}
+}
+
+func dashboardTrafficHours(ctx context.Context, database *sql.DB, now time.Time) ([]dashboardTrafficHour, error) {
+	const hourKey = "2006-01-02T15"
+	start := now.UTC().Truncate(time.Hour).Add(-23 * time.Hour)
+	// DNS history is collected to the second. Keep the current second, and
+	// freeze the end so a drill-down uses the same snapshot interval.
+	end := now.UTC().Truncate(time.Second).Add(time.Second)
+	hours := make([]dashboardTrafficHour, 24)
+	index := make(map[string]int, len(hours))
+	for i := range hours {
+		from := start.Add(time.Duration(i) * time.Hour)
+		to := from.Add(time.Hour)
+		if to.After(end) {
+			to = end
+		}
+		hours[i] = dashboardTrafficHour{Start: from, End: to}
+		index[from.Format(hourKey)] = i
+	}
+	clause, args := activityTimeClause("timestamp", activityWindow{enabled: true, from: start, to: end})
 	rows, err := database.QueryContext(ctx, `
-		SELECT strftime('%H', timestamp) AS hour,
+		SELECT replace(substr(timestamp, 1, 13), ' ', 'T') AS hour,
 		       COUNT(*),
 		       COALESCE(SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END), 0)
 		FROM dns_queries
-		WHERE timestamp >= ?
-		GROUP BY hour
-	`, cutoff)
+		WHERE `+clause+` GROUP BY hour`, args...)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	defer closeRows(rows)
-	nowHour := time.Now().UTC().Hour()
 	for rows.Next() {
-		var hourText string
-		var count, blockedCount int
-		if err := rows.Scan(&hourText, &count, &blockedCount); err != nil {
-			return nil, nil, err
+		var hour string
+		var total, blocked int
+		if err := rows.Scan(&hour, &total, &blocked); err != nil {
+			return nil, err
 		}
-		hour, err := strconv.Atoi(hourText)
-		if err != nil {
-			continue
+		if i, ok := index[hour]; ok {
+			hours[i].Total, hours[i].Blocked = total, blocked
 		}
-		index := (hour - nowHour + 23 + 24) % 24
-		activity[index] = count
-		blocked[index] = blockedCount
 	}
-	return activity, blocked, rows.Err()
+	return hours, rows.Err()
 }

@@ -20,13 +20,13 @@ func TestDashboardWarnsUntilAllReplicasCatchUp(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		stories := dashboardStories(dashboardHighlights{replicasBehind: counts.replicasBehind, dnsMetricsAvailable: true})
+		stories := dashboardStories(dashboardHighlights{replicasBehind: counts.replicasBehind, behindName: counts.behindName, dnsMetricsAvailable: true})
 		if len(stories) != 1 {
 			t.Fatalf("unexpected stories: %v", stories)
 		}
 		return stories[0]
 	}
-	if warning := story(); warning["section"] != "redundancy" || warning["title"] != "1 backup server is behind." || warning["tone"] != "warning" {
+	if warning := story(); warning["section"] != "redundancy" || warning["title"] != "Backup server Kitchen is behind." || warning["tone"] != "warning" {
 		t.Fatalf("missing replica warning: %v", warning)
 	}
 	if _, err := database.Exec(`UPDATE redundancy_nodes SET config_revision=3 WHERE node_id='one'`); err != nil {

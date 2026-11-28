@@ -112,6 +112,7 @@ func New(store *db.Store, reloader CoreDNSManager, upstreams *upstreamhealth.Mon
 	mux.HandleFunc("/api/blocklist-domains/", handler.manualBlockEntry)
 	mux.HandleFunc("/api/queries", handler.queries)
 	mux.HandleFunc("/api/events", handler.events)
+	mux.HandleFunc("/api/events/", handler.event)
 	mux.HandleFunc("/api/notifications", handler.notifications)
 	mux.HandleFunc("/api/notifications/", handler.notificationState)
 	mux.HandleFunc("/api/upstreams/catalog", handler.upstreamCatalog)

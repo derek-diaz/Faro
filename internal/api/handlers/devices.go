@@ -22,11 +22,16 @@ func (handler *Handler) devices(responseWriter http.ResponseWriter, request *htt
 	handler.deviceInventory(responseWriter, request)
 }
 
+const unnamedDevice = "Unnamed device"
+
 func bestDeviceIdentity(discovered map[string]deviceIdentity, addresses []string, fallback string) deviceIdentity {
 	for _, address := range addresses {
 		if identity := discovered[address]; strings.TrimSpace(identity.DisplayName) != "" {
 			return identity
 		}
+	}
+	if fallback == "" {
+		return deviceIdentity{DisplayName: unnamedDevice, NameSource: "unknown"}
 	}
 	return deviceIdentity{DisplayName: fallback, NameSource: "address"}
 }

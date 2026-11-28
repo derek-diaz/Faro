@@ -1,15 +1,177 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/derek/faro/internal/db"
 )
+
+func TestActivitySummaryCountsAndTimelinesShareSearchAndTimeBounds(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB.Exec(`
+		INSERT INTO devices(id, name) VALUES(1, 'Kitchen sensor');
+		INSERT INTO device_addresses(device_id, address, family, first_seen_at)
+		VALUES(1, '192.0.2.1', 'ipv4', '2026-07-12 12:00:00');
+		INSERT INTO dns_queries(timestamp, client_ip, device_id, domain, query_type, action, source) VALUES
+		('2026-07-12T12:00:00Z', '192.0.2.1', 1, 'a.test', 'A', 'blocked', 'cache'),
+		('2026-07-12T12:00:01Z', '192.0.2.1', 1, 'b.test', 'A', 'allowed', 'cache'),
+		('2026-07-12T12:01:00Z', '192.0.2.1', 1, 'c.test', 'A', 'blocked', 'upstream'),
+		('2026-07-12T12:02:00Z', '192.0.2.1', 1, 'd.test', 'A', 'blocked', 'manual'),
+		('2026-07-12T12:03:00Z', '192.0.2.1', 1, 'outside.test', 'A', 'allowed', 'upstream'),
+		('2026-07-12T12:01:00Z', '192.0.2.2', NULL, 'unmatched.test', 'A', 'allowed', 'upstream');
+		INSERT INTO events(timestamp, type, severity, title, description, source)
+		VALUES('2026-07-12T12:01:08Z', 'setting.changed', 'info', 'Kitchen updated', '', 'faro');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	h := &Handler{store: store}
+	counts := map[string]int{"all": 6, "dns": 4, "cache": 2, "upstream": 1, "blocked": 3, "system": 2}
+	for _, check := range []struct {
+		scope          string
+		total, blocked [3]int
+	}{
+		{"all", [3]int{3, 2, 1}, [3]int{1, 1, 1}},
+		{"dns", [3]int{2, 1, 1}, [3]int{1, 1, 1}},
+		{"cache", [3]int{2, 0, 0}, [3]int{1, 0, 0}},
+		{"upstream", [3]int{0, 1, 0}, [3]int{0, 1, 0}},
+		{"blocked", [3]int{1, 1, 1}, [3]int{1, 1, 1}},
+		{"system", [3]int{1, 1, 0}, [3]int{}},
+	} {
+		t.Run(check.scope, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			h.events(response, httptest.NewRequest(http.MethodGet, "/api/events?detail=summary&range=custom&from=2026-07-12T12:00:00Z&to=2026-07-12T12:03:00Z&search=kitchen&scope="+check.scope, nil))
+			var result struct {
+				Counts   map[string]int
+				Total    int
+				Timeline activityTimeline
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || response.Code != http.StatusOK {
+				t.Fatalf("summary: %s (%v)", response.Body.String(), err)
+			}
+			if !reflect.DeepEqual(result.Counts, counts) || result.Total != counts[check.scope] || len(result.Timeline.Buckets) != 3 {
+				t.Fatalf("unexpected totals for %s: %s", check.scope, response.Body.String())
+			}
+			for i, bucket := range result.Timeline.Buckets {
+				if bucket.Total != check.total[i] || bucket.Blocked != check.blocked[i] {
+					t.Errorf("bucket %d has %d total and %d blocked, want %d and %d", i, bucket.Total, bucket.Blocked, check.total[i], check.blocked[i])
+				}
+			}
+		})
+	}
+}
+
+func TestActivitySummaryFractionalBucketBoundaries(t *testing.T) {
+	h, _, device := troubleshootingFixture(t)
+	_, err := h.store.DB.Exec(`
+		INSERT INTO dns_queries(timestamp, client_ip, device_id, domain, query_type, action, source) VALUES
+		('2026-01-01T12:00:00.124Z', ?1, ?2, 'early.test', 'A', 'allowed', 'upstream'),
+		('2026-01-01T12:00:00.125Z', ?1, ?2, 'at-start.test', 'A', 'allowed', 'upstream'),
+		('2026-01-01T12:01:00.124Z', ?1, ?2, 'before-bucket.test', 'A', 'allowed', 'cache'),
+		('2026-01-01T12:01:00.125Z', ?1, ?2, 'at-bucket.test', 'A', 'blocked', 'cache'),
+		('2026-01-01T12:02:00.125Z', ?1, ?2, 'at-end.test', 'A', 'blocked', 'cache');
+		INSERT INTO events(timestamp, type, severity, title, description, source)
+		VALUES('2026-01-01T12:01:00.125Z', 'setting.changed', 'info', 'Updated', '', 'faro');
+	`, device.ClientIP, device.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	from := time.Date(2026, 1, 1, 12, 0, 0, 125000000, time.UTC)
+	window, err := newActivityWindow(from, from.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := loadActivitySummary(context.Background(), h.store.DB, "", window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []activityTimelineBucket{
+		{Timestamp: "2026-01-01T12:00:00.125Z", Total: 2},
+		{Timestamp: "2026-01-01T12:01:00.125Z", Total: 2, Blocked: 1},
+	}
+	if got := summary.timeline("all").Buckets; !reflect.DeepEqual(got, want) || summary.counts["all"] != 4 {
+		t.Errorf("unexpected timeline buckets %v and counts %v", got, summary.counts)
+	}
+}
+
+func TestFirstSeenActivityAndNotificationsIncludeLegacyAddressesOnce(t *testing.T) {
+	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.DB.Exec(`
+		INSERT INTO devices(id,name) VALUES(1,'Desk');
+		INSERT INTO device_addresses(device_id,address,family,first_seen_at) VALUES
+		(1,'192.0.2.1','ipv4','2026-01-01T01:00:00Z'),
+		(1,'192.0.2.2','ipv4','2026-01-01T02:00:00Z');
+		INSERT INTO dns_queries(timestamp,client_ip,device_id,domain,query_type,action,source) VALUES
+		('2026-01-02T01:00:00Z','192.0.2.1',1,'a.test','A','allowed','cache'),
+		('2026-01-03T01:00:00Z','192.0.2.1',1,'b.test','A','allowed','cache'),
+		('2026-01-02T01:00:00Z','2001:db8::1',1,'a.test','A','allowed','cache'),
+		('2026-01-01T03:00:00Z','2001:db8::1',NULL,'b.test','A','allowed','cache');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	items, err := activityEvents(ctx, store.DB, 10, "", "system")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bell, err := notificationCandidates(ctx, store.DB, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(items, bell) || len(items) != 2 {
+		t.Fatalf("activity = %v, notification candidates = %v", items, bell)
+	}
+	for i, want := range []struct{ ip, ts string }{{"2001:db8::1", "2026-01-01T03:00:00Z"}, {"192.0.2.1", "2026-01-01T01:00:00Z"}} {
+		if row := items[i]; row["client_ip"] != want.ip || row["timestamp"] != want.ts || row["device_name"] != "Desk" {
+			t.Errorf("unexpected first seen event: %v", row)
+		}
+	}
+}
+
+func TestActivitySearchUsesEffectiveDeviceName(t *testing.T) {
+	h, _, device := troubleshootingFixture(t)
+	_, err := h.store.DB.Exec(`
+		UPDATE devices SET name = '' WHERE id = ?;
+		INSERT INTO device_names(device_id, source, name) VALUES(?, 'unifi', 'Office tablet');
+		INSERT INTO dns_records(hostname, value) VALUES('shadowed.test', ?), ('living-room.test', '192.0.2.250');
+		INSERT INTO dns_queries(timestamp, client_ip, device_id, domain, query_type, action, source) VALUES
+		('2026-01-01T00:01:00Z', ?, ?, 'lookup.test', 'A', 'allowed', 'cache'),
+		('2026-01-01T00:01:01Z', '192.0.2.250', NULL, 'lookup.test', 'A', 'allowed', 'cache');
+	`, device.DeviceID, device.DeviceID, device.ClientIP, device.ClientIP, device.DeviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for term, expected := range map[string]string{"TABLET": "Office tablet", "living-room": "living-room.test", "shadowed": ""} {
+		records, err := activityRecords(ctx, h.store.DB, 50, 0, term, "dns", activityWindow{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		summary, err := loadActivitySummary(ctx, h.store.DB, term, activityWindow{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if summary.counts["dns"] != len(records) || (expected == "" && len(records) != 0) ||
+			(expected != "" && (len(records) != 1 || records[0].deviceName != expected)) {
+			t.Errorf("search %q matched records %+v and counts %v", term, records, summary.counts)
+		}
+	}
+}
 
 func TestEventsPaginationUsesFullActivityHistory(t *testing.T) {
 	store, err := db.Open(filepath.Join(t.TempDir(), "faro.db"))

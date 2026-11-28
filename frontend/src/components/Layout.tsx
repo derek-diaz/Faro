@@ -8,6 +8,7 @@ import {
 	Bell,
 	CheckCircle2,
 	ChevronDown,
+	ChevronLeft,
 	Database,
 	ExternalLink,
 	MonitorSmartphone,
@@ -31,7 +32,7 @@ import { AppearanceMenu } from "./AppearanceMenu";
 import type { ThemeMode } from "../theme";
 
 const navItems: { id: Page; label: string; description: string; href: string; icon: LucideIcon }[] = [
-  { id: "dashboard", label: "Overview", description: "See how Faro is working and what needs your attention.", href: "/", icon: BarChart3 },
+  { id: "dashboard", label: "Overview", description: "", href: "/", icon: BarChart3 },
   { id: "devices", label: "Devices", description: "See which devices are active on your network.", href: "/devices", icon: MonitorSmartphone },
   { id: "protection", label: "Protection", description: "Home covers every device by default. Add a setup only when some devices need different blocking or exceptions.", href: "/protection", icon: ShieldCheck },
   { id: "queries", label: "Activity", description: "Explore DNS requests, blocks, and system changes.", href: "/activity", icon: Activity },
@@ -47,6 +48,7 @@ const settingsPages: Page[] = ["settings", "upstreams", "records"];
 
 type LayoutProps = {
   readonly page: Page;
+  readonly overviewStatus: { headline: string; tone: string };
   readonly setPage: (page: Page) => void;
   readonly themeMode: ThemeMode;
   readonly onThemeModeChange: (mode: ThemeMode) => void;
@@ -63,7 +65,7 @@ type LayoutProps = {
   readonly onDismissReleaseUpdate: () => void;
 };
 
-export function Layout({ page, setPage, themeMode, onThemeModeChange, children, apiState, onOpenSearch, notifications, onOpenNotifications, username, onSignOut, appVersion, releaseUpdate, showReleaseUpdate, onDismissReleaseUpdate }: LayoutProps) {
+export function Layout({ page, overviewStatus, setPage, themeMode, onThemeModeChange, children, apiState, onOpenSearch, notifications, onOpenNotifications, username, onSignOut, appVersion, releaseUpdate, showReleaseUpdate, onDismissReleaseUpdate }: LayoutProps) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const currentPage = navItems.find((item) => item.id === page) ?? navItems[0];
@@ -128,16 +130,18 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
       </aside>
 
       <main className="main">
-        <PageHeader title={currentPage.label} description={currentPage.description} actions={<>
+        <PageHeader title={currentPage.label} description={page === "dashboard"
+          ? <span className={`overview-headline ${overviewStatus.tone}`} role="status">{overviewStatus.headline}</span>
+          : currentPage.description} actions={<>
             <Button variant="outline" className="gap-2 bg-card" onClick={onOpenSearch}>
               <Search size={17} />
               <span>Search</span>
-              <kbd className="rounded bg-muted px-1 text-[10px] text-muted-foreground">Ctrl K</kbd>
+              <kbd className="rounded bg-muted px-1 text-[10px] text-muted-foreground pointer-coarse:hidden">Ctrl K</kbd>
             </Button>
-            <div className={`system-status ${apiState}`} title={apiStatusTitle}>
+            {page !== "dashboard" && <div className={`system-status ${apiState}`} title={apiStatusTitle}>
               <CheckCircle2 size={17} />
               <span>{apiStatusLabel}</span>
-            </div>
+            </div>}
             <Button variant="ghost" size="icon" className="notification-button relative" onClick={onOpenNotifications} aria-label="Network updates">
               <Bell size={18} />
               {notifications.unread_count > 0 && <span>{Math.min(notifications.unread_count, 9)}</span>}
@@ -173,7 +177,7 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
           </aside>
         )}
         <div className="main-content">
-          {sectionPages.length > 0 && <nav className="section-navigation" aria-label={primaryPage === "protection" ? "Protection pages" : "Settings pages"}>
+          {sectionPages.length > 0 && <nav className={`section-navigation ${primaryPage === "settings" ? "settings-page-navigation" : ""}`} aria-label={primaryPage === "protection" ? "Protection pages" : "Settings pages"}>
             {sectionPages.map((id) => {
               const item = navItems.find((entry) => entry.id === id)!;
               const Icon = item.icon;
@@ -185,6 +189,11 @@ export function Layout({ page, setPage, themeMode, onThemeModeChange, children, 
               }}><Icon size={16} /><span>{label}</span></a>;
             })}
           </nav>}
+          {(page === "records" || page === "upstreams") && <a className="settings-directory-back" href="/settings" onClick={(event) => {
+            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+            event.preventDefault();
+            setPage("settings");
+          }}><ChevronLeft size={16} />All settings</a>}
           {children}
         </div>
       </main>

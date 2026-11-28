@@ -28,54 +28,73 @@ func (handler *Handler) search(responseWriter http.ResponseWriter, request *http
 		return
 	}
 	like := "%" + query + "%"
-	writeJSON(responseWriter, http.StatusOK, map[string]any{
-		"domains": grouped(request.Context(), handler.store.DB, `
-			SELECT domain, COUNT(*) FROM dns_queries
-			WHERE domain LIKE ?
-			GROUP BY domain
-			ORDER BY MAX(timestamp) DESC
-			LIMIT 8
-		`, like),
-		"devices": searchRows(request.Context(), handler.store.DB, `
-			SELECT
-				(SELECT address FROM device_addresses WHERE device_id = d.id ORDER BY last_seen_at DESC, id DESC LIMIT 1) AS label,
+	queries := []struct{ group, sql string }{
+		{"domains", `
+			-- Seek to each distinct name, skipping repeated queries in the domain index.
+			WITH RECURSIVE names(domain) AS (
+				SELECT MIN(domain) FROM dns_queries
+				UNION ALL
+				SELECT (SELECT MIN(domain) FROM dns_queries WHERE domain > names.domain)
+				FROM names WHERE domain IS NOT NULL
+			), recent AS MATERIALIZED (
+				SELECT domain, (SELECT MAX(timestamp) FROM dns_queries WHERE domain = names.domain) AS latest
+				FROM names WHERE domain LIKE ?1
+				ORDER BY latest DESC, domain
+				LIMIT 8
+			)
+			SELECT domain AS label, (SELECT COUNT(*) FROM dns_queries WHERE domain = recent.domain) AS count
+			FROM recent ORDER BY latest DESC, domain
+		`},
+		{"devices", `
+			SELECT d.id,
+				COALESCE((SELECT address FROM device_addresses WHERE device_id = d.id ORDER BY last_seen_at DESC, id DESC LIMIT 1), NULLIF(d.name, ''), 'Device ' || d.id) AS label,
 				COALESCE(NULLIF(d.name, ''), 'Observed device') AS subtitle
 			FROM devices d
-			WHERE d.name LIKE ? OR EXISTS (SELECT 1 FROM device_addresses a WHERE a.device_id = d.id AND a.address LIKE ?)
+			WHERE d.name LIKE ?1 OR EXISTS (SELECT 1 FROM device_addresses a WHERE a.device_id = d.id AND a.address LIKE ?1)
 			ORDER BY COALESCE(NULLIF(d.name, ''), label)
 			LIMIT 8
-		`, like, like),
-		"events": searchRows(request.Context(), handler.store.DB, `
-			SELECT title AS label, type || ' · ' || description AS subtitle
+		`},
+		{"events", `
+			SELECT id, title AS label, type || ' · ' || description AS subtitle
 			FROM events
-			WHERE title LIKE ? OR description LIKE ? OR type LIKE ? OR domain LIKE ? OR client_ip LIKE ?
+			WHERE title LIKE ?1 OR description LIKE ?1 OR type LIKE ?1 OR domain LIKE ?1 OR client_ip LIKE ?1
 			ORDER BY timestamp DESC
 			LIMIT 8
-		`, like, like, like, like, like),
-		"local_records": searchRows(request.Context(), handler.store.DB, `
-			SELECT hostname AS label, type || ' ' || value AS subtitle
+		`},
+		{"local_records", `
+			SELECT id, hostname AS label, type || ' ' || value AS subtitle
 			FROM dns_records
-			WHERE hostname LIKE ? OR value LIKE ? OR description LIKE ?
+			WHERE hostname LIKE ?1 OR value LIKE ?1 OR description LIKE ?1
 			ORDER BY hostname
 			LIMIT 8
-		`, like, like, like),
-		"rules": searchRows(request.Context(), handler.store.DB, `
-			SELECT e.domain AS label, 'Allowed in ' || p.name AS subtitle
+		`},
+		{"rules", `
+			SELECT p.id, 'allow' AS kind, e.domain AS label, 'Allowed in ' || p.name AS subtitle
 			FROM protection_allow_entries e JOIN protection_profiles p ON p.id = e.protection_id
-			WHERE e.domain LIKE ?
+			WHERE e.domain LIKE ?1
 			UNION ALL
-			SELECT e.domain AS label, 'Blocked in ' || p.name AS subtitle
+			SELECT p.id, 'block' AS kind, e.domain AS label, 'Blocked in ' || p.name AS subtitle
 			FROM protection_block_entries e JOIN protection_profiles p ON p.id = e.protection_id
-			WHERE e.domain LIKE ?
+			WHERE e.domain LIKE ?1
 			ORDER BY label
 			LIMIT 8
-		`, like, like),
-		"blocklists": searchRows(request.Context(), handler.store.DB, `
-			SELECT name AS label, url AS subtitle
+		`},
+		{"blocklists", `
+			SELECT id, name AS label, url AS subtitle
 			FROM blocklists
-			WHERE name LIKE ? OR url LIKE ?
+			WHERE name LIKE ?1 OR url LIKE ?1
 			ORDER BY name
 			LIMIT 8
-		`, like, like),
-	})
+		`},
+	}
+	results := make(map[string][]map[string]any, len(queries))
+	for _, group := range queries {
+		items, err := searchRowsResult(request.Context(), handler.store.DB, group.sql, like)
+		if err != nil {
+			writeError(responseWriter, err)
+			return
+		}
+		results[group.group] = items
+	}
+	writeJSON(responseWriter, http.StatusOK, results)
 }

@@ -21,6 +21,10 @@ const ActivityTimeline = lazy(async () => {
 type QueryLogProps = {
   readonly onDomainSelect: (domain: string) => void;
   readonly onDeviceSelect: (clientIP: string) => void;
+  readonly onRulesChanged?: () => Promise<void>;
+  readonly onViewActivity?: () => void;
+  readonly eventID?: number;
+  readonly query?: string;
 };
 
 type EventFilter = "all" | "dns" | "cache" | "upstream" | "blocked" | "system";
@@ -38,10 +42,37 @@ const emptyActivity: ActivityPage = {
 
 const queryLogFeatures = tableFeatures({});
 
-export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
+export function QueryLog({ eventID, query = "", onDomainSelect, onDeviceSelect, onRulesChanged, onViewActivity }: QueryLogProps) {
+  if (eventID !== undefined) return <SelectedEvent key={eventID} eventID={eventID} onDomainSelect={onDomainSelect} onDeviceSelect={onDeviceSelect} onViewActivity={onViewActivity} />;
+  const params = new URLSearchParams(query);
+  const from = params.get("from");
+  const to = params.get("to");
+  const span = from && to ? Date.parse(to) - Date.parse(from) : 0;
+  const range: ActivityTimeRange = params.get("range") === "custom" && from && to && span > 0 && span <= 90 * 86400000
+    ? { preset: "custom", from, to }
+    : { preset: "24h" };
+  const scope = params.get("scope");
+  const filter = scope === "dns" || scope === "cache" || scope === "blocked" || scope === "system" || scope === "upstream" ? scope : "all";
+  return <ActivityExplorer key={`${filter}|${range.from ?? ""}|${range.to ?? ""}`} initialFilter={filter} initialRange={range} onDomainSelect={onDomainSelect} onDeviceSelect={onDeviceSelect} onRulesChanged={onRulesChanged} />;
+}
+
+function pollActivity(range: ActivityTimeRange, interval: number, load: () => Promise<void>) {
+  const end = range.preset === "custom" && range.to ? Date.parse(range.to) : Infinity;
+  if (Date.now() >= end) return;
+  const timer = window.setInterval(() => {
+    if (Date.now() >= end) window.clearInterval(timer);
+    else if (document.visibilityState === "visible") void load();
+  }, interval);
+  return timer;
+}
+
+function ActivityExplorer({ onDomainSelect, onDeviceSelect, onRulesChanged, initialFilter, initialRange }: QueryLogProps & {
+  initialFilter: EventFilter;
+  initialRange: ActivityTimeRange;
+}) {
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<EventFilter>("all");
+  const [filter, setFilter] = useState<EventFilter>(initialFilter);
   const [page, setPage] = useState(1);
   const [activity, setActivity] = useState<ActivityPage>(emptyActivity);
   const [loading, setLoading] = useState(true);
@@ -50,9 +81,11 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
   const [summaryError, setSummaryError] = useState("");
   const [hasMore, setHasMore] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [timeRange, setTimeRange] = useState<ActivityTimeRange>({ preset: "24h" });
+  const [timeRange, setTimeRange] = useState<ActivityTimeRange>(initialRange);
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
+  const [ruleNotice, setRuleNotice] = useState("");
+  const [ruleError, setRuleError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -78,7 +111,7 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
       }
     };
     void loadRows();
-    const timer = window.setInterval(() => { if (page === 1 && document.visibilityState === "visible") void loadRows(); }, 5000);
+    const timer = page === 1 ? pollActivity(timeRange, 5000, loadRows) : undefined;
     return () => { controller.abort(); window.clearInterval(timer); };
   }, [search, filter, page, refreshVersion, timeRange]);
 
@@ -104,7 +137,7 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
       }
     };
     void loadSummary();
-    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void loadSummary(); }, 30000);
+    const timer = pollActivity(timeRange, 30000, loadSummary);
     return () => { controller.abort(); window.clearInterval(timer); };
   }, [search, filter, refreshVersion, timeRange]);
 
@@ -119,14 +152,20 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
 
   const addRule = useCallback(async (domain: string, action: "allow" | "block") => {
     setBusy(`${action}:${domain}`);
+    setRuleError("");
+    setRuleNotice("");
     try {
       if (action === "allow") await api.addAllow(domain);
       else await api.addBlock(domain);
+      setRuleNotice(`${domain} added to the ${action} list.`);
       setRefreshVersion((current) => current + 1);
+      void onRulesChanged?.().catch(() => undefined);
+    } catch (error) {
+      setRuleError(error instanceof Error ? error.message : "Couldn’t update this rule. Try again.");
     } finally {
       setBusy(null);
     }
-  }, []);
+  }, [onRulesChanged]);
 
   function clearSearch() {
     setSearchInput("");
@@ -167,7 +206,7 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
             <small>{isDNS ? event.description : event.description || event.title}</small>
           </>
         ) : (
-          <span className="system-event-title"><EventMark event={event} /><strong>{event.title}</strong></span>
+          <><span className="system-event-title"><EventMark event={event} /><strong>{event.title}</strong></span>{event.description && <small>{event.description}</small>}</>
         );
       }
     },
@@ -198,8 +237,8 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
         const isBlocked = event.type === "dns.blocked";
         return domain ? (
           <div className="table-icon-actions">
-            <Button variant="ghost" size="icon-sm" type="button" title={`Block ${domain}`} aria-label={`Block ${domain}`} disabled={busy !== null || isBlocked} onClick={() => void addRule(domain, "block")}><Ban size={16} /></Button>
-            <Button variant="ghost" size="icon-sm" type="button" title={`Allow ${domain}`} aria-label={`Allow ${domain}`} disabled={busy !== null} onClick={() => void addRule(domain, "allow")}><ShieldCheck size={16} /></Button>
+            <Button variant="ghost" size="icon-sm" type="button" title={`Block ${domain}`} aria-label={`Block ${domain}`} disabled={busy !== null || isBlocked} onClick={() => void addRule(domain, "block")}><Ban size={16} /><span className="mobile-row-label">Block</span></Button>
+            <Button variant="ghost" size="icon-sm" type="button" title={`Allow ${domain}`} aria-label={`Allow ${domain}`} disabled={busy !== null} onClick={() => void addRule(domain, "allow")}><ShieldCheck size={16} /><span className="mobile-row-label">Allow</span></Button>
           </div>
         ) : null;
       }
@@ -236,7 +275,10 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
 
       <section className="panel activity-timeline-panel" aria-label="Activity timeline" aria-busy={summaryLoading}>
         <div className="activity-timeline-header">
-          <h2>Activity over time</h2>
+          <div className="flex items-center gap-2">
+            <h2>Activity over time</h2>
+            <Button variant="outline" size="icon" type="button" aria-label="Refresh activity" title="Refresh activity" disabled={loading || summaryLoading} onClick={() => setRefreshVersion((current) => current + 1)}><RefreshCw size={16} /></Button>
+          </div>
           <ActivityTimePicker value={timeRange} onChange={(nextRange) => { setTimeRange(nextRange); setPage(1); }} />
         </div>
         <Suspense fallback={<ActivityTimelineLoading />}>
@@ -265,6 +307,8 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
           <span className="results-count" role={loading ? "status" : undefined}>{loading ? (initialLoading ? "Preparing activity…" : "Updating activity…") : `Showing ${firstResult}–${lastResult}${resultTotal}`}</span>
         </div>
 
+        {ruleNotice && <p className="activity-rule-notice" role="status">{ruleNotice}</p>}
+        {ruleError && <p className="activity-rule-notice" role="alert">{ruleError}</p>}
         {(loadError || summaryError) && <div className="activity-refresh-error" role="alert">
           <AlertTriangle size={18} aria-hidden="true" />
           <div><strong>{loadError ? "Couldn’t refresh activity" : "Activity totals unavailable"}</strong><p>{loadError ? (visibleEvents.length ? "The last loaded events are still shown. Try again in a moment." : "Try again in a moment to load events.") : "The event list is available, but totals and the timeline couldn’t be updated."}</p><details><summary>Technical details</summary><p>{[loadError, summaryError].filter(Boolean).join(" · ")}</p></details></div>
@@ -274,23 +318,24 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
         {!loadError && !loading && visibleEvents.length === 0 && <EmptyState title="No matching activity" body="Try another filter or point a device at Faro to begin collecting DNS activity." />}
         {!loadingRows && visibleEvents.length > 0 && (
           <div className="activity-table-wrap">
-            <Table className="monitor-table event-table">
-              <thead>
+            <Table role="table" aria-label="Activity events" className="monitor-table event-table">
+              <thead role="rowgroup">
                 {eventTable.getHeaderGroups().map((headerGroup) => (
-                  <tr key={headerGroup.id}>
+                  <tr role="row" key={headerGroup.id}>
                     {headerGroup.headers.map((header) => (
-                      <th key={header.id}>
+                      <th role="columnheader" scope="col" key={header.id}>
                         {header.isPlaceholder ? null : <eventTable.FlexRender header={header} />}
                       </th>
                     ))}
                   </tr>
                 ))}
               </thead>
-              <tbody>
+              <tbody role="rowgroup">
                 {eventTable.getRowModel().rows.map((row) => (
-                  <tr key={row.id}>
+                  <tr role="row" key={row.id}>
                     {row.getAllCells().map((cell) => (
-                      <td key={cell.id} className={eventCellClass(cell.column.id)}>
+                      <td role="cell" key={cell.id} data-field={cell.column.id} className={eventCellClass(cell.column.id)}>
+                        {["device", "type", "source"].includes(cell.column.id) && <span className="mobile-row-label" aria-hidden="true">{String(cell.column.columnDef.header)}</span>}
                         <eventTable.FlexRender cell={cell} />
                       </td>
                     ))}
@@ -313,6 +358,45 @@ export function QueryLog({ onDomainSelect, onDeviceSelect }: QueryLogProps) {
       </section>
     </div>
   );
+}
+
+function SelectedEvent({ eventID, onDomainSelect, onDeviceSelect, onViewActivity }: QueryLogProps & { readonly eventID: number }) {
+  const [event, setEvent] = useState<FaroEvent | null>(null);
+  const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    api.event(eventID, controller.signal).then((result) => {
+      if (!controller.signal.aborted) setEvent(result);
+    }).catch((failure: unknown) => {
+      if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : "Couldn’t load this event.");
+    });
+    return () => controller.abort();
+  }, [eventID, attempt]);
+
+  const domain = event?.domain;
+  const address = event?.client_ip;
+  return <section className="panel activity-event-detail" aria-label="Selected activity event">
+    <a href="/activity" onClick={(click) => {
+      if (!onViewActivity || click.button !== 0 || click.metaKey || click.ctrlKey || click.shiftKey || click.altKey) return;
+      click.preventDefault();
+      onViewActivity();
+    }}>View all activity</a>
+    {error && <div role="alert"><p>{error}</p><Button variant="outline" onClick={() => { setError(""); setAttempt((value) => value + 1); }}>Retry</Button></div>}
+    {!error && !event && <p role="status">Loading event…</p>}
+    {event && <>
+        <h2>{event.title}</h2>
+        {event.description && <p>{event.description}</p>}
+        <dl>
+          <div><dt>Time</dt><dd><time dateTime={event.timestamp}>{formatDate(event.timestamp)} · {formatTime(event.timestamp)}</time></dd></div>
+          <div><dt>Result</dt><dd><EventResult event={event} /></dd></div>
+          <div><dt>Type</dt><dd><EventType event={event} /></dd></div>
+          <div><dt>Source</dt><dd><ResolutionSource source={event.source} upstream={eventUpstream(event)} /></dd></div>
+          {domain && <div><dt>Domain</dt><dd><button type="button" className="table-domain-link" onClick={() => onDomainSelect(domain)}>{domain}</button></dd></div>}
+          {address && <div><dt>Device</dt><dd><button type="button" className="device-link" onClick={() => onDeviceSelect(address)}>{event.device_name || address}</button></dd></div>}
+        </dl>
+      </>}
+  </section>;
 }
 
 function eventCellClass(columnID: string) {

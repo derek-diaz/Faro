@@ -43,18 +43,13 @@ func BenchmarkHistoryReads(b *testing.B) {
 			}
 		}
 	})
-	b.Run("activity_counts", func(b *testing.B) {
+	b.Run("activity_summary", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			if _, err := activityCounts(ctx, store.DB, "", window); err != nil {
+			summary, err := loadActivitySummary(ctx, store.DB, "", window)
+			if err != nil {
 				b.Fatal(err)
 			}
-		}
-	})
-	b.Run("activity_timeline", func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			if _, err := activityTimelineFor(ctx, store.DB, "", "all", window); err != nil {
-				b.Fatal(err)
-			}
+			_ = summary.timeline("all")
 		}
 	})
 	b.Run("domain_sidebar", func(b *testing.B) {

@@ -1,3 +1,4 @@
+import "./blocklists.css";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { DialogSurface } from "@/components/DialogSurface";
 import { NativeSelect } from "@/components/ui/native-select";
@@ -7,7 +8,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { AlertCircle, AlertTriangle, CheckCircle2, Database, Download, Eye, Info, ListFilter, Network, Plus, RefreshCw, Search, ShieldCheck, Sparkles, Trash2, X } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useMemo, useRef, useState, type ReactNode, type SubmitEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type SubmitEvent } from "react";
 import { api, type Blocklist } from "@/api/client";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
@@ -15,6 +16,7 @@ import { blocklistCatalog, blocklistCategories, type BlocklistCategory, type Cat
 import { errorMessage, formatNumber, normalizeURL } from "@/utils/formatting";
 
 type BlocklistsProps = {
+  readonly listID?: number;
   readonly blocklists: Blocklist[];
   readonly refresh: () => Promise<void>;
 };
@@ -31,7 +33,7 @@ const categoryIcons: Record<BlocklistCategory, LucideIcon> = {
   Network,
 };
 
-export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
+export function Blocklists({ blocklists, refresh, listID }: BlocklistsProps) {
   const [view, setView] = useState<View>("installed");
   const [form, setForm] = useState({ name: "", url: "", enabled: true });
   const [showCustom, setShowCustom] = useState(false);
@@ -45,6 +47,11 @@ export function Blocklists({ blocklists, refresh }: BlocklistsProps) {
   const [catalogCompatibility, setCatalogCompatibility] = useState<"All" | CatalogBlocklist["compatibility"]>("All");
   const [notice, setNotice] = useState<Notice>(null);
   const [pendingRemoval, setPendingRemoval] = useState<Blocklist | null>(null);
+
+  const foundList = blocklists.some((item) => item.id === listID);
+  useEffect(() => {
+    if (foundList) document.getElementById(`installed-blocklist-${listID}`)?.focus();
+  }, [listID, foundList]);
 
   const enabledCount = blocklists.filter((blocklist) => blocklist.enabled).length;
   const entryCount = blocklists.reduce((total, blocklist) => total + (blocklist.entry_count ?? 0), 0);
@@ -297,7 +304,7 @@ function InstalledBlocklistTable({ blocklists, isInstalling, busy, onToggle, onR
   return (
     <div className="installed-blocklist-table">
       <div className="installed-blocklist-columns" aria-hidden="true"><span>List</span><span>Entries</span><span>Last updated</span><span>Status</span><span className="installed-actions-label">Actions</span></div>
-      {blocklists.map((blocklist) => <article className="installed-blocklist-row" key={blocklist.id} aria-label={blocklist.name}>
+      {blocklists.map((blocklist) => <article id={`installed-blocklist-${blocklist.id}`} tabIndex={-1} className="installed-blocklist-row" key={blocklist.id} aria-label={blocklist.name}>
         <div className="installed-list-identity">
           <span className="blocklist-source-mark" aria-hidden="true">{sourceInitial(blocklist)}</span>
           <div><strong>{blocklist.name}</strong><span>{sourceLabel(blocklist.url)} · {usageLabel(blocklist.protection_count)}</span></div>

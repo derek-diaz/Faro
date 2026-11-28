@@ -17,12 +17,14 @@ type deviceInventoryOptions struct {
 	sort        string
 	direction   string
 	activeToday bool
+	withHistory bool
 	paged       bool
 }
 
 type inventoryBaseDevice struct {
 	deviceID           int64
 	clientIP           string
+	lastQueryIP        string
 	name               string
 	unifiName          string
 	location           sql.NullString
@@ -106,7 +108,7 @@ func (handler *Handler) deviceInventory(responseWriter http.ResponseWriter, requ
 func parseDeviceInventoryOptions(request *http.Request) (deviceInventoryOptions, error) {
 	query := request.URL.Query()
 	paged := query.Get("format") == "page" || query.Has("page") || query.Has("page_size") ||
-		query.Has("search") || query.Has("sort") || query.Has("direction") || query.Has("active_today")
+		query.Has("search") || query.Has("sort") || query.Has("direction") || query.Has("active_today") || query.Has("with_history")
 	options := deviceInventoryOptions{
 		page:      1,
 		pageSize:  50,
@@ -128,7 +130,10 @@ func parseDeviceInventoryOptions(request *http.Request) (deviceInventoryOptions,
 	if options.pageSize, err = parseInventoryPageSize(query.Get("page_size"), options.pageSize); err != nil {
 		return options, err
 	}
-	if options.activeToday, err = parseInventoryActiveToday(query.Get("active_today")); err != nil {
+	if options.activeToday, err = parseInventoryBool("active_today", query.Get("active_today")); err != nil {
+		return options, err
+	}
+	if options.withHistory, err = parseInventoryBool("with_history", query.Get("with_history")); err != nil {
 		return options, err
 	}
 	if options.sort, err = normalizeInventorySort(options.sort); err != nil {
@@ -160,13 +165,13 @@ func parseInventoryPageSize(raw string, fallback int) (int, error) {
 	return value, nil
 }
 
-func parseInventoryActiveToday(raw string) (bool, error) {
+func parseInventoryBool(key, raw string) (bool, error) {
 	if raw == "" {
 		return false, nil
 	}
 	value, err := strconv.ParseBool(raw)
 	if err != nil {
-		return false, fmt.Errorf("active_today must be true or false")
+		return false, fmt.Errorf("%s must be true or false", key)
 	}
 	return value, nil
 }
@@ -197,10 +202,11 @@ func normalizeInventoryDirection(value, sortValue string) (string, error) {
 }
 
 func (handler *Handler) deviceInventoryRevision(request *http.Request) (string, error) {
-	var maxQueryID int64
+	var minQueryID, maxQueryID int64
 	var devicesUpdated, addressesUpdated, namesUpdated, classificationsUpdated, membershipsUpdated, profilesUpdated, recordsUpdated string
 	err := handler.store.DB.QueryRowContext(request.Context(), `
 		SELECT
+			COALESCE((SELECT MIN(id) FROM dns_queries), 0),
 			COALESCE((SELECT MAX(id) FROM dns_queries), 0),
 			COALESCE((SELECT MAX(updated_at) FROM devices), ''),
 			COALESCE((SELECT MAX(updated_at) FROM device_addresses), ''),
@@ -209,7 +215,7 @@ func (handler *Handler) deviceInventoryRevision(request *http.Request) (string, 
 			COALESCE((SELECT MAX(updated_at) FROM device_protection_memberships), ''),
 			COALESCE((SELECT MAX(updated_at) FROM protection_profiles), ''),
 			COALESCE((SELECT MAX(updated_at) FROM dns_records), '')
-	`).Scan(&maxQueryID, &devicesUpdated, &addressesUpdated, &namesUpdated, &classificationsUpdated, &membershipsUpdated, &profilesUpdated, &recordsUpdated)
+	`).Scan(&minQueryID, &maxQueryID, &devicesUpdated, &addressesUpdated, &namesUpdated, &classificationsUpdated, &membershipsUpdated, &profilesUpdated, &recordsUpdated)
 	if err != nil {
 		return "", err
 	}
@@ -219,28 +225,36 @@ func (handler *Handler) deviceInventoryRevision(request *http.Request) (string, 
 		discoveryRevision = handler.deviceNames.generation
 		handler.deviceNames.mu.Unlock()
 	}
-	return fmt.Sprintf("%d:%d:%s:%s:%s:%s:%s:%s:%s", discoveryRevision, maxQueryID, devicesUpdated, addressesUpdated,
+	return fmt.Sprintf("%d:%d:%d:%s:%s:%s:%s:%s:%s:%s", discoveryRevision, minQueryID, maxQueryID, devicesUpdated, addressesUpdated,
 		namesUpdated, classificationsUpdated, membershipsUpdated, profilesUpdated, recordsUpdated), nil
 }
 
 func deviceInventoryETag(revision, start string, options deviceInventoryOptions) string {
-	input := fmt.Sprintf("%s|%s|%d|%d|%s|%s|%s|%t", revision, start, options.page, options.pageSize, options.search, options.sort, options.direction, options.activeToday)
+	input := fmt.Sprintf("%s|%s|%d|%d|%s|%s|%s|%t|%t", revision, start, options.page, options.pageSize, options.search, options.sort, options.direction, options.activeToday, options.withHistory)
 	sum := sha256.Sum256([]byte(input))
 	return `"` + hex.EncodeToString(sum[:]) + `"`
 }
 
-const inventoryCTEs = `
-		WITH
+// Seek once per recorded device ID so even a database without planner statistics
+// reads only that device's rows since :start from the device/timestamp/action index.
+const inventoryDay = `
+		WITH RECURSIVE recorded_devices(id) AS (
+			SELECT MIN(device_id) FROM dns_queries
+			UNION ALL
+			SELECT (SELECT MIN(device_id) FROM dns_queries WHERE device_id > recorded_devices.id)
+			FROM recorded_devices WHERE id IS NOT NULL
+		),
 		day AS (
 			SELECT
 				device_id,
 				COUNT(*) AS total,
-				SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END) AS blocked,
-				MAX(timestamp) AS last_seen
+				SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END) AS blocked
 			FROM dns_queries
-			WHERE timestamp >= :start AND device_id IS NOT NULL
+			WHERE device_id IN (SELECT id FROM recorded_devices) AND timestamp >= :start
 			GROUP BY device_id
-		),
+		)`
+
+const inventoryCTEs = inventoryDay + `,
 		latest_address AS (
 			SELECT device_id, address
 			FROM (
@@ -264,10 +278,16 @@ const inventoryCTEs = `
 			WHERE position = 1
 		)`
 
+const inventoryDeviceName = "COALESCE(NULLIF(TRIM(d.name), ''), NULLIF(TRIM(un.name), ''), NULLIF(TRIM(local.name), ''), la.address, :unnamedDevice)"
+
 const inventoryFilter = `
 		FROM devices d
 		LEFT JOIN latest_address la ON la.device_id = d.id
 		LEFT JOIN day ON day.device_id = d.id
+		LEFT JOIN dns_queries last_query ON last_query.id = (
+			SELECT q.id FROM dns_queries q WHERE q.device_id = d.id
+			ORDER BY q.timestamp DESC, q.id DESC LIMIT 1
+		)
 		LEFT JOIN unifi_name un ON un.device_id = d.id
 		LEFT JOIN local_name local ON local.value = la.address
 		LEFT JOIN device_classifications classification ON classification.device_id = d.id
@@ -277,12 +297,14 @@ const inventoryFilter = `
 		LEFT JOIN protection_profiles legacy_profile ON legacy_profile.id = legacy.protection_id
 		LEFT JOIN protection_profiles default_profile ON default_profile.is_default = 1
 		WHERE (:activeOnly = 0 OR COALESCE(day.total, 0) > 0)
+		  AND (:withHistory = 0 OR last_query.id IS NOT NULL)
 		  AND (
 		       :search = ''
-		       OR LOWER(d.name) LIKE :pattern
+		       OR LOWER(` + inventoryDeviceName + `) LIKE :pattern
 		       OR LOWER(COALESCE(un.name, '')) LIKE :pattern
 		       OR LOWER(COALESCE(local.name, '')) LIKE :pattern
 		       OR LOWER(COALESCE(la.address, '')) LIKE :pattern
+		       OR (la.address IS NULL AND LOWER(last_query.client_ip) LIKE :pattern)
 		       OR LOWER(COALESCE(NULLIF(d.device_type, ''), classification.predicted_type, '')) LIKE :pattern
 		       OR LOWER(COALESCE(d.location, '')) LIKE :pattern
 		       OR LOWER(COALESCE(member_profile.name, legacy_profile.name, default_profile.name, 'Home')) LIKE :pattern
@@ -295,22 +317,23 @@ const inventoryFilter = `
 func (handler *Handler) loadDeviceInventory(request *http.Request, start string, options deviceInventoryOptions) ([]map[string]any, int, error) {
 	searchPattern := "%" + strings.ToLower(options.search) + "%"
 	sortExpression := map[string]string{
-		"device":     "LOWER(COALESCE(NULLIF(TRIM(d.name), ''), NULLIF(TRIM(un.name), ''), NULLIF(TRIM(local.name), ''), la.address, ''))",
+		"device":     "LOWER(" + inventoryDeviceName + ")",
 		"requests":   "COALESCE(day.total, 0)",
 		"blocked":    "COALESCE(day.blocked, 0)",
-		"last_seen":  "COALESCE(day.last_seen, d.last_seen_at, '')",
+		"last_seen":  "last_query.timestamp",
 		"protection": "LOWER(COALESCE(member_profile.name, legacy_profile.name, default_profile.name, 'Home'))",
 	}[options.sort]
 	order := strings.ToUpper(options.direction)
 
 	filterArgs := []any{
-		sql.Named("start", start), sql.Named("activeOnly", options.activeToday),
-		sql.Named("search", options.search), sql.Named("pattern", searchPattern),
+		sql.Named("start", start), sql.Named("activeOnly", options.activeToday), sql.Named("withHistory", options.withHistory),
+		sql.Named("search", options.search), sql.Named("pattern", searchPattern), sql.Named("unnamedDevice", unnamedDevice),
 	}
 	query := inventoryCTEs + `
 		SELECT
 			d.id,
 			COALESCE(la.address, ''),
+			COALESCE(last_query.client_ip, ''),
 			d.name,
 			COALESCE(un.name, ''),
 			d.location,
@@ -319,7 +342,7 @@ func (handler *Handler) loadDeviceInventory(request *http.Request, start string,
 			d.type_source,
 			COALESCE(day.total, 0),
 			COALESCE(day.blocked, 0),
-			COALESCE(day.last_seen, strftime('%Y-%m-%dT%H:%M:%SZ', d.last_seen_at)),
+			last_query.timestamp,
 			COALESCE(classification.predicted_type, 'Unknown'),
 			COALESCE(classification.category, 'unknown'),
 			COALESCE(classification.icon, 'monitor'),
@@ -347,7 +370,7 @@ func (handler *Handler) loadDeviceInventory(request *http.Request, start string,
 	for rows.Next() {
 		var device inventoryBaseDevice
 		if err := rows.Scan(
-			&device.deviceID, &device.clientIP, &device.name, &device.unifiName, &device.location, &device.notes,
+			&device.deviceID, &device.clientIP, &device.lastQueryIP, &device.name, &device.unifiName, &device.location, &device.notes,
 			&device.storedDeviceType, &device.storedTypeSource, &device.total, &device.blocked,
 			&device.lastSeen, &device.classificationType, &device.category, &device.icon,
 			&device.confidence, &device.identifierKind, &device.protectionID,
@@ -388,9 +411,6 @@ func buildDeviceInventoryItems(baseDevices []inventoryBaseDevice, addressesByDev
 			identity.DisplayName = device.name
 			identity.NameSource = "manual"
 		}
-		if identity.DisplayName == "" {
-			identity.DisplayName = fmt.Sprintf("Device %d", device.deviceID)
-		}
 		deviceType, confidence, typeSource := device.classificationType, device.confidence, "automatic"
 		if device.storedTypeSource == "manual" && validManualDeviceType(device.storedDeviceType) {
 			deviceType, confidence, typeSource = device.storedDeviceType, "high", "manual"
@@ -398,6 +418,7 @@ func buildDeviceInventoryItems(baseDevices []inventoryBaseDevice, addressesByDev
 		items = append(items, map[string]any{
 			"device_id":             device.deviceID,
 			"client_ip":             device.clientIP,
+			"last_query_ip":         device.lastQueryIP,
 			"addresses":             addresses,
 			"identity_source":       inventoryIdentitySource(identity.NameSource, device.identifierKind),
 			"name":                  device.name,
@@ -460,14 +481,7 @@ func (handler *Handler) inventoryAddresses(request *http.Request, devices []inve
 
 func (handler *Handler) inventorySummary(request *http.Request, start string) (deviceInventorySummary, error) {
 	var summary deviceInventorySummary
-	err := handler.store.DB.QueryRowContext(request.Context(), `
-		WITH day AS (
-			SELECT device_id, COUNT(*) AS total,
-			       SUM(CASE WHEN action = 'blocked' THEN 1 ELSE 0 END) AS blocked
-			FROM dns_queries
-			WHERE timestamp >= ? AND device_id IS NOT NULL
-			GROUP BY device_id
-		),
+	err := handler.store.DB.QueryRowContext(request.Context(), inventoryDay+`,
 		most_active AS (
 			SELECT device_id, total FROM day ORDER BY total DESC, device_id LIMIT 1
 		)
@@ -482,13 +496,13 @@ func (handler *Handler) inventorySummary(request *http.Request, start string) (d
  ), (
 					SELECT address FROM device_addresses
 					WHERE device_id = d.id ORDER BY last_seen_at DESC, id DESC LIMIT 1
-				), 'None')
+				), ?)
 				FROM most_active active
 				JOIN devices d ON d.id = active.device_id
 				LEFT JOIN device_names n ON n.device_id = d.id AND n.source = 'unifi'
 			), 'None'),
 			COALESCE((SELECT total FROM most_active), 0)
-	`, start).Scan(
+	`, sql.Named("start", start), unnamedDevice).Scan(
 		&summary.Observed, &summary.ActiveToday, &summary.RequestsToday, &summary.BlockedToday,
 		&summary.MostActiveName, &summary.MostActiveRequests,
 	)

@@ -11,9 +11,9 @@ export function SetupRail({ currentStep, username }: { readonly currentStep: num
   return (
     <aside className="onboarding-rail setup-rail">
       <div className="onboarding-brand"><BrandLogo /><div><strong className="brand-wordmark">Faro</strong><span>Initial setup</span></div></div>
-      <ol>
+      <ol aria-label="Setup progress">
         {setupStages.map((stage, index) => (
-          <li key={stage.label} className={setupStageClass(index, currentStep)}>
+          <li key={stage.label} className={setupStageClass(index, currentStep)} aria-current={index === currentStep ? "step" : undefined} aria-label={`Step ${index + 1} of ${setupStages.length}, ${stage.label}`}>
             <span>{index < currentStep ? <Check size={14} /> : index + 1}</span>
             <div><strong>{stage.label}</strong><small>{stage.detail}</small></div>
           </li>
